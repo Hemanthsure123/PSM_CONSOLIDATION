@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"c:/Users/NXTWAVE/Downloads/consolidating\" && sleep 8 && cat /tmp/devserver.log)",
+      "Read(//tmp/**)"
+    ]
+  }
+}

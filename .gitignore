@@ -1,0 +1,16 @@
+node_modules
+.next
+out
+build
+.env
+.env.local
+.env*.local
+*.log
+npm-debug.log*
+.DS_Store
+.vercel
+*.tsbuildinfo
+next-env.d.ts
+
+# Locally-saved AI screening PDFs (fallback when Drive has no quota)
+public/reports
