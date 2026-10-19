@@ -2,26 +2,51 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Design tokens (see docs/design-system.md). HSL triplets so Tailwind can apply opacity
+ * (bg-primary/10). Light theme only — this is an office tool used all day.
+ */
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
-    --primary: 243 75% 59%;
-    --primary-foreground: 210 40% 98%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --ring: 243 75% 59%;
-    --radius: 0.6rem;
+    /* Surfaces */
+    --background: 220 33% 96.5%; /* canvas  #F3F5F9 */
+    --card: 0 0% 100%; /* surface #FFFFFF */
+    --card-foreground: 218 46% 15%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 218 46% 15%;
+
+    /* Text */
+    --foreground: 218 46% 15%; /* ink #152238 */
+    --muted: 218 33% 95%; /* #EEF1F6 */
+    --muted-foreground: 216 14% 42%; /* #5B6779 — 5.6:1 on white */
+
+    /* Brand action — NxtWave blue */
+    --primary: 223 76% 50%; /* #1F57E0 */
+    --primary-foreground: 0 0% 100%;
+    --accent: 222 85% 95.5%; /* blue tint #EBF1FE */
+    --accent-foreground: 223 75% 40%;
+
+    --secondary: 220 30% 93.5%; /* #E9EDF4 */
+    --secondary-foreground: 218 46% 15%;
+
+    /* Status */
+    --destructive: 4 63% 48%; /* #C8372D */
+    --destructive-foreground: 0 0% 100%;
+    --danger-soft: 5 82% 96%;
+    --success: 158 78% 27%; /* #0F7B55 */
+    --success-soft: 152 50% 94%;
+    --warning: 36 100% 30%; /* #9A5B00 */
+    --warning-soft: 40 92% 94%;
+    /* The shortlist highlighter — used ONLY for "shortlisted / selected" marks. */
+    --highlight: 67 86% 69%; /* #E3F46B */
+    --highlight-foreground: 68 70% 13%;
+
+    /* Lines */
+    --border: 217 28% 91%; /* #E1E6EE */
+    --input: 218 23% 85%; /* #D2D9E3 */
+    --ring: 223 76% 50%;
+
+    --radius: 0.625rem;
   }
 }
 
@@ -29,7 +54,53 @@
   * {
     @apply border-border;
   }
+  html {
+    -webkit-text-size-adjust: 100%;
+  }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background font-sans text-[14px] leading-[1.5] text-foreground;
+    text-rendering: optimizeLegibility;
+  }
+  /* Plain CSS (not @apply) so this file never depends on a config-defined utility. */
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display), var(--font-sans), ui-sans-serif, system-ui, sans-serif;
+    letter-spacing: -0.015em;
+  }
+  ::selection {
+    background: hsl(var(--highlight));
+    color: hsl(var(--highlight-foreground));
+  }
+  /* Numbers line up in tables and stats. */
+  table,
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  :focus-visible {
+    outline: 2px solid hsl(var(--ring));
+    outline-offset: 2px;
+  }
+  /* Quieter scrollbars inside panels and tables. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: hsl(var(--input)) transparent;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer components {
+  /* Native <select> / <textarea> styled like Input (used where a component would be overkill). */
+  .field-control {
+    @apply flex w-full rounded-lg border border-input bg-card px-3 text-sm text-foreground shadow-[0_1px_0_rgba(16,24,40,0.03)] transition-colors placeholder:text-muted-foreground/80 hover:border-[hsl(218_20%_75%)] focus-visible:border-primary focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/15 disabled:cursor-not-allowed disabled:bg-muted disabled:opacity-70;
   }
 }

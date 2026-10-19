@@ -1,8 +1,9 @@
 "use server";
 
 import { SchemaType, type Schema, type Part } from "@google/generative-ai";
-import { geminiGenerateJson } from "@/lib/gemini-keys";
-import { hasProviderKeys, pooledChatJson, type ChatProvider } from "@/lib/key-pool";
+import { geminiGenerateJson, geminiJsonForModel } from "@/lib/gemini-keys";
+import { ChatPoolError, filePart, hasProviderKeys, pooledChatJson, strictJsonSchema, type ChatProvider } from "@/lib/key-pool";
+import { escalate, type EscalationTier, type TierResult } from "@/lib/llm-escalation";
 import { fetchResumeBytes, type ResumeBytes } from "@/lib/resume";
 import { pdfBufferToText } from "@/lib/pdf-text";
 import { env } from "@/lib/env";
@@ -567,6 +568,8 @@ export interface DomainFit {
   presentationScore: number;
   /** One line naming what drives the presentation score ("" = not checked). */
   presentationNotes: string;
+  /** The model that gave this judgement, e.g. "gemini/gemini-3.6-flash". */
+  scoredBy: string;
 }
 
 /** Clamp any LLM-returned score to a 0-100 integer (0 when unusable). */
@@ -575,23 +578,31 @@ function clamp100(v: unknown): number {
   return Number.isFinite(n) ? Math.max(0, Math.min(100, Math.round(n))) : 0;
 }
 
-function normalizeDomainFit(raw: string): DomainFit {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch {
-    return {
-      domainScore: 0,
-      coreSkills: [],
-      evidence: "",
-      meetsMandatory: false,
-      hasDomainExperience: false,
-      experience: "",
-      presentationScore: 0,
-      presentationNotes: "",
-    };
+/** Parse a model's JSON answer, tolerating a ```json fence or prose around the object. */
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  const text = (raw ?? "").trim().replace(/^```(?:json)?\s*/i, "").replace(/```\s*$/, "");
+  for (const candidate of [text, text.slice(text.indexOf("{"), text.lastIndexOf("}") + 1)]) {
+    try {
+      const v = JSON.parse(candidate) as unknown;
+      if (v && typeof v === "object" && !Array.isArray(v)) return v as Record<string, unknown>;
+    } catch {
+      /* try the next form */
+    }
   }
-  const p = (parsed ?? {}) as Record<string, unknown>;
+  return null;
+}
+
+/**
+ * The model's domain-fit answer, or null when it is unusable — unreadable JSON, no
+ * numeric domainScore, or a passing score with no skill and no evidence behind it.
+ * An unusable answer must never pass as "score 0, no fit": the caller tries the next
+ * provider and, failing that, reports a retryable error.
+ */
+function normalizeDomainFit(raw: string): Omit<DomainFit, "scoredBy"> | null {
+  const p = parseJsonObject(raw);
+  if (!p) return null;
+  const rawScore = typeof p.domainScore === "number" ? p.domainScore : Number(p.domainScore);
+  if (p.domainScore === undefined || p.domainScore === null || p.domainScore === "" || !Number.isFinite(rawScore)) return null;
   const domainScore = clamp100(p.domainScore);
   const coreSkills = (Array.isArray(p.coreSkills) ? p.coreSkills : [])
     .map(str)
@@ -601,10 +612,13 @@ function normalizeDomainFit(raw: string): DomainFit {
   // Default true so a run WITHOUT mandatory requirements never spuriously gates;
   // the model only returns false when it was asked to check and one is missing.
   const meetsMandatory = p.meetsMandatory === undefined ? true : Boolean(p.meetsMandatory);
+  const evidence = str(p.evidence).replace(/\s+/g, " ").trim();
+  // A real fit always names what proves it; a 55+ score with nothing behind it is a broken answer.
+  if (domainScore >= 55 && !coreSkills.length && !evidence) return null;
   return {
     domainScore,
     coreSkills,
-    evidence: str(p.evidence).replace(/\s+/g, " ").trim(),
+    evidence,
     meetsMandatory,
     hasDomainExperience: Boolean(p.hasDomainExperience),
     experience: str(p.experience).replace(/\s+/g, " ").trim(),
@@ -642,7 +656,7 @@ export async function analyzeCandidateForDomain(
     `Assess this resume's fit for the domain, its core skills, the strongest evidence, whether every mandatory requirement is met, and any domain-relevant internship/work experience.`;
 
   // The presentation rubric is layout-aware, so it only fully applies when the
-  // model actually SEES the page (Gemini reading the PDF natively). Text-only
+  // model actually SEES the page (Gemini or OpenAI reading the PDF itself). Text-only
   // providers — and text/* resumes — get the degraded, text-signal variant.
   const withRubric = (visual: boolean) =>
     checkPresentation
@@ -658,28 +672,156 @@ export async function analyzeCandidateForDomain(
     cachedText = isTextResume ? resume.data.toString("utf8") : await pdfBufferToText(resume.data);
     return cachedText;
   };
-  const fromText = (run: (t: string, i: string, task: LlmTask) => Promise<string>) => async () => {
+  const textPrompt = async (): Promise<string> => {
     const t = await getText();
     if (!t || t.trim().length < 30) throw new Error("no extractable text in the resume PDF");
-    return run(t, textInstruction, DOMAIN_TASK);
+    return `${textInstruction}\n\nResume text:\n\n${t.slice(0, 20000)}`;
+  };
+  // A model's raw answer → a judgement, or "unusable" (never a silent score of 0).
+  const judge = (raw: string): TierResult<Omit<DomainFit, "scoredBy">> => {
+    const fit = normalizeDomainFit(raw);
+    return fit
+      ? { ok: true, value: fit }
+      : { ok: false, kind: "unusable", detail: "unreadable JSON, no domainScore, or a score with no evidence" };
   };
 
-  const providers: { name: string; enabled: boolean; run: () => Promise<string> }[] = [
-    { name: "gemini", enabled: true, run: () => geminiAnalyze(resume, visualInstruction, DOMAIN_TASK) },
-    { name: "groq", enabled: hasProviderKeys("groq"), run: fromText(groqGenerate) },
-    { name: "mistral", enabled: hasProviderKeys("mistral"), run: fromText(mistralGenerate) },
-  ];
-
-  const errors: string[] = [];
-  for (const p of providers) {
-    if (!p.enabled) continue;
-    try {
-      return { ok: true, data: normalizeDomainFit(await p.run()) };
-    } catch (err) {
-      const m = err instanceof Error ? err.message : String(err);
-      console.warn(`[llm:domain] ${p.name} failed: ${m.slice(0, 160)}`);
-      errors.push(`${p.name}: ${m.slice(0, 120)}`);
+  const tiers: EscalationTier<Omit<DomainFit, "scoredBy">>[] = [];
+  for (const { provider, model } of domainChain()) {
+    if (provider === "gemini") {
+      tiers.push({
+        provider,
+        model,
+        label: `gemini/${model}`,
+        run: async () => {
+          const parts: string | Array<string | Part> = isTextResume
+            ? `${visualInstruction}\n\nResume text:\n\n${resume.data.toString("utf8").slice(0, 20000)}`
+            : [{ inlineData: { mimeType: resume.mimeType || "application/pdf", data: resume.data.toString("base64") } }, visualInstruction];
+          const res = await geminiJsonForModel(parts, model, {
+            systemInstruction: DOMAIN_TASK.system,
+            schema: DOMAIN_TASK.schema,
+            temperature: DOMAIN_TASK.temperature,
+            timeoutMs: DOMAIN_GEMINI_TIMEOUT_MS,
+          });
+          return res.ok ? judge(res.text) : { ok: false, kind: res.kind, detail: res.detail };
+        },
+      });
+    } else if (provider === "openai") {
+      // The PDF itself first (same view Gemini gets), then its text — a file OpenAI
+      // can't read must not cost the candidate an OpenAI judgement.
+      if (!isTextResume) {
+        tiers.push({ provider, model, label: `openai/${model} (pdf)`, run: () => openaiDomainJudge(model, visualInstruction, resume, judge) });
+      }
+      tiers.push({ provider, model, label: `openai/${model}`, run: async () => openaiDomainJudge(model, await textPrompt(), null, judge) });
+    } else {
+      tiers.push({
+        provider,
+        model,
+        label: `${provider}/${model}`,
+        run: async () => {
+          const user = await textPrompt();
+          try {
+            const { text } = await pooledChatJson(provider, model, {
+              system: `${DOMAIN_TASK.system}\n\n${DOMAIN_TASK.shapeHint}`,
+              user,
+              temperature: DOMAIN_TASK.temperature,
+              timeoutMs: 90_000,
+            });
+            return judge(text);
+          } catch (err) {
+            return poolFailure(err);
+          }
+        },
+      });
     }
   }
-  return { ok: false, error: `Could not assess the resume for the domain. (${errors.join(" | ")})` };
+
+  const res = await escalate(tiers, DOMAIN_LEAVE_ON, (line) => console.warn(`[llm:domain] ${line}`));
+  if (res.ok) {
+    if (res.provider !== "gemini") console.warn(`[llm:domain] judged by fallback ${res.label}`);
+    return { ok: true, data: { ...res.value, scoredBy: `${res.provider}/${res.model}` } };
+  }
+  return { ok: false, error: `${DOMAIN_RETRY_PREFIX} (${res.error})` };
+}
+
+/** Start of the error when every model failed (quota, overload, unusable answers) — a retry can succeed. */
+const DOMAIN_RETRY_PREFIX = "Could not assess the resume for the domain";
+
+/**
+ * Domain judgement chain — quality first, never a "lite" model:
+ *  1. Gemini: GEMINI_MODEL first (the model past runs were judged by), then the 3.x Flash
+ *     models — each has its own quota on every key, so they add capacity. A model that is
+ *     rate-limited, out of quota or overloaded is skipped at once, no sleeping;
+ *  2. OpenAI (OPENAI_MODEL, default gpt-5.4-mini then gpt-5.5, reasoning off — see env.ts)
+ *     when Gemini can't answer; it reads the PDF too;
+ *  3. Mistral's strongest free-tier model, ONLY when OpenAI is rate-limited / out of quota.
+ * Models checked against these keys on 2026-10-14 (2.5-flash answers only on keys created
+ * before its retirement). Override with DOMAIN_LLM_CHAIN="provider:model,…".
+ */
+function domainChain(): { provider: "gemini" | ChatProvider; model: string }[] {
+  const gemini = Array.from(
+    new Set([
+      ...env.gemini.model.split(",").map((m) => m.trim()).filter((m) => m && !/lite/i.test(m)),
+      "gemini-3.6-flash",
+      "gemini-3.8-flash",
+      "gemini-3.5-flash",
+      "gemini-3-flash-preview",
+    ]),
+  );
+  const spec =
+    env.domain.llmChain.trim() ||
+    [...gemini.map((m) => `gemini:${m}`), ...env.openai.models.map((m) => `openai:${m}`), "mistral:ministral-14b-latest"].join(",");
+  const out: { provider: "gemini" | ChatProvider; model: string }[] = [];
+  for (const entry of spec.split(",")) {
+    const [p, ...rest] = entry.trim().split(":");
+    const provider = p?.trim().toLowerCase();
+    const model = rest.join(":").trim();
+    if (!model) continue;
+    if (provider === "gemini" && env.gemini.apiKeys.length) out.push({ provider, model });
+    else if ((provider === "openai" || provider === "mistral" || provider === "groq") && hasProviderKeys(provider)) out.push({ provider, model });
+  }
+  return out;
+}
+
+/** Leave Gemini on any failure (OpenAI is as capable); leave OpenAI only when it is throttled. */
+const DOMAIN_LEAVE_ON: Record<string, "any" | "throttle"> = { gemini: "any", openai: "throttle", mistral: "throttle", groq: "throttle" };
+
+/** One Gemini request is cut off after this; the model is then skipped briefly on every key. */
+const DOMAIN_GEMINI_TIMEOUT_MS = 75_000;
+
+/** A key-pool failure → escalation kind: capacity problems are "rate", the rest "error". */
+function poolFailure(err: unknown): TierResult<never> {
+  const detail = err instanceof Error ? err.message : String(err);
+  if (err instanceof ChatPoolError) {
+    if (err.kind === "model") return { ok: false, kind: "unavailable", detail };
+    if (err.kind === "exhausted" && err.throttled) return { ok: false, kind: "rate", detail };
+  }
+  return { ok: false, kind: "error", detail };
+}
+
+/** One OpenAI judgement — the PDF itself when `pdf` is given, else `prompt` holds the text. */
+async function openaiDomainJudge(
+  model: string,
+  prompt: string,
+  pdf: ResumeBytes | null,
+  judge: (raw: string) => TierResult<Omit<DomainFit, "scoredBy">>,
+): Promise<TierResult<Omit<DomainFit, "scoredBy">>> {
+  try {
+    const { text } = await pooledChatJson("openai", model, {
+      system: DOMAIN_TASK.system,
+      user: prompt,
+      userParts: pdf
+        ? [filePart({ mimeType: pdf.mimeType || "application/pdf", data: pdf.data.toString("base64") }), { type: "text", text: prompt }]
+        : undefined,
+      jsonSchema: { name: "domain_fit", schema: strictJsonSchema(DOMAIN_TASK.schema) },
+      reasoningEffort: env.openai.reasoningEffort,
+      temperature: DOMAIN_TASK.temperature,
+      timeoutMs: 120_000,
+      // Every key rate-limited for a moment (a per-minute burst) → wait up to 5 s and try
+      // OpenAI again; a longer limit goes straight to Mistral.
+      maxWaitMs: 5_000,
+    });
+    return judge(text);
+  } catch (err) {
+    return poolFailure(err);
+  }
 }

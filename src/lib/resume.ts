@@ -76,25 +76,72 @@ async function fetchFromDrive(fileId: string): Promise<ResumeBytes | null> {
 
 async function fetchFromUrl(url: string): Promise<ResumeBytes | null> {
   const res = await fetch(url, { signal: AbortSignal.timeout(URL_TIMEOUT_MS), redirect: "follow", cache: "no-store" });
+  if (res.status === 429 || res.status >= 500) throw Object.assign(new Error(`HTTP ${res.status}`), { status: res.status });
   if (!res.ok) return null;
   const buf = Buffer.from(await res.arrayBuffer());
   const mimeType = res.headers.get("content-type")?.split(";")[0] || "application/pdf";
   return { data: buf, mimeType };
 }
 
-export async function fetchResumeBytes(url: string): Promise<ResumeBytes | null> {
+/**
+ * A Drive file shared "anyone with the link" but not with the service account is
+ * invisible to the API; its public download URL still works. An HTML reply is a
+ * sign-in / not-found page, never the resume.
+ */
+async function fetchDrivePublic(fileId: string): Promise<ResumeBytes | null> {
+  const res = await fetch(`https://drive.usercontent.google.com/download?id=${encodeURIComponent(fileId)}&export=download`, {
+    signal: AbortSignal.timeout(URL_TIMEOUT_MS),
+    redirect: "follow",
+    cache: "no-store",
+  });
+  const type = res.headers.get("content-type")?.split(";")[0] ?? "";
+  if (!res.ok || type.startsWith("text/html")) return null;
+  return { data: Buffer.from(await res.arrayBuffer()), mimeType: type === "application/octet-stream" ? "application/pdf" : type || "application/pdf" };
+}
+
+export type ResumeFetch = { ok: true; bytes: ResumeBytes } | { ok: false; transient: boolean; error: string };
+
+/**
+ * A network failure, a timeout, a rate limit or a 5xx says nothing about the
+ * resume — the caller should retry. A 404 / 403 means the file is gone or not
+ * shared.
+ */
+function isTransient(err: unknown): boolean {
+  const e = err as { code?: unknown; status?: unknown; name?: string; message?: string; response?: { status?: number } };
+  const status = Number(e?.response?.status ?? e?.status ?? (typeof e?.code === "number" ? e.code : NaN));
+  if (Number.isFinite(status)) return status === 429 || status >= 500;
+  const text = `${String(e?.code ?? "")} ${e?.name ?? ""} ${e?.message ?? ""}`;
+  return /ENOTFOUND|EAI_AGAIN|ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|socket hang up|network|timeout|timed out|aborted|fetch failed/i.test(text);
+}
+
+/** The resume's bytes, or why not — and whether trying again later could help. */
+export async function fetchResume(url: string): Promise<ResumeFetch> {
   const u = (url ?? "").trim();
-  if (!/^https?:\/\//i.test(u)) return null;
+  if (!/^https?:\/\//i.test(u)) return { ok: false, transient: false, error: "not a link" };
 
   try {
     if (isDriveUrl(u)) {
       const fileId = extractDriveFileId(u);
-      if (!fileId) return null;
-      return await fetchFromDrive(fileId);
+      if (!fileId) return { ok: false, transient: false, error: "no Drive file id in the link" };
+      try {
+        const bytes = await fetchFromDrive(fileId);
+        if (bytes) return { ok: true, bytes };
+        return { ok: false, transient: false, error: "Drive returned no file" };
+      } catch (err) {
+        const viaLink = await fetchDrivePublic(fileId).catch(() => null);
+        if (viaLink) return { ok: true, bytes: viaLink };
+        throw err;
+      }
     }
-    return await fetchFromUrl(u);
+    const bytes = await fetchFromUrl(u);
+    return bytes ? { ok: true, bytes } : { ok: false, transient: false, error: "the link did not return a file" };
   } catch (err) {
     console.warn("[resume] failed to fetch resume bytes:", err instanceof Error ? err.message : err);
-    return null;
+    return { ok: false, transient: isTransient(err), error: err instanceof Error ? err.message.slice(0, 200) : String(err) };
   }
+}
+
+export async function fetchResumeBytes(url: string): Promise<ResumeBytes | null> {
+  const r = await fetchResume(url);
+  return r.ok ? r.bytes : null;
 }

@@ -1,9 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle, CheckCircle2 } from "lucide-react";
+import { CheckCircle2 } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Notice } from "@/components/ui/notice";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Textarea } from "@/components/ui/textarea";
 import { parseQaPaste, type ParsedQaRow } from "@/lib/qa-parse";
 import type { QaCandidateInput } from "@/lib/qa-types";
+import { cn } from "@/lib/utils";
 
 interface QaPasteProps {
   batch: number;
@@ -12,9 +17,6 @@ interface QaPasteProps {
   onParsed: (candidates: QaCandidateInput[]) => void;
   disabled?: boolean;
 }
-
-const textareaClass =
-  "min-h-[180px] w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60";
 
 /**
  * Paste box for one batch: rows copied from a sheet (mobile + resume link, or
@@ -44,58 +46,78 @@ export function QaPaste({ batch, existing, onParsed, disabled }: QaPasteProps) {
 
   return (
     <div className="space-y-3">
-      <textarea
-        className={textareaClass}
+      <Textarea
+        aria-label={`Candidate rows for batch ${batch}`}
+        className="min-h-[180px] text-[13px] tabular-nums"
         value={text}
         disabled={disabled}
         spellCheck={false}
         onChange={(e) => setText(e.target.value)}
         placeholder={
-          "Paste rows copied from your sheet — one candidate per row:\n" +
+          "Paste rows copied from your sheet, one candidate per row:\n" +
           "9876543210\thttps://drive.google.com/file/d/…/view\n" +
           "9123456780\thttps://drive.google.com/file/d/…/view\n\n" +
-          "Columns: mobile number (the candidate's ID) and resume link — any order; a name column is optional.\n" +
+          "Columns: mobile number (the candidate's ID) and resume link, in any order. A name column is optional.\n" +
           "The resume column may also hold the resume text itself."
         }
       />
+
       {rows.length ? (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-          <span className="inline-flex items-center gap-1.5 text-emerald-700">
-            <CheckCircle2 className="h-4 w-4" /> {valid.length} candidate{valid.length === 1 ? "" : "s"} ready
-            {pasted ? ` (${pasted} with pasted resume text)` : ""}
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[13px]" aria-live="polite">
+          <span className={cn("inline-flex items-center gap-1.5 font-medium", valid.length ? "text-success" : "text-muted-foreground")}>
+            <CheckCircle2 className="h-4 w-4" />
+            <span>
+              <span className="tabular-nums">{valid.length}</span> candidate{valid.length === 1 ? "" : "s"} ready
+            </span>
           </span>
-          {problems.length ? (
-            <button
-              type="button"
-              className="inline-flex items-center gap-1.5 text-amber-700 hover:underline"
-              onClick={() => setShowProblems((v) => !v)}
-            >
-              <AlertTriangle className="h-4 w-4" /> {problems.length} row{problems.length === 1 ? "" : "s"} skipped —{" "}
-              {showProblems ? "hide" : "show why"}
-            </button>
+          {pasted ? (
+            <span className="text-muted-foreground">
+              <span className="tabular-nums">{pasted}</span> with pasted resume text
+            </span>
           ) : null}
         </div>
       ) : null}
+
+      {problems.length ? (
+        <Notice
+          tone="warning"
+          title={
+            <>
+              <span className="tabular-nums">{problems.length}</span> row{problems.length === 1 ? "" : "s"} skipped
+            </>
+          }
+          action={
+            <Button type="button" variant="outline" size="sm" onClick={() => setShowProblems((v) => !v)}>
+              {showProblems ? "Hide" : "Show why"}
+            </Button>
+          }
+        >
+          These rows can&apos;t be screened as pasted. Fix them in the sheet and paste again.
+        </Notice>
+      ) : null}
+
       {showProblems && problems.length ? (
-        <div className="max-h-56 overflow-auto rounded-md border text-xs">
-          <table className="w-full">
-            <thead className="sticky top-0 bg-muted text-left">
-              <tr>
-                <th className="px-2 py-1 font-medium">Row</th>
-                <th className="px-2 py-1 font-medium">Problem</th>
-                <th className="px-2 py-1 font-medium">Row content</th>
-              </tr>
-            </thead>
-            <tbody>
+        <div className="overflow-hidden rounded-lg border">
+          <Table containerClassName="max-h-56">
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead className="w-16 text-right">Row</TableHead>
+                <TableHead>Problem</TableHead>
+                <TableHead>Row content</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {problems.slice(0, 300).map((p) => (
-                <tr key={p.row} className="border-t">
-                  <td className="px-2 py-1 tabular-nums">{p.row}</td>
-                  <td className="px-2 py-1 text-amber-800">{p.problem}</td>
-                  <td className="px-2 py-1 font-mono text-muted-foreground">{p.preview}</td>
-                </tr>
+                <TableRow key={p.row}>
+                  <TableCell className="py-2 text-right tabular-nums text-muted-foreground">{p.row}</TableCell>
+                  <TableCell className="py-2 text-warning">{p.problem}</TableCell>
+                  <TableCell className="max-w-[280px] truncate py-2 text-muted-foreground" title={p.preview}>
+                    {p.preview}
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       ) : null}
     </div>

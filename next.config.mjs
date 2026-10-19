@@ -10,6 +10,9 @@ const nextConfig = {
       "@google-cloud/bigquery",
       "googleapis",
       "tar-stream",
+      // Candidate Bucketing's LangGraph workflow — Node-only, loaded as-is at runtime.
+      "@langchain/langgraph",
+      "@langchain/core",
     ],
     // Assignment Evaluation uploads the assignment PDF through a server action.
     serverActions: {

@@ -1,12 +1,14 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, Code2, Download, ExternalLink, Link2Off, Sigma, Trophy, Users } from "lucide-react";
+import { ArrowLeft, Download, ExternalLink, Link2Off, Sigma, Users } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { EmptyState } from "@/components/ui/empty-state";
+import { Panel } from "@/components/ui/panel";
+import { Stat, StatGrid } from "@/components/ui/stat";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { StatTile } from "@/components/charts";
+import { SERIES } from "@/components/charts";
 import { cn, toCsv, slugify } from "@/lib/utils";
 import { DSA_PLATFORMS, platformOf, type DsaPlatformResult, type DsaResult } from "@/lib/dsa-types";
 
@@ -51,7 +53,12 @@ const FIELD_LABEL: Record<Field, string> = {
   rating: "Rating",
 };
 
-const ACCENT: Record<string, string> = { leetcode: "#f59e0b", codeforces: "#ef4444", codechef: "#8b5cf6" };
+/** Identity colour per platform — a fixed series slot each (the mark carries it, text stays in ink). */
+const PLATFORM_COLOR: Record<string, string> = { leetcode: SERIES[0], codeforces: SERIES[1], codechef: SERIES[2] };
+
+function PlatformDot({ platform }: { platform: string }) {
+  return <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: PLATFORM_COLOR[platform] }} aria-hidden />;
+}
 
 export function DsaResultsView({ results, title, subtitle, onBack, backLabel = "Back", headerRight }: DsaResultsViewProps) {
   const summary = React.useMemo(() => {
@@ -126,117 +133,119 @@ export function DsaResultsView({ results, title, subtitle, onBack, backLabel = "
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          {onBack ? (
-            <Button variant="ghost" size="sm" onClick={onBack}>
-              <ArrowLeft className="h-4 w-4" /> {backLabel}
-            </Button>
-          ) : null}
-          <div>
-            <h2 className="flex items-center gap-2 text-lg font-semibold">
-              <Code2 className="h-4 w-4 text-muted-foreground" /> {title}
-            </h2>
-            {subtitle ? <p className="text-sm text-muted-foreground">{subtitle}</p> : null}
-          </div>
+      {onBack ? (
+        <Button variant="ghost" size="sm" onClick={onBack} className="-ml-2">
+          <ArrowLeft className="h-4 w-4" /> {backLabel}
+        </Button>
+      ) : null}
+
+      {/* The run */}
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div className="min-w-0">
+          <h2 className="truncate font-display text-[20px] font-semibold leading-7 tracking-[-0.015em]">{title}</h2>
+          {subtitle ? <p className="text-[13px] text-muted-foreground">{subtitle}</p> : null}
         </div>
-        <div className="flex items-center gap-2">
-          {headerRight}
-          <Button onClick={download} disabled={results.length === 0}>
+        {headerRight ? <div className="flex flex-wrap items-center gap-2">{headerRight}</div> : null}
+      </div>
+
+      <StatGrid cols={6} className="sm:grid-cols-3">
+        <Stat icon={<Users />} label="Candidates" value={results.length} />
+        {DSA_PLATFORMS.map(({ key, label }) => (
+          <Stat key={key} icon={<PlatformDot platform={key} />} label={`With ${label}`} value={summary.withLink[key]} />
+        ))}
+        <Stat icon={<Sigma />} label="Total solved" value={summary.totalSolved} />
+        <Stat icon={<Link2Off />} label="No DSA links" value={summary.noLinks} hint="None in the sheet or resume" />
+      </StatGrid>
+
+      <Panel
+        flush
+        title="Solved, contests and rating"
+        description="Contests are rated contests. Hover a cell for the handle and any fetch note."
+        actions={
+          <Button size="sm" onClick={download} disabled={results.length === 0}>
             <Download className="h-4 w-4" /> Download CSV
           </Button>
-        </div>
-      </div>
-
-      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
-        <StatTile icon={<Users className="h-5 w-5" />} label="Candidates" value={results.length} accent="#4f46e5" />
-        {DSA_PLATFORMS.map(({ key, label }) => (
-          <StatTile
-            key={key}
-            icon={<Code2 className="h-5 w-5" />}
-            label={`With ${label}`}
-            value={summary.withLink[key]}
-            accent={ACCENT[key]}
-          />
-        ))}
-        <StatTile icon={<Sigma className="h-5 w-5" />} label="Total solved" value={summary.totalSolved} accent="#10b981" />
-      </div>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Trophy className="h-4 w-4 text-muted-foreground" /> Solved · contests · rating
-          </CardTitle>
-          <CardDescription className="flex items-center gap-1.5">
-            <Link2Off className="h-3.5 w-3.5" /> {summary.noLinks} candidate
-            {summary.noLinks === 1 ? "" : "s"} had no LeetCode / Codeforces / CodeChef link in the sheet or resume.
-            Contests are rated contests; hover a cell for the handle and any fetch note.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <div className="overflow-x-auto rounded-md border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead rowSpan={2} className="align-bottom">Mobile</TableHead>
-                  <TableHead rowSpan={2} className="align-bottom">Resume</TableHead>
-                  {DSA_PLATFORMS.map(({ key, label }) => (
-                    <TableHead key={key} colSpan={3} className="border-l text-center">
-                      {label}
-                    </TableHead>
-                  ))}
-                  <TableHead rowSpan={2} className="border-l text-right align-bottom">Total solved</TableHead>
-                  <TableHead rowSpan={2} className="align-bottom">Status</TableHead>
-                </TableRow>
-                <TableRow>
-                  {DSA_PLATFORMS.map(({ key }) => (
-                    <React.Fragment key={key}>
-                      <TableHead className="border-l text-right text-xs">Solved</TableHead>
-                      <TableHead className="text-right text-xs">Contests</TableHead>
-                      <TableHead className="text-right text-xs">Rating</TableHead>
-                    </React.Fragment>
-                  ))}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {results.map((r) => (
-                  <TableRow key={r.id}>
-                    <TableCell className="whitespace-nowrap font-medium">
-                      {r.mobile || <span className="text-muted-foreground">—</span>}
-                    </TableCell>
-                    <TableCell>
-                      {/^https?:\/\//i.test(r.resumeUrl) ? (
-                        <a
-                          href={r.resumeUrl}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="inline-flex items-center gap-1 text-primary hover:underline"
-                        >
-                          Open <ExternalLink className="h-3 w-3" />
-                        </a>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                    {DSA_PLATFORMS.map(({ key }) => (
-                      <PlatformCells key={key} platform={platformOf(r, key)} />
-                    ))}
-                    <TableCell className="border-l text-right font-semibold tabular-nums">
-                      {r.totalSolved !== null ? r.totalSolved : <span className="text-muted-foreground">—</span>}
-                    </TableCell>
-                    <TableCell>
-                      <StatusBadge status={r.status} />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+        }
+      >
+        {results.length === 0 ? (
+          <div className="border-t p-4">
+            <EmptyState icon={<Users />} title="No candidates yet" description="Rows appear here as profiles are read." className="py-10" />
           </div>
-        </CardContent>
-      </Card>
+        ) : (
+          <Table containerClassName="max-h-[560px] border-t">
+            <TableHeader>
+              <TableRow>
+                <TableHead rowSpan={2} className="align-bottom">
+                  Mobile
+                </TableHead>
+                <TableHead rowSpan={2} className="align-bottom">
+                  Resume
+                </TableHead>
+                {DSA_PLATFORMS.map(({ key, label }) => (
+                  <TableHead key={key} colSpan={3} className="h-9 border-l text-center">
+                    <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
+                      <PlatformDot platform={key} />
+                      {label}
+                    </span>
+                  </TableHead>
+                ))}
+                <TableHead rowSpan={2} className="border-l text-right align-bottom">
+                  Total solved
+                </TableHead>
+                <TableHead rowSpan={2} className="align-bottom">
+                  Status
+                </TableHead>
+              </TableRow>
+              <TableRow>
+                {DSA_PLATFORMS.map(({ key }) => (
+                  <React.Fragment key={key}>
+                    <TableHead className="h-9 border-l text-right first:pl-3">Solved</TableHead>
+                    <TableHead className="h-9 text-right">Contests</TableHead>
+                    <TableHead className="h-9 text-right last:pr-3">Rating</TableHead>
+                  </React.Fragment>
+                ))}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {results.map((r) => (
+                <TableRow key={r.id}>
+                  <TableCell className="whitespace-nowrap font-medium tabular-nums">
+                    {r.mobile || <span className="text-muted-foreground">—</span>}
+                  </TableCell>
+                  <TableCell>
+                    {/^https?:\/\//i.test(r.resumeUrl) ? (
+                      <a
+                        href={r.resumeUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        title={r.resumeUrl}
+                        className="inline-flex items-center gap-1 rounded text-primary hover:underline focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/25"
+                      >
+                        Open <ExternalLink className="h-3 w-3" />
+                      </a>
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  {DSA_PLATFORMS.map(({ key }) => (
+                    <PlatformCells key={key} platform={platformOf(r, key)} />
+                  ))}
+                  <TableCell className="border-l text-right font-semibold tabular-nums">
+                    {r.totalSolved !== null ? r.totalSolved : <span className="font-normal text-muted-foreground">—</span>}
+                  </TableCell>
+                  <TableCell>
+                    <StatusBadge status={r.status} />
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        )}
+      </Panel>
     </div>
   );
 }
+
 
 function numberOrBlank(n: number | null | undefined): string {
   return typeof n === "number" ? String(n) : "";
@@ -273,7 +282,7 @@ function PlatformCells({ platform }: { platform: DsaPlatformResult }) {
 }
 
 function StatusBadge({ status }: { status: DsaResult["status"] }) {
-  const variant: "success" | "secondary" | "destructive" | "outline" =
-    status === "ok" ? "success" : status === "partial" ? "secondary" : status === "error" ? "destructive" : "outline";
+  const variant: "success" | "warning" | "destructive" | "outline" =
+    status === "ok" ? "success" : status === "partial" ? "warning" : status === "error" ? "destructive" : "outline";
   return <Badge variant={variant}>{STATUS_LABEL[status]}</Badge>;
 }

@@ -1,11 +1,18 @@
 "use client";
 
 import * as React from "react";
-import { ClipboardList, Home, Loader2, Play, ShieldCheck } from "lucide-react";
+import { ChevronRight, ClipboardList, Loader2, Play, Users } from "lucide-react";
+import { useReportBusy } from "@/components/busy-context";
+import { ActionBar } from "@/components/ui/action-bar";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Disclosure } from "@/components/ui/disclosure";
+import { Field } from "@/components/ui/field";
+import { InfoHint } from "@/components/ui/info-hint";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Notice } from "@/components/ui/notice";
+import { Panel } from "@/components/ui/panel";
+import { NativeSelect } from "@/components/ui/select";
 import { QaPaste } from "@/components/qa-screening/qa-paste";
 import { CONCURRENCY_OPTIONS, QaResults, RulesCard } from "@/components/qa-screening/qa-results";
 import { rankCandidates, summarize } from "@/lib/qa-scoring";
@@ -46,7 +53,6 @@ const UI_FLUSH_MS = 400;
 const META_SAVE_MS = 3_000;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const fieldClass = "h-9 w-full rounded-md border border-input bg-background px-2 text-sm";
 const NO_EXISTING = new Map<string, number>();
 
 /**
@@ -71,6 +77,8 @@ export function QaScreening({ runId, onDone }: QaScreeningProps) {
   const [storageError, setStorageError] = React.useState("");
   const [firstRows, setFirstRows] = React.useState<QaCandidateInput[]>([]);
   const [error, setError] = React.useState("");
+  // Leaving from the sidebar mid-run asks first.
+  useReportBusy(running);
 
   // The run loop outlives renders: it reads and writes through refs, and the UI
   // is refreshed on a short timer instead of once per resume.
@@ -285,7 +293,7 @@ export function QaScreening({ runId, onDone }: QaScreeningProps) {
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
+      <div className="flex items-center gap-2 py-16 text-[13px] text-muted-foreground" role="status">
         <Loader2 className="h-4 w-4 animate-spin" /> Opening the saved run…
       </div>
     );
@@ -317,106 +325,102 @@ export function QaScreening({ runId, onDone }: QaScreeningProps) {
   }
 
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardContent className="flex items-center gap-4 py-4">
-          <Button variant="ghost" size="sm" onClick={onDone} className="shrink-0">
-            <Home className="h-4 w-4" /> Dashboard
-          </Button>
-          <div className="min-w-0">
-            <h2 className="flex items-center gap-2 text-base font-semibold">
-              <ShieldCheck className="h-4 w-4 text-muted-foreground" /> QA Resume Screening
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              Screen large pools for the QA role: every resume is checked for the mandatory and good-to-have QA skills in
-              its Skills, Projects and Experience — with the exact resume words as evidence — then ranked. Paste batches
-              of any size; download the complete ranking or only the shortlist.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <ClipboardList className="h-4 w-4" /> The QA requirement
-          </CardTitle>
-          <CardDescription>
-            Mandatory items must be in Skills, Projects and Experience for 100%; good-to-have items raise the score.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-1 font-medium">Mandatory:</span>
-            {MANDATORY.map((d) => (
-              <span key={d.key} className="rounded bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
-                {d.label}
-              </span>
-            ))}
-          </div>
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span className="mr-1 font-medium">Good to have:</span>
-            {[...GOOD_TO_HAVE.map((d) => d.label), HANDS_ON_LABEL].map((l) => (
-              <span key={l} className="rounded bg-muted px-2 py-0.5 text-xs">
-                {l}
-              </span>
-            ))}
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Run</CardTitle>
-          <CardDescription>
-            One run holds the whole pool — add the next batch from the results page; ranking and downloads cover every
-            batch.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="qa-name">Run name</Label>
+    <div className="w-full max-w-3xl space-y-6">
+      <Panel
+        title="Candidates"
+        description="Name the run, then paste batch 1 from your sheet."
+        icon={<Users />}
+        actions={
+          <InfoHint label="About batches and resume links" align="end">
+            Copy the mobile-number and resume columns from your sheet and paste them here, up to a few thousand rows at a time.
+            The mobile number is the candidate&apos;s ID. Resume links must be shared with the service account or public. One
+            run holds the whole pool: add the next batch from the results page, and the ranking and downloads cover every batch.
+          </InfoHint>
+        }
+      >
+        <div className="space-y-4">
+          <Field label="Run name" htmlFor="qa-name" hint="Used for the saved run and the CSV file names.">
             <Input id="qa-name" placeholder="e.g. QA drive — Oct 2026" value={name} onChange={(e) => setName(e.target.value)} />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="qa-conc">Resumes screened in parallel</Label>
-            <select id="qa-conc" value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))} className={fieldClass}>
-              {CONCURRENCY_OPTIONS.map((n) => (
-                <option key={n} value={n}>
-                  {n} at a time{n === 12 ? " (recommended)" : ""}
-                </option>
+          </Field>
+          <Field label="Batch 1 rows">
+            <QaPaste batch={1} existing={NO_EXISTING} onParsed={setFirstRows} />
+          </Field>
+        </div>
+      </Panel>
+
+      <Panel
+        title="QA requirement"
+        description="Mandatory items must be in Skills, Projects and Experience for 100%. Good-to-have items raise the score."
+        icon={<ClipboardList />}
+      >
+        <div className="space-y-4 text-[13px]">
+          <div className="space-y-2">
+            <p className="font-medium">
+              Mandatory <span className="font-normal tabular-nums text-muted-foreground">({MANDATORY.length})</span>
+            </p>
+            <div className="flex flex-wrap gap-1.5">
+              {MANDATORY.map((d) => (
+                <Badge key={d.key} variant="default">
+                  {d.label}
+                </Badge>
               ))}
-            </select>
+            </div>
           </div>
-        </CardContent>
-      </Card>
+          <details className="group border-t pt-3">
+            <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 rounded-md font-medium focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/25 [&::-webkit-details-marker]:hidden">
+              <ChevronRight className="h-4 w-4 text-muted-foreground transition-transform duration-150 group-open:rotate-90" />
+              Good to have{" "}
+              <span className="font-normal tabular-nums text-muted-foreground">({GOOD_TO_HAVE.length + 1})</span>
+            </summary>
+            <div className="mt-2.5 flex flex-wrap gap-1.5">
+              {[...GOOD_TO_HAVE.map((d) => d.label), HANDS_ON_LABEL].map((l) => (
+                <Badge key={l} variant="secondary">
+                  {l}
+                </Badge>
+              ))}
+            </div>
+          </details>
+        </div>
+      </Panel>
 
       <RulesCard rules={rules} onChange={setRules} />
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Batch 1 — paste candidates</CardTitle>
-          <CardDescription>
-            Copy the mobile-number and resume columns from your sheet and paste them here (up to a few thousand rows at a
-            time). The mobile number is the candidate&apos;s ID; resume links must be shared with the service account or
-            public.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <QaPaste batch={1} existing={NO_EXISTING} onParsed={setFirstRows} />
-        </CardContent>
-      </Card>
+      <Disclosure title="Advanced options" summary={`${concurrency} resumes at a time`}>
+        <Field
+          label="Resumes screened in parallel"
+          htmlFor="qa-conc"
+          hint="12 suits most runs. You can change it on the results page too."
+          className="max-w-xs"
+        >
+          <NativeSelect id="qa-conc" value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))}>
+            {CONCURRENCY_OPTIONS.map((n) => (
+              <option key={n} value={n}>
+                {n} at a time{n === 12 ? " (recommended)" : ""}
+              </option>
+            ))}
+          </NativeSelect>
+        </Field>
+      </Disclosure>
 
-      {error ? <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p> : null}
+      {error ? <Notice tone="danger">{error}</Notice> : null}
 
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {!name.trim() ? "Name the run to start." : firstRows.length ? `${firstRows.length} candidates ready.` : "Paste at least one candidate."}
-        </p>
+      <ActionBar
+        status={
+          !name.trim() ? (
+            "Name the run to start."
+          ) : firstRows.length ? (
+            <span className="font-medium text-foreground">
+              <span className="tabular-nums">{firstRows.length}</span> candidates ready.
+            </span>
+          ) : (
+            "Paste at least one candidate."
+          )
+        }
+      >
         <Button size="lg" onClick={start} disabled={!firstRows.length || !name.trim()}>
           <Play className="h-4 w-4" /> Start screening
         </Button>
-      </div>
+      </ActionBar>
     </div>
   );
 }

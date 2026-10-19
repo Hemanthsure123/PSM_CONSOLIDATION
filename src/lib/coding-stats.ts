@@ -216,6 +216,19 @@ async function cfApi<T>(path: string, timeoutMs: number): Promise<CfResponse<T> 
 
 const cfNotFound = (comment?: string) => /not found|should contain between/i.test(comment ?? "");
 
+/**
+ * Codeforces keeps a renamed account's old handle as an alias: user.info resolves it
+ * to the current handle, but user.rating / user.status only accept the current one
+ * (and answer "not found" for the old). Returns the current handle when `handle` is a
+ * renamed account's old handle, else null.
+ */
+async function cfRenamedHandle(handle: string): Promise<string | null> {
+  const res = await cfApi<{ handle?: string }[]>(`user.info?handles=${encodeURIComponent(handle)}`, 15_000);
+  if (res.status !== "OK") return null;
+  const current = res.result?.[0]?.handle;
+  return current && current.toLowerCase() !== handle.toLowerCase() ? current : null;
+}
+
 async function codeforcesSolvedCount(handle: string): Promise<{ solved: number | null; note: string; found: boolean | null }> {
   // Heavy accounts have thousands of submissions — give this call real time.
   const res = await cfApi<{ verdict?: string; problem?: { contestId?: number; index?: string; name?: string } }[]>(
@@ -238,17 +251,28 @@ async function codeforcesSolvedCount(handle: string): Promise<{ solved: number |
 }
 
 export async function getCodeforcesStats(profileUrl: string): Promise<PlatformStats | null> {
-  const handle = parseCodeforcesHandle(profileUrl);
+  let handle = parseCodeforcesHandle(profileUrl);
   if (!handle) return null;
   try {
-    const history = await cfApi<{ newRating?: number }[]>(`user.rating?handle=${encodeURIComponent(handle)}`, 15_000);
+    const ratingOf = (h: string) => cfApi<{ newRating?: number }[]>(`user.rating?handle=${encodeURIComponent(h)}`, 15_000);
+    let history = await ratingOf(handle);
+    let renamedTo = "";
     if (history.status === "FAILED" && cfNotFound(history.comment)) {
-      return { found: false, solved: null, contests: null, rating: null, maxRating: null, note: "Profile not found" };
+      // An old handle of a renamed account (the resume predates the rename) — follow it.
+      const current = await cfRenamedHandle(handle);
+      if (current) {
+        renamedTo = current;
+        handle = current;
+        history = await ratingOf(current);
+      }
+      if (history.status === "FAILED" && cfNotFound(history.comment)) {
+        return { found: false, solved: null, contests: null, rating: null, maxRating: null, note: "Profile not found" };
+      }
     }
     let contests: number | null = null;
     let rating: number | null = null;
     let maxRating: number | null = null;
-    const notes: string[] = [];
+    const notes: string[] = renamedTo ? [`handle renamed to ${renamedTo}`] : [];
     if (history.status === "OK" && Array.isArray(history.result)) {
       contests = history.result.length;
       const ratings = history.result.map((r) => Number(r.newRating)).filter((n) => Number.isFinite(n));
@@ -278,7 +302,10 @@ export async function getCodeforcesSolved(profileUrl: string): Promise<number | 
   const handle = parseCodeforcesHandle(profileUrl);
   if (!handle) return null;
   try {
-    return (await codeforcesSolvedCount(handle)).solved;
+    const s = await codeforcesSolvedCount(handle);
+    if (s.found !== false) return s.solved;
+    const current = await cfRenamedHandle(handle);
+    return current ? (await codeforcesSolvedCount(current)).solved : null;
   } catch (err) {
     console.warn("[coding-stats] codeforces failed:", errText(err));
     return null;

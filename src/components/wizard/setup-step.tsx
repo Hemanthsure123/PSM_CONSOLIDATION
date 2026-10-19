@@ -1,12 +1,12 @@
 "use client";
 
 import * as React from "react";
-import { Building2, CheckCircle2, FileSpreadsheet, Link2, Loader2 } from "lucide-react";
+import { Building2, FileSpreadsheet, Link2, Loader2, Table2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
+import { Panel } from "@/components/ui/panel";
+import { Field } from "@/components/ui/field";
+import { Notice } from "@/components/ui/notice";
 import { listSubsheets } from "@/actions/sheets";
 import {
   companySheetName,
@@ -115,78 +115,88 @@ export function SetupStep({ state, patch }: StepProps) {
   };
 
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <Building2 className="h-4 w-4" /> Company
-          </CardTitle>
-          <CardDescription>
-            Name the company this drive is for. The consolidated sheet will be named{" "}
-            <strong>{companySheetName(state.companyName)}</strong>.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-2">
-          <Label htmlFor="company">Company name</Label>
+    <div className="max-w-3xl space-y-6">
+      <Panel title="Company" icon={<Building2 />}>
+        <Field
+          label="Company name"
+          htmlFor="company"
+          hint={
+            <>
+              The company sheet will be named{" "}
+              <span className="font-medium text-foreground">{companySheetName(state.companyName)}</span>.
+            </>
+          }
+        >
           <Input
             id="company"
             placeholder="e.g. Acme Corp"
             value={state.companyName}
             onChange={(e) => patch({ companyName: e.target.value })}
           />
-        </CardContent>
-      </Card>
+        </Field>
+      </Panel>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2">
-            <FileSpreadsheet className="h-4 w-4" /> Internal Sheet
-          </CardTitle>
-          <CardDescription>
-            Paste the Google Sheets link. The sheet must be shared with the service
-            account (Viewer). We&apos;ll list its subsheets next.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Link2 className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                className="pl-9"
-                placeholder="https://docs.google.com/spreadsheets/d/…"
-                value={state.spreadsheetUrl}
-                onChange={(e) => patch({ spreadsheetUrl: e.target.value, subsheets: [], spreadsheetTitle: "" })}
-                onKeyDown={(e) => e.key === "Enter" && state.spreadsheetUrl.trim() && fetchTabs()}
-              />
+      <Panel
+        title="Internal sheet"
+        icon={<FileSpreadsheet />}
+        description="The Google Sheet that holds the candidates. Its subsheets are listed next."
+      >
+        <div className="space-y-4">
+          <Field
+            label="Google Sheets link"
+            htmlFor="sheet-url"
+            info="Share the sheet with the service account as a Viewer first, or it can't be read."
+          >
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <div className="relative flex-1">
+                <Link2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  id="sheet-url"
+                  className="pl-9"
+                  placeholder="https://docs.google.com/spreadsheets/d/…"
+                  value={state.spreadsheetUrl}
+                  onChange={(e) => patch({ spreadsheetUrl: e.target.value, subsheets: [], spreadsheetTitle: "" })}
+                  onKeyDown={(e) => e.key === "Enter" && state.spreadsheetUrl.trim() && fetchTabs()}
+                />
+              </div>
+              <Button variant="soft" onClick={fetchTabs} disabled={pending || !state.spreadsheetUrl.trim()}>
+                {pending ? <Loader2 className="animate-spin" /> : <FileSpreadsheet />}
+                {pending ? "Reading…" : "Fetch subsheets"}
+              </Button>
             </div>
-            <Button onClick={fetchTabs} disabled={pending || !state.spreadsheetUrl.trim()}>
-              {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
-              {pending ? "Reading…" : "Fetch Subsheets"}
-            </Button>
-          </div>
+          </Field>
 
           {error ? (
-            <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
+            <Notice tone="danger" title="Couldn't read the sheet">
+              {error}
+            </Notice>
           ) : null}
 
           {state.subsheets.length > 0 ? (
-            <div className="space-y-3">
-              <span className="inline-flex items-center gap-2 text-sm text-emerald-700">
-                <CheckCircle2 className="h-4 w-4" />
-                {state.spreadsheetTitle} · {state.subsheets.length} subsheet
+            <div className="space-y-2">
+              <Notice tone="success" title={state.spreadsheetTitle || undefined}>
+                <span className="tabular-nums">{state.subsheets.length}</span> subsheet
                 {state.subsheets.length === 1 ? "" : "s"} found.
-              </span>
-              <div className="flex flex-wrap gap-2">
+              </Notice>
+              <ul className="divide-y rounded-lg border">
                 {state.subsheets.map((s) => (
-                  <Badge key={s.name} variant="secondary">
-                    {s.name} · {s.headers.length} cols · {s.rowCount} rows
-                  </Badge>
+                  <li key={s.name} className="flex items-center justify-between gap-3 px-3.5 py-2 text-[13px]">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <Table2 className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      <span className="truncate" title={s.name}>
+                        {s.name}
+                      </span>
+                    </span>
+                    <span className="shrink-0 tabular-nums text-muted-foreground">
+                      {s.headers.length} columns · {s.rowCount} rows
+                    </span>
+                  </li>
                 ))}
-              </div>
+              </ul>
             </div>
           ) : null}
-        </CardContent>
-      </Card>
+        </div>
+      </Panel>
     </div>
   );
 }

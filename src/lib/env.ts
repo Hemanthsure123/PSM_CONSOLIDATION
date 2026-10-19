@@ -26,17 +26,21 @@ function optional(name: string, fallback: string): string {
 }
 
 /**
- * A comma-separated key POOL (e.g. MISTRAL_API_KEYS) with the single-key var
- * (MISTRAL_API_KEY) as fallback — deduplicated, never throws, [] when unset.
+ * Every key configured for a provider: the comma-separated POOL (e.g.
+ * MISTRAL_API_KEYS), the numbered vars (MISTRAL_API_KEY_1, MISTRAL_API_KEY_2, …)
+ * and the single var (MISTRAL_API_KEY) — deduplicated, never throws, [] when unset.
  */
 function keyPool(poolName: string, singleName: string): string[] {
-  const pool = (process.env[poolName] ?? "")
-    .split(",")
-    .map((k) => k.trim())
+  const pool = (process.env[poolName] ?? "").split(",");
+  const numbered = Object.keys(process.env)
+    .map((name) => ({ name, n: Number(name.slice(singleName.length + 1)) }))
+    .filter(({ name, n }) => name.startsWith(`${singleName}_`) && Number.isInteger(n) && n > 0)
+    .sort((a, b) => a.n - b.n)
+    .map(({ name }) => process.env[name] ?? "");
+  const keys = [...pool, ...numbered, process.env[singleName] ?? ""]
+    .map((k) => k.trim().replace(/^["']|["']$/g, ""))
     .filter(Boolean);
-  if (pool.length > 0) return Array.from(new Set(pool));
-  const single = (process.env[singleName] ?? "").trim();
-  return single ? [single] : [];
+  return Array.from(new Set(keys));
 }
 
 /**
@@ -106,11 +110,42 @@ export const env = {
     },
   },
   /** Optional fallback LLM providers (used when Gemini's daily quota is hit). */
+  openai: {
+    /** Round-robin pool: OPENAI_API_KEYS (comma-separated), OPENAI_API_KEY_1…N, OPENAI_API_KEY. */
+    get apiKeys(): string[] {
+      return keyPool("OPENAI_API_KEYS", "OPENAI_API_KEY");
+    },
+    /**
+     * Models for the Domain Shortlisting fallback, best-calibrated first (OPENAI_MODEL,
+     * comma-separated). Each model has its own daily request allowance on every key —
+     * 50/day per model per key on the current keys — so a second model adds capacity.
+     */
+    get models(): string[] {
+      const list = optional("OPENAI_MODEL", "gpt-5.4-mini,gpt-5.5")
+        .split(",")
+        .map((m) => m.trim())
+        .filter(Boolean);
+      return Array.from(new Set(list));
+    },
+    /** The first (preferred) OpenAI model. */
+    get model() {
+      return this.models[0] ?? "gpt-5.4-mini";
+    },
+    /**
+     * Reasoning effort for GPT-5-family models: none | low | medium | high. "none" by
+     * default: on real resumes (2026-10-14) every reasoning setting scored well below the
+     * domain prompt's own rubric (failing full-stack candidates with real projects and
+     * internships), while "none" matched the Gemini judgements and the rubric bands.
+     */
+    get reasoningEffort() {
+      return optional("OPENAI_REASONING_EFFORT", "none");
+    },
+  },
   groq: {
     get apiKey() {
       return optional("GROQ_API_KEY", "");
     },
-    /** Round-robin pool: GROQ_API_KEYS (comma-separated), else GROQ_API_KEY. */
+    /** Round-robin pool: GROQ_API_KEYS (comma-separated), GROQ_API_KEY_1…N, GROQ_API_KEY. */
     get apiKeys(): string[] {
       return keyPool("GROQ_API_KEYS", "GROQ_API_KEY");
     },
@@ -122,7 +157,7 @@ export const env = {
     get apiKey() {
       return optional("MISTRAL_API_KEY", "");
     },
-    /** Round-robin pool: MISTRAL_API_KEYS (comma-separated), else MISTRAL_API_KEY. */
+    /** Round-robin pool: MISTRAL_API_KEYS (comma-separated), MISTRAL_API_KEY_1…N, MISTRAL_API_KEY. */
     get apiKeys(): string[] {
       return keyPool("MISTRAL_API_KEYS", "MISTRAL_API_KEY");
     },
@@ -167,6 +202,24 @@ export const env = {
       return optional("QA_LLM_CHAIN", "");
     },
   },
+  domain: {
+    /**
+     * Chain for Domain Shortlisting's resume judgement, "provider:model,…".
+     * Empty = the built-in default in actions/llm.ts (Gemini → OpenAI → Mistral).
+     */
+    get llmChain() {
+      return optional("DOMAIN_LLM_CHAIN", "");
+    },
+  },
+  zaggle: {
+    /**
+     * Chain for the Zaggle SDE 1 screening, "provider:model,…".
+     * Empty = the built-in default in zaggle/evaluator.ts (Gemini → OpenAI → Mistral).
+     */
+    get llmChain() {
+      return optional("ZAGGLE_LLM_CHAIN", "");
+    },
+  },
   benchmarks: {
     /**
      * Chain for Benchmark Projects, "provider:model,…".
@@ -176,10 +229,32 @@ export const env = {
       return optional("BENCHMARK_LLM_CHAIN", "");
     },
   },
+  bucketing: {
+    /**
+     * Chain for Candidate Bucketing's producing agents (extraction, domain analyst,
+     * bucketing agent), "provider:model,…". Empty = the default in bucketing/config.ts.
+     */
+    get llmChain() {
+      return optional("BUCKETING_LLM_CHAIN", "");
+    },
+    /** Chain for the verifying agents — should lead with a different model than the producers. */
+    get verifierChain() {
+      return optional("BUCKETING_VERIFIER_CHAIN", "");
+    },
+  },
   github: {
     /** Personal Access Token used to fetch candidate GitHub project stats. */
     get token() {
       return optional("GITHUB_TOKEN", "");
+    },
+    /** Hours a Domain Shortlisting GitHub inspection is reused (default 24; 0 = never cache). */
+    get cacheTtlHours() {
+      const hours = Number(optional("GITHUB_CACHE_TTL_HOURS", "24"));
+      return Number.isFinite(hours) && hours >= 0 ? hours : 24;
+    },
+    /** Folder for cached GitHub inspections ("" = .cache/github-inspect in the app folder). */
+    get cacheDir() {
+      return optional("GITHUB_CACHE_DIR", "");
     },
   },
 };

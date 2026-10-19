@@ -1,31 +1,11 @@
 "use server";
 
 import { fetchResumeBytes } from "@/lib/resume";
-import {
-  extractProfileLinksFromResume,
-  toLeetCodeUrl,
-  toCodeforcesUrl,
-  toCodeChefUrl,
-} from "@/lib/resume-links";
-import {
-  getLeetCodeStats,
-  getCodeforcesStats,
-  getCodeChefStats,
-  parseLeetCodeUser,
-  parseCodeforcesHandle,
-  parseCodeChefHandle,
-  type PlatformStats,
-} from "@/lib/coding-stats";
+import { extractProfileLinksFromResume } from "@/lib/resume-links";
+import { DSA_KEYS as KEYS, PLATFORM, resolveDsaPlatforms } from "@/lib/dsa-resolve";
 import { mapWithConcurrency } from "@/lib/rate-limit";
 import type { ActionResult } from "@/lib/types";
-import {
-  EMPTY_PLATFORM,
-  type DsaCandidateInput,
-  type DsaLinkSource,
-  type DsaPlatform,
-  type DsaPlatformResult,
-  type DsaResult,
-} from "@/lib/dsa-types";
+import { EMPTY_PLATFORM, type DsaCandidateInput, type DsaLinkSource, type DsaPlatform, type DsaResult } from "@/lib/dsa-types";
 
 /** Max candidates resolved concurrently within one batch (each platform is paced by its own token bucket). */
 const CONCURRENCY = 6;
@@ -47,22 +27,6 @@ function withDeadline<T>(work: Promise<T>, ms: number, fallback: () => T): Promi
   });
   return Promise.race([work.finally(() => clearTimeout(timer)), deadline]);
 }
-
-const PLATFORM = {
-  leetcode: { toUrl: toLeetCodeUrl, parse: parseLeetCodeUser, stats: getLeetCodeStats, label: "LeetCode" },
-  codeforces: { toUrl: toCodeforcesUrl, parse: parseCodeforcesHandle, stats: getCodeforcesStats, label: "Codeforces" },
-  codechef: { toUrl: toCodeChefUrl, parse: parseCodeChefHandle, stats: getCodeChefStats, label: "CodeChef" },
-} satisfies Record<
-  DsaPlatform,
-  {
-    toUrl: (v: string) => string;
-    parse: (url: string) => string | null;
-    stats: (url: string) => Promise<PlatformStats | null>;
-    label: string;
-  }
->;
-
-const KEYS: DsaPlatform[] = ["leetcode", "codeforces", "codechef"];
 
 /**
  * Resolve one candidate: find their LeetCode / Codeforces / CodeChef links
@@ -119,62 +83,20 @@ async function resolveOne(input: DsaCandidateInput): Promise<DsaResult> {
     }
   }
 
-  // 3. All three platforms in parallel — each is paced by its own host bucket.
-  const [lc, cf, cc] = await Promise.all(KEYS.map((k) => resolvePlatform(k, links[k].url, links[k].source)));
-  base.leetcode = lc;
-  base.codeforces = cf;
-  base.codechef = cc;
+  // 3. All three platforms in parallel — each is paced by its own host bucket (dsa-resolve.ts,
+  //    shared with Domain Shortlisting so both read the platforms the same way).
+  const r = await resolveDsaPlatforms(links);
+  base.leetcode = r.leetcode;
+  base.codeforces = r.codeforces;
+  base.codechef = r.codechef;
+  base.totalSolved = r.totalSolved;
+  base.totalContests = r.totalContests;
 
-  const platforms = [lc, cf, cc];
-  const sum = (pick: (p: DsaPlatformResult) => number | null | undefined) => {
-    const known = platforms.map(pick).filter((n): n is number => typeof n === "number");
-    return known.length ? known.reduce((a, b) => a + b, 0) : null;
-  };
-  base.totalSolved = sum((p) => p.solved);
-  base.totalContests = sum((p) => p.contests);
-
-  const linked = platforms.filter((p) => p.url);
   // "Complete" = the profile was read in full. A link to a profile that doesn’t exist,
   // or a platform that couldn’t be read, leaves the row "partial" (see the Notes column).
-  const complete = linked.filter((p) => p.found === true && p.solved !== null && p.contests !== null);
-  base.status =
-    linked.length === 0
-      ? base.error
-        ? "error"
-        : "no-links"
-      : complete.length === linked.length
-        ? "ok"
-        : "partial";
+  base.status = r.linked === 0 ? (base.error ? "error" : "no-links") : r.complete === r.linked ? "ok" : "partial";
 
   return base;
-}
-
-async function resolvePlatform(platform: DsaPlatform, url: string, source: DsaLinkSource): Promise<DsaPlatformResult> {
-  if (!url) return { ...EMPTY_PLATFORM, note: "No profile link found" };
-  const handle = PLATFORM[platform].parse(url) ?? "";
-  try {
-    const stats = await PLATFORM[platform].stats(url);
-    if (!stats) return { ...EMPTY_PLATFORM, url, handle, source, note: "Could not read the handle from the link" };
-    return {
-      url,
-      handle,
-      solved: stats.solved,
-      contests: stats.contests,
-      rating: stats.rating,
-      maxRating: stats.maxRating,
-      found: stats.found,
-      source,
-      note: stats.note || "OK",
-    };
-  } catch (err) {
-    return {
-      ...EMPTY_PLATFORM,
-      url,
-      handle,
-      source,
-      note: err instanceof Error ? err.message.slice(0, 120) : "Fetch failed",
-    };
-  }
 }
 
 /**

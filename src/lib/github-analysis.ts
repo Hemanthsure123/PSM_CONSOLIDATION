@@ -105,6 +105,35 @@ const COMMITS_PER_REPO = 100;
 
 // ── Public contract ─────────────────────────────────────────────────────────
 
+/**
+ * Version of the inspection logic. Part of every cached inspection's key: bump it whenever
+ * scoring, the technology catalogue or what is read changes, so no stale result is reused.
+ */
+export const GITHUB_ANALYSIS_VERSION = "2026-10-18.1";
+
+/** The strongest quotable proof behind one proven technology. */
+export interface TechProof {
+  tech: string;
+  /** Repo the proof comes from (the one that proves the tech best). */
+  repo: string;
+  repoUrl: string;
+  /** Where in the repo, e.g. "code:src/train.py", "manifest:requirements.txt", "tree". */
+  source: string;
+  /** The literal finding, e.g. "import torch in src/train.py". */
+  detail: string;
+}
+
+/** A mandatory technology the profile's code does not prove, and why. */
+export interface TechGap {
+  tech: string;
+  /** none = no trace at all; readme-only = only named in README / topics; weak = some code evidence, below the bar. */
+  reason: "none" | "readme-only" | "weak";
+  /** 0-100 confidence that was reached. */
+  confidence: number;
+  /** The best (insufficient) finding with its repo, "" when there is none. */
+  detail: string;
+}
+
 /** The JD split into must-have and nice-to-have technologies (human-readable labels). */
 export interface JdTechSpec {
   /** Technologies the JD marks mandatory — each one gates the 100-point ceiling. */
@@ -190,6 +219,10 @@ export interface GithubDeepAnalysis {
   assessable: boolean;
   /** Domain technologies proven by code / manifests / config across the profile, strongest first. */
   provenTechs: string[];
+  /** One quotable proof per proven technology, in `provenTechs` order. */
+  techEvidence: TechProof[];
+  /** Mandatory technologies the code does not prove (empty when none are mandatory or all are proven). */
+  mandatoryGaps: TechGap[];
   /** Newest own commit to a domain-relevant repo (null = none found). */
   lastDomainCommit: DomainCommit | null;
   /** "" normally; set when the run stopped early (rate limit / call budget) and the numbers are partial. */
@@ -431,6 +464,18 @@ interface TechDef {
   label: string;
   /** JD wording that should resolve to this tech. */
   aliases: string[];
+  /**
+   * Names that are everyday words in lower case ("go", "swift", "c"). They never match as
+   * plain wording — only as a list item of their own ("Java, Go, Python", "C / C++") or,
+   * two letters and longer, capitalised inside a sentence ("backend services in Go").
+   */
+  wordNames?: string[];
+  /**
+   * Path evidence ignores a cross-platform app's generated platform shells (Flutter / React
+   * Native ios/, macos/, linux/, windows/ … — see appShellTest): every Flutter app has an
+   * AppDelegate.swift and a CMakeLists.txt there, neither written by the candidate.
+   */
+  ignoreAppShells?: boolean;
   /** Good-to-have weight (mandatory slots ignore it). */
   weight: number;
   /**
@@ -579,7 +624,7 @@ const TECHS: TechDef[] = [
     aliases: [
       "llm", "llms", "large language model", "large language models", "gpt", "genai", "gen ai", "generative ai", "rag",
       "prompt engineering", "langchain", "llamaindex", "llama index", "vector database", "vector databases", "vector db",
-      "embeddings", "ai agents", "agentic ai", "langgraph",
+      "embeddings", "ai agents", "agentic ai", "langgraph", "ai agent", "openai", "gemini", "claude", "llama", "mistral",
     ],
     weight: 1,
     dists: [
@@ -968,13 +1013,72 @@ const TECHS: TechDef[] = [
     key: "android",
     label: "Android / Kotlin",
     aliases: ["android", "kotlin", "jetpack compose", "android studio", "android development"],
-    weight: 0.8,
+    weight: 1,
     langs: ["Kotlin", "Java"],
-    dists: ["appcompat", "core-ktx", "material", "kotlin-stdlib"],
+    dists: ["appcompat", "core-ktx", "material", "kotlin-stdlib", "activity-compose", "ui-tooling", "material3"],
     modules: ["android", "androidx", "kotlinx"],
+    calls: [
+      /@Composable\b/,
+      /\bclass\s+\w+\s*:\s*(?:AppCompat|Component|Fragment)?Activity\s*\(/,
+      /\bsetContent\s*\{/,
+      /\boverride\s+fun\s+onCreate\s*\(/,
+    ],
     strongArtifactPaths: [/(?:^|\/)AndroidManifest\.xml$/i],
     artifactPaths: [/\.kt$/i],
-    meta: ["android", "kotlin"],
+    meta: ["android", "kotlin", "jetpack-compose"],
+  },
+  {
+    key: "react-native",
+    label: "React Native",
+    aliases: ["react native", "react-native", "expo", "react native cli", "native modules"],
+    weight: 1,
+    langs: ["JavaScript", "TypeScript"],
+    // React Native's own runtime, Expo and the RN-only libraries — never plain web React.
+    dists: [
+      "react-native", "expo", "expo-router", "@react-navigation/native", "@react-navigation/native-stack",
+      "@react-navigation/stack", "@react-navigation/bottom-tabs", "react-native-reanimated", "react-native-gesture-handler",
+      "react-native-screens", "react-native-safe-area-context", "@react-native-async-storage/async-storage",
+      "react-native-mmkv", "@react-native-firebase/app", "react-native-vector-icons", "@expo/vector-icons",
+    ],
+    modules: ["react-native", "expo", "expo-router", "@react-navigation/native", "react-native-reanimated", "@react-native-async-storage/async-storage"],
+    calls: [
+      /\bStyleSheet\.create\s*\(/,
+      /\bAppRegistry\.registerComponent\s*\(/,
+      /<(?:SafeAreaView|FlatList|TouchableOpacity|Pressable)\b/,
+      /\bcreate(?:NativeStack|Stack|BottomTab)Navigator\s*\(/,
+    ],
+    infraPaths: [/(?:^|\/)metro\.config\.[cm]?js$/i, /(?:^|\/)eas\.json$/i, /(?:^|\/)app\.config\.[cm]?[jt]s$/i],
+    meta: ["react-native", "react native", "expo"],
+  },
+  {
+    key: "android-architecture",
+    label: "Android architecture (Jetpack, MVVM, DI)",
+    aliases: [
+      "mvvm", "mvi", "clean architecture", "jetpack", "viewmodel", "room", "hilt", "dagger", "koin", "retrofit",
+      "coroutines", "kotlin flow", "stateflow", "workmanager", "datastore", "dependency injection",
+    ],
+    weight: 0.8,
+    langs: ["Kotlin", "Java"],
+    dists: [
+      "hilt-android", "dagger", "koin-android", "room-runtime", "room-ktx", "retrofit", "okhttp", "kotlinx-coroutines-android",
+      "lifecycle-viewmodel-ktx", "lifecycle-viewmodel-compose", "navigation-compose", "navigation-fragment-ktx",
+      "work-runtime-ktx", "datastore-preferences", "paging-runtime",
+    ],
+    modules: ["dagger.hilt", "androidx.room", "retrofit2", "kotlinx.coroutines", "androidx.lifecycle", "org.koin", "androidx.work", "androidx.datastore"],
+    calls: [/@HiltViewModel\b/, /@AndroidEntryPoint\b/, /@Dao\b/, /@Entity\b/, /\bviewModelScope\b/, /\bStateFlow\s*</, /@Inject\b/],
+    meta: ["mvvm", "clean-architecture", "jetpack"],
+  },
+  {
+    key: "app-release",
+    label: "App store release (Play Store / App Store)",
+    aliases: ["play store", "google play", "app store", "testflight", "play console", "published app", "fastlane"],
+    weight: 0.6,
+    // Adds to a mobile repo's score but never qualifies one on its own (an iOS-only repo has Fastlane too).
+    generic: true,
+    // A release pipeline in the repo is the proof; a store link in the README only corroborates.
+    infraPaths: [/(?:^|\/)fastlane\/(?:Fastfile|Appfile)$/i, /(?:^|\/)eas\.json$/i],
+    infraText: [/r0adkll\/upload-google-play/i, /eas\s+submit/i, /fastlane\s+(?:supply|deliver|pilot)/i],
+    meta: ["play.google.com", "apps.apple.com", "google play", "play store", "app store", "testflight"],
   },
   {
     key: "flutter",
@@ -998,6 +1102,223 @@ const TECHS: TechDef[] = [
     infraPaths: [/\.csproj$/i, /\.sln$/i],
     artifactPaths: [/\.cs$/i],
     meta: ["dotnet", "csharp"],
+  },
+
+  // ── systems / backend languages, data infrastructure, IaC ──
+  {
+    key: "go",
+    label: "Go",
+    aliases: ["golang", "go lang", "go language", "go programming"],
+    wordNames: ["go"],
+    weight: 0.6,
+    generic: true,
+    langs: ["Go"],
+    modules: ["fmt", "net/http"],
+    calls: [/^package[ \t]+main[ \t]*$/m, /\bfunc[ \t]+main[ \t]*\([ \t]*\)/, /\bfunc[ \t]+\([^)\n]*\)[ \t]+\w+[ \t]*\(/],
+    infraPaths: [/(?:^|\/)go\.mod$/i],
+    infraText: [/FROM\s+golang:/i, /actions\/setup-go/i],
+    artifactPaths: [/\.go$/i],
+    meta: ["golang"],
+  },
+  {
+    key: "rust",
+    label: "Rust",
+    aliases: ["rust", "rustlang", "rust lang", "rust language"],
+    weight: 0.6,
+    generic: true,
+    langs: ["Rust"],
+    calls: [/\bfn[ \t]+main[ \t]*\([ \t]*\)/, /\blet[ \t]+mut[ \t]+\w+/, /\bimpl(?:<[^>\n]*>)?[ \t]+[\w:<>, ]+[ \t]+for[ \t]+\w+/],
+    infraPaths: [/(?:^|\/)Cargo\.toml$/i],
+    infraText: [/FROM\s+rust:/i, /dtolnay\/rust-toolchain|actions-rs\/toolchain/i],
+    artifactPaths: [/\.rs$/i],
+    meta: ["rust", "rustlang"],
+  },
+  {
+    key: "c-cpp",
+    label: "C/C++",
+    aliases: ["c++", "cpp", "c/c++", "c / c++", "cplusplus", "c plus plus", "modern c++", "embedded c", "c programming", "c language"],
+    wordNames: ["c"],
+    weight: 0.6,
+    generic: true,
+    langs: ["C++", "C", "Cuda"],
+    ignoreAppShells: true,
+    calls: [
+      /^[ \t]*#[ \t]*include[ \t]*<(?:iostream|vector|string|map|unordered_map|algorithm|memory|bits\/stdc\+\+\.h|cstdio|cstdlib|stdio\.h|stdlib\.h|string\.h)>/m,
+      /\bstd::\w+/,
+      /\bint[ \t]+main[ \t]*\(/,
+      // LeetCode-style solutions: C++ access labels and STL containers, no main / includes.
+      /^[ \t]*(?:public|private|protected)[ \t]*:[ \t]*$/m,
+      /\b(?:vector|unordered_map|unordered_set|priority_queue)<[\w:<> ,*&]+>/,
+    ],
+    infraPaths: [/(?:^|\/)(?:CMakeLists\.txt|meson\.build|conanfile\.(?:txt|py)|vcpkg\.json)$/i],
+    infraText: [/FROM\s+gcc:/i, /\bcmake[ \t]+(?:-|\.\.|--build)/i],
+    artifactPaths: [/\.(?:c|cc|cpp|cxx|hpp|hh|hxx)$/i],
+    meta: ["cpp", "c-plus-plus", "c++"],
+  },
+  {
+    key: "swift-ios",
+    label: "Swift / iOS",
+    // Not bare "iOS": "Flutter apps for Android and iOS" must not demand native Swift.
+    aliases: ["swiftui", "swift ui", "uikit", "xcode", "objective-c", "objective c", "ios developer", "ios engineer", "native ios"],
+    wordNames: ["swift"],
+    weight: 1,
+    langs: ["Swift", "Objective-C"],
+    dists: ["alamofire", "kingfisher", "snapkit", "swiftyjson", "realmswift", "rxswift", "sdwebimage", "lottie-ios", "swift-composable-architecture"],
+    modules: ["swiftui", "uikit", "swiftdata", "coredata", "appkit", "mapkit", "storekit", "healthkit", "arkit"],
+    calls: [
+      /\bstruct[ \t]+\w+[ \t]*:[ \t]*(?:\w+[ \t]*,[ \t]*)*View\b/,
+      /\bvar[ \t]+body[ \t]*:[ \t]*some[ \t]+(?:View|Scene)\b/,
+      /\bclass[ \t]+\w+[ \t]*:[ \t]*UI(?:View|TableView|CollectionView)Controller\b/,
+    ],
+    ignoreAppShells: true,
+    infraPaths: [/\.xcodeproj\//i, /(?:^|\/)Package\.swift$/i],
+    artifactPaths: [/\.swift$/i],
+    meta: ["swift", "swiftui"],
+  },
+  {
+    key: "php",
+    label: "PHP",
+    aliases: ["php", "core php", "symfony", "codeigniter", "cakephp", "yii"],
+    weight: 0.6,
+    generic: true,
+    langs: ["PHP", "Blade", "Hack"],
+    dists: ["symfony/framework-bundle", "symfony/console", "codeigniter4/framework", "cakephp/cakephp", "yiisoft/yii2"],
+    modules: ["symfony"],
+    calls: [/<\?php\b/],
+    infraPaths: [/(?:^|\/)composer\.json$/i],
+    infraText: [/FROM\s+php:/i, /shivammathur\/setup-php/i],
+    artifactPaths: [/\.php$/i],
+    meta: ["php"],
+  },
+  {
+    key: "laravel",
+    label: "Laravel",
+    aliases: ["laravel", "laravel framework", "livewire"],
+    weight: 0.8,
+    langs: ["PHP", "Blade"],
+    dists: [
+      "laravel/framework", "laravel/lumen-framework", "laravel/sanctum", "laravel/breeze", "laravel/jetstream", "laravel/passport",
+      "livewire/livewire", "inertiajs/inertia-laravel",
+    ],
+    modules: ["illuminate"],
+    calls: [/\bRoute::(?:get|post|put|patch|delete|resource|apiResource|middleware|prefix|group)\s*\(/, /\bArtisan::/, /\bSchema::create\s*\(/],
+    infraPaths: [/(?:^|\/)artisan$/],
+    artifactPaths: [/\.blade\.php$/i, /(?:^|\/)database\/migrations\/[^/]+\.php$/i],
+    meta: ["laravel"],
+  },
+  {
+    key: "ruby",
+    label: "Ruby",
+    aliases: ["ruby", "ruby developer"],
+    weight: 0.6,
+    generic: true,
+    langs: ["Ruby"],
+    // No Gemfile proof on its own: every Jekyll / GitHub Pages site has one.
+    calls: [/\battr_(?:accessor|reader|writer)\b/, /\bdo[ \t]*\|[\w, ]+\|/, /^[ \t]*require[ \t]+["'][\w/.-]+["'][ \t]*$/m],
+    infraText: [/FROM\s+ruby:/i, /ruby\/setup-ruby/i],
+    artifactPaths: [/\.rb$/i],
+    meta: ["ruby"],
+  },
+  {
+    key: "rails",
+    label: "Ruby on Rails",
+    // Not bare "rails": "guard-rails" is LLM wording.
+    aliases: ["ruby on rails", "rubyonrails", "ror", "rails developer", "rails framework", "rails api"],
+    weight: 0.8,
+    langs: ["Ruby"],
+    dists: ["rails", "railties", "actionpack", "activerecord", "actioncable", "sprockets-rails", "turbo-rails"],
+    modules: ["rails", "rails/all", "active_record", "action_controller"],
+    calls: [
+      /\bclass[ \t]+\w+[ \t]*<[ \t]*(?:ApplicationController|ApplicationRecord|ActiveRecord::Base|ActionController::(?:Base|API))\b/,
+      /\bRails\.application\b/,
+    ],
+    infraPaths: [/(?:^|\/)config\/routes\.rb$/i, /(?:^|\/)bin\/rails$/i],
+    artifactPaths: [/(?:^|\/)db\/migrate\/[^/]+\.rb$/i, /\.html\.erb$/i],
+    meta: ["rails", "ruby-on-rails"],
+  },
+  {
+    key: "redis",
+    label: "Redis",
+    aliases: ["redis", "redis cache"],
+    weight: 0.6,
+    dists: [
+      "redis", "redis-py", "aioredis", "django-redis", "ioredis", "@redis/client", "jedis", "lettuce-core",
+      "spring-boot-starter-data-redis", "redisson", "github.com/redis/go-redis", "github.com/go-redis/redis",
+      "github.com/gomodule/redigo", "predis/predis", "hiredis", "redis-plus-plus", "redis-rails",
+    ],
+    derived: ["bull", "bullmq", "sidekiq", "rq"],
+    modules: [
+      "redis", "ioredis", "aioredis", "@redis/client", "redis.clients.jedis", "io.lettuce", "org.springframework.data.redis",
+      "org.redisson", "github.com/redis/go-redis", "github.com/go-redis/redis", "github.com/gomodule/redigo", "predis", "hiredis",
+      "sw/redis++/redis++.h", "StackExchange.Redis",
+    ],
+    calls: [/\bredis\.(?:Redis|StrictRedis|from_url|NewClient)\s*\(/, /\bnew[ \t]+(?:Redis|IORedis|Jedis(?:Pool)?)[ \t]*\(/, /\bRedisTemplate\b/, /["'`]rediss?:\/\//],
+    infraText: [/image:\s*["']?(?:redis|bitnami\/redis|redis\/redis-stack)\b/i, /FROM\s+redis\b/i],
+    meta: ["redis"],
+  },
+  {
+    key: "kafka",
+    label: "Kafka",
+    aliases: ["kafka", "apache kafka", "kafka streams", "confluent kafka"],
+    weight: 0.6,
+    dists: [
+      "kafka-python", "confluent-kafka", "aiokafka", "faust-streaming", "kafkajs", "node-rdkafka", "@confluentinc/kafka-javascript",
+      "kafka-clients", "spring-kafka", "kafka-streams", "github.com/segmentio/kafka-go", "github.com/confluentinc/confluent-kafka-go",
+      "github.com/ibm/sarama", "github.com/shopify/sarama", "github.com/twmb/franz-go", "github.com/lovoo/goka", "rdkafka",
+      "ruby-kafka", "karafka", "librdkafka", "cppkafka", "kafka-python-ng", "kafka-node", "reactor-kafka",
+      "spring-cloud-stream-binder-kafka",
+    ],
+    modules: [
+      "kafka", "confluent_kafka", "aiokafka", "faust", "kafkajs", "node-rdkafka", "org.apache.kafka", "org.springframework.kafka",
+      "github.com/segmentio/kafka-go", "github.com/confluentinc/confluent-kafka-go", "github.com/ibm/sarama", "github.com/shopify/sarama",
+      "github.com/twmb/franz-go", "github.com/lovoo/goka", "kafka-node", "rdkafka", "librdkafka", "cppkafka", "Confluent.Kafka",
+    ],
+    calls: [/\bKafka(?:Producer|Consumer|Template|AdminClient|Streams)\b/, /@KafkaListener\b/, /\bnew[ \t]+Kafka[ \t]*\([ \t]*\{/, /\bkafka\.(?:NewWriter|NewReader)\b/],
+    infraText: [/image:\s*["']?(?:confluentinc\/cp-(?:kafka|server)|bitnami\/kafka|apache\/kafka|wurstmeister\/kafka|redpandadata\/redpanda)/i],
+    meta: ["kafka", "apache-kafka"],
+  },
+  {
+    key: "graphql",
+    label: "GraphQL",
+    aliases: ["graphql", "graph ql", "apollo graphql", "apollo server", "apollo client", "hasura"],
+    weight: 0.6,
+    dists: [
+      "graphql", "@apollo/server", "apollo-server", "apollo-server-express", "@apollo/client", "graphql-yoga", "type-graphql",
+      "@nestjs/graphql", "graphql-request", "urql", "relay-runtime", "express-graphql", "graphql-http", "mercurius", "graphene",
+      "graphene-django", "strawberry-graphql", "ariadne", "graphql-java", "spring-boot-starter-graphql", "github.com/99designs/gqlgen",
+      "github.com/graphql-go/graphql", "async-graphql", "juniper", "webonyx/graphql-php", "nuwave/lighthouse", "rebing/graphql-laravel",
+    ],
+    modules: [
+      "graphql", "@apollo/server", "apollo-server", "apollo-server-express", "@apollo/client", "graphql-yoga", "type-graphql",
+      "@nestjs/graphql", "graphql-request", "urql", "graphene", "strawberry", "ariadne", "org.springframework.graphql",
+      "com.netflix.graphql", "github.com/99designs/gqlgen", "github.com/graphql-go/graphql", "async_graphql", "juniper",
+    ],
+    calls: [
+      /\bgql[ \t]*`/,
+      /^[ \t]*(?:extend[ \t]+)?type[ \t]+(?:Query|Mutation|Subscription)[ \t]*\{/m,
+      /\bnew[ \t]+ApolloServer[ \t]*\(/,
+      /@(?:QueryMapping|MutationMapping|SchemaMapping)\b/,
+      /\bgraphqlHTTP[ \t]*\(/,
+    ],
+    artifactPaths: [/\.(?:graphql|graphqls|gql)$/i],
+    meta: ["graphql"],
+  },
+  {
+    key: "terraform",
+    label: "Terraform",
+    aliases: ["terraform", "opentofu", "terragrunt"],
+    weight: 0.6,
+    langs: ["HCL"],
+    calls: [
+      /^[ \t]*resource[ \t]+"[\w-]+"[ \t]+"[\w-]+"[ \t]*\{/m,
+      /^[ \t]*terraform[ \t]*\{/m,
+      /^[ \t]*provider[ \t]+"[\w-]+"[ \t]*\{/m,
+    ],
+    // The configuration IS the proof, as a Dockerfile is for Docker.
+    infraPaths: [/\.tf$/i, /(?:^|\/)\.terraform\.lock\.hcl$/i, /(?:^|\/)terragrunt\.hcl$/i],
+    infraText: [/hashicorp\/setup-terraform/i, /\bterraform[ \t]+(?:init|plan|apply)\b/i],
+    artifactPaths: [/\.tfvars$/i],
+    meta: ["terraform", "infrastructure-as-code"],
   },
 
   // ── QA / testing ──
@@ -1223,6 +1544,33 @@ function mentions(text: string, phrase: string): boolean {
 }
 
 /**
+ * An everyday-word name ("Go", "Swift", "C") used as a technology: a list item of its own
+ * ("Java, Go, Python", "C / C++", "• Swift", "Languages: C") or — two letters and longer —
+ * capitalised mid-sentence ("backend services in Go"). "go-to-market", "let's go",
+ * "swift delivery" and a sentence that merely starts with the word do not count.
+ */
+function mentionsWord(text: string, word: string): boolean {
+  const w = word.toLowerCase();
+  for (const raw of (text ?? "").split(/[,;\/\n•|()[\]]+|\bor\b|\band\b|&/i)) {
+    const frag = raw
+      .replace(/^.*:/, "")
+      .replace(/^[\s*\-–—\d.)]+/, "")
+      .replace(/[\s.!?]+$/, "")
+      .toLowerCase();
+    if (frag === w) return true;
+  }
+  if (w.length < 2) return false;
+  const cap = escapeRe(w[0].toUpperCase() + w.slice(1));
+  return new RegExp(`(?<=[A-Za-z0-9,)][ \\t]+)${cap}(?![\\w+#-])`).test(text ?? "");
+}
+
+/** A technology's label is itself an everyday word ("Go") — it then only matches as a word name. */
+const labelIsWord = (def: TechDef): boolean => (def.wordNames ?? []).includes(def.label.toLowerCase());
+
+/** JD / resume wording names this tech through one of its everyday-word names. */
+const wordIn = (def: TechDef, text: string): boolean => (def.wordNames ?? []).some((w) => mentionsWord(text, w));
+
+/**
  * Split the free-text mandatory field and the wider domain/JD text into the
  * mandatory / good-to-have technology slots.
  *
@@ -1248,8 +1596,17 @@ export function buildJdTechSpec(
   const seen = new Set<string>();
 
   for (const def of TECHS) {
-    const inMandatory = def.aliases.some((a) => mentions(mand, a)) || mentions(mand, def.label);
-    const inDomain = def.aliases.some((a) => mentions(dom, a)) || mentions(dom, def.label);
+    // "React Native" names React Native, not web React: blank out the longer names of
+    // OTHER technologies that contain one of this tech's names before looking for it.
+    const longer = TECHS.filter((o) => o.key !== def.key)
+      .flatMap((o) => o.aliases)
+      .filter((x) => def.aliases.some((a) => x !== a && mentions(x, a)));
+    const mask = (text: string) => longer.reduce((t, x) => t.split(x).join(" "), text);
+    const mandText = longer.length ? mask(mand) : mand;
+    const domText = longer.length ? mask(dom) : dom;
+    const named = (text: string) => def.aliases.some((a) => mentions(text, a)) || (!labelIsWord(def) && mentions(text, def.label));
+    const inMandatory = named(mandText) || wordIn(def, mandatoryText ?? "");
+    const inDomain = named(domText) || wordIn(def, domainText ?? "");
     if (!inMandatory && !inDomain) continue;
     if (seen.has(def.key)) continue;
     seen.add(def.key);
@@ -1269,6 +1626,86 @@ export function buildJdTechSpec(
 
   return { mandatory, goodToHave };
 }
+
+/**
+ * Mandatory technologies the resume text never names — under any of the catalogue's
+ * names for them. A safety net for the model's "meets every mandatory requirement":
+ * a requirement can't be met by a resume that never mentions it. Only plain
+ * requirements are checked — a clause offering alternatives ("React Native or Kotlin",
+ * "Python/backend OR Linux") is left to the model — and only catalogued technologies
+ * (never free-text asks like "internship experience"). Matching is loose ("ExpressJS",
+ * "Mongo DB" count) and also accepts the tech's package / library names ("Pinecone",
+ * "OpenAI API", "ChromaDB" name an LLM stack), so this only ever catches a clear absence.
+ */
+export function mandatoryTechsAbsent(mandatoryText: string, resumeText: string): string[] {
+  const ctx = nameCtx(resumeText);
+  if (!ctx.squeezed) return [];
+  const missing = new Set<string>();
+  for (const clause of (mandatoryText ?? "").split(/[,;\n•|]+|\band\b|&/i)) {
+    if (/\bor\b|\//i.test(clause)) continue;
+    for (const label of buildJdTechSpec(clause, "", { modelledOnly: true }).mandatory) {
+      const def = TECHS.find((t) => t.label === label);
+      if (def && !namesTech(def, ctx)) missing.add(label);
+    }
+  }
+  return [...missing];
+}
+
+/** The catalogued technologies among `labels` that the text names — what a resume CLAIMS, never proof. */
+export function techsNamedIn(labels: string[], text: string): string[] {
+  const ctx = nameCtx(text);
+  if (!ctx.squeezed) return [];
+  return labels.filter((label) => {
+    const def = TECHS.find((t) => t.label === label);
+    return def ? namesTech(def, ctx) : false;
+  });
+}
+
+const squeezeName = (s: string): string => s.toLowerCase().replace(/[^a-z0-9+#]/g, "");
+
+/** A text as `namesTech` reads it: as written, lower-cased, and squeezed of punctuation / spaces. */
+interface NameCtx {
+  original: string;
+  lower: string;
+  squeezed: string;
+}
+
+function nameCtx(text: string): NameCtx {
+  const original = text ?? "";
+  const lower = original.toLowerCase();
+  return { original, lower, squeezed: squeezeName(lower) };
+}
+
+/**
+ * Does the text name this technology under any catalogue name — label, alias, everyday-word
+ * name, or a distinctive library name? Loose on purpose ("ExpressJS", "Mongo DB", "Pinecone"
+ * count), so the mandatory guard only ever catches a clear absence. Short names ("rag",
+ * "gpt", "llm") must stand alone — inside other words they'd match "storage" or "leverage";
+ * longer ones match squeezed. Everyday words ("Go", "Swift") only count as a list item or
+ * capitalised mid-sentence.
+ */
+function namesTech(def: TechDef, ctx: NameCtx): boolean {
+  const named = (q: string) =>
+    q.length <= 3 ? new RegExp(`(?:^|[^a-z0-9])${escapeRe(q)}(?![a-z0-9])`).test(ctx.lower) : ctx.squeezed.includes(q);
+  const words = new Set((def.wordNames ?? []).map((w) => w.toLowerCase()));
+  const names = [def.label, ...def.aliases]
+    .filter((n) => !words.has(n.toLowerCase()))
+    .map(squeezeName)
+    .filter((q) => q.length >= 2);
+  // Library names: only distinctive ones (≥ 5 letters, not an everyday word).
+  const libs = [...(def.dists ?? []), ...(def.modules ?? []), ...(GUARD_EXTRA_NAMES[def.key] ?? [])]
+    .map(squeezeName)
+    .filter((q) => q.length >= 5 && !GUARD_COMMON_WORDS.has(q));
+  return [...names, ...libs].some(named) || wordIn(def, ctx.original);
+}
+
+/** Further names that show a resume uses a technology (guard only — not JD wording). */
+const GUARD_EXTRA_NAMES: Record<string, string[]> = {
+  llm: ["huggingface", "transformers", "diffusers", "stable diffusion", "generative"],
+};
+
+/** Package names that are also everyday resume words ("under the guidance of…"). */
+const GUARD_COMMON_WORDS = new Set(["guidance", "instructor", "evaluate", "datasets", "accelerate", "optimum", "motor"]);
 
 /**
  * Pull plausible technology names out of a free-text mandatory field: comma / slash /
@@ -1389,6 +1826,72 @@ function readManifest(path: string, text: string): ManifestRead {
       for (const section of sections) {
         for (const kv of section.matchAll(/^[ \t]{2}([a-z0-9_]+):/gm)) deps.add(canon(kv[1]));
       }
+    } else if (/^go\.mod$/i.test(file)) {
+      // `require x v1.2.3` and `require ( … )` blocks. `// indirect` lines are transitive —
+      // pulled in by something else, not chosen — so they are not the candidate's stack.
+      const add = (line: string) => {
+        if (/\/\/\s*indirect\b/.test(line)) return;
+        const m = line.trim().match(/^([^\s/][^\s]*)\s+v\d/);
+        if (!m) return;
+        const path = m[1].toLowerCase();
+        deps.add(canon(goModuleRoot(path)));
+        deps.add(canon(path));
+      };
+      for (const m of text.matchAll(/^require[ \t]+(?!\()(.+)$/gm)) add(m[1]);
+      for (const block of text.matchAll(/^require[ \t]*\(([\s\S]*?)^\)/gm)) for (const line of block[1].split(/\r?\n/)) add(line);
+    } else if (/^Cargo\.toml$/i.test(file)) {
+      // [dependencies] / [dev-dependencies] / [build-dependencies], also under [target.….] and
+      // [workspace.…]; a `[dependencies.serde]` table names its crate in the header.
+      let section = "";
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.replace(/#.*$/, "").trim();
+        const header = line.match(/^\[([^\]]+)\]$/);
+        if (header) {
+          section = header[1].trim();
+          const table = section.match(/(?:^|\.)(?:dev-|build-)?dependencies\.([A-Za-z0-9_-]+)$/);
+          if (table) deps.add(canon(table[1]));
+          continue;
+        }
+        if (!/(?:^|\.)(?:dev-|build-)?dependencies$/.test(section)) continue;
+        const kv = line.match(/^([A-Za-z0-9_-]+)\s*=/);
+        if (kv) deps.add(canon(kv[1]));
+      }
+    } else if (/^composer\.json$/i.test(file)) {
+      const parsed = JSON.parse(text) as { require?: Record<string, string>; "require-dev"?: Record<string, string> };
+      for (const key of Object.keys({ ...parsed.require, ...parsed["require-dev"] })) {
+        // The PHP runtime and its extensions are platform requirements, not libraries.
+        if (/^(?:php|hhvm)$/i.test(key) || /^(?:ext|lib)-/i.test(key) || /^composer(?:-plugin-api|-runtime-api)?$/i.test(key)) continue;
+        deps.add(canon(key));
+      }
+    } else if (/^Gemfile$/i.test(file)) {
+      for (const m of text.matchAll(/^[ \t]*gem[ \t]*\(?[ \t]*["']([A-Za-z0-9_.-]+)["']/gm)) deps.add(canon(m[1]));
+    } else if (/^Package\.swift$/i.test(file)) {
+      // .package(url: "https://github.com/Alamofire/Alamofire.git", from: "5.8.0") → alamofire
+      for (const m of text.matchAll(/\.package\s*\([^)]*?url:\s*"([^"]+)"/g)) {
+        const name = m[1].replace(/\.git$/i, "").replace(/\/+$/, "").split("/").pop();
+        if (name) deps.add(canon(name));
+      }
+    } else if (/^Podfile$/i.test(file)) {
+      // pod 'Alamofire' / pod 'Firebase/Analytics' → alamofire / firebase
+      for (const m of text.matchAll(/^[ \t]*pod[ \t]+["']([A-Za-z0-9_.+-]+)(?:\/[^"']*)?["']/gm)) deps.add(canon(m[1]));
+    } else if (/^vcpkg\.json$/i.test(file)) {
+      const parsed = JSON.parse(text) as { dependencies?: (string | { name?: string })[] };
+      for (const d of parsed.dependencies ?? []) {
+        const name = typeof d === "string" ? d : d?.name;
+        if (name) deps.add(canon(name));
+      }
+    } else if (/^conanfile\.txt$/i.test(file)) {
+      let section = "";
+      for (const raw of text.split(/\r?\n/)) {
+        const line = raw.replace(/#.*$/, "").trim();
+        const header = line.match(/^\[([^\]]+)\]$/);
+        if (header) {
+          section = header[1].trim().toLowerCase();
+          continue;
+        }
+        const ref = section === "requires" || section === "tool_requires" ? line.match(/^([A-Za-z0-9_.+-]+)\//) : null;
+        if (ref) deps.add(canon(ref[1]));
+      }
     }
   } catch {
     // Malformed manifest = no declared deps. Never fatal.
@@ -1469,12 +1972,99 @@ function scanDartImports(code: string): Set<string> {
   return mods;
 }
 
+/**
+ * A Go module path's root — hosting domain + owner + repo for github.com-style hosts, domain +
+ * one segment otherwise — so `github.com/redis/go-redis/v9/internal` is `github.com/redis/go-redis`
+ * whatever the major-version suffix. Standard-library paths ("net/http") are returned whole.
+ */
+function goModuleRoot(path: string): string {
+  const parts = path.split("/").filter(Boolean);
+  if (!parts.length || !parts[0].includes(".")) return path;
+  const depth = /^(?:github\.com|gitlab\.com|bitbucket\.org|golang\.org|codeberg\.org)$/.test(parts[0]) ? 3 : 2;
+  return parts.slice(0, depth).join("/");
+}
+
+/** Go `import "fmt"`, `import x "a/b"` and `import ( … )` blocks → each path and its module root, lower-cased. */
+function scanGoImports(code: string): Set<string> {
+  const mods = new Set<string>();
+  const add = (spec: string) => {
+    const path = spec.trim().toLowerCase();
+    if (!path) return;
+    mods.add(path);
+    mods.add(goModuleRoot(path));
+  };
+  for (const m of code.matchAll(/^[ \t]*import[ \t]+(?:[\w.]+[ \t]+)?"([^"\n]+)"/gm)) add(m[1]);
+  for (const block of code.matchAll(/^[ \t]*import[ \t]*\(([^)]*)\)/gm)) {
+    for (const m of block[1].matchAll(/^[ \t]*(?:[\w.]+[ \t]+)?"([^"\n]+)"/gm)) add(m[1]);
+  }
+  return mods;
+}
+
+/** Rust `use crate_name::…;` / `extern crate x;` → the crate (std, core, alloc, crate, self, super excluded). */
+function scanRustImports(code: string): Set<string> {
+  const mods = new Set<string>();
+  const local = new Set(["std", "core", "alloc", "crate", "self", "super"]);
+  for (const m of code.matchAll(/^[ \t]*(?:pub(?:\([^)\n]*\))?[ \t]+)?(?:use[ \t]+(?:::)?|extern[ \t]+crate[ \t]+)([A-Za-z_]\w*)/gm)) {
+    const crate = m[1].toLowerCase();
+    if (!local.has(crate)) mods.add(crate);
+  }
+  return mods;
+}
+
+/** PHP `use Vendor\Package\Class;` → `vendor` and `vendor\package`, lower-cased. */
+function scanPhpImports(code: string): Set<string> {
+  const mods = new Set<string>();
+  for (const m of code.matchAll(/^[ \t]*use[ \t]+(?:function[ \t]+|const[ \t]+)?\\?([A-Za-z_]\w*(?:\\[A-Za-z_]\w*)*)/gm)) {
+    const parts = m[1].toLowerCase().split("\\");
+    mods.add(parts[0]);
+    if (parts.length > 1) mods.add(parts.slice(0, 2).join("\\"));
+  }
+  return mods;
+}
+
+/** Ruby `require "x/y"` → `x/y` and `x` (`require_relative` is the project's own code). */
+function scanRubyImports(code: string): Set<string> {
+  const mods = new Set<string>();
+  for (const m of code.matchAll(/^[ \t]*require[ \t]*\(?[ \t]*["']([^"'\n]+)["']/gm)) {
+    const path = m[1].trim().toLowerCase();
+    mods.add(path);
+    mods.add(path.split("/")[0]);
+  }
+  return mods;
+}
+
+/** Swift `import SwiftUI` / `@testable import X` / `import struct X.Y` → the module, lower-cased. */
+function scanSwiftImports(code: string): Set<string> {
+  const mods = new Set<string>();
+  for (const m of code.matchAll(/^[ \t]*(?:@testable[ \t]+)?import[ \t]+(?:(?:class|struct|enum|protocol|func|var|let|typealias)[ \t]+)?([A-Za-z_]\w*)/gm)) {
+    mods.add(m[1].toLowerCase());
+  }
+  return mods;
+}
+
+/** C / C++ `#include <lib/header.h>` → the header path and its first segment (`hiredis/hiredis.h` → `hiredis`). */
+function scanCIncludes(code: string): Set<string> {
+  const mods = new Set<string>();
+  for (const m of code.matchAll(/^[ \t]*#[ \t]*include[ \t]*<([^>\n]+)>/gm)) {
+    const path = m[1].trim().toLowerCase();
+    mods.add(path);
+    mods.add(path.split("/")[0].replace(/\.h(?:pp|h|xx)?$/, ""));
+  }
+  return mods;
+}
+
 /** The import scanner for a source file, chosen by extension. */
 function importsOf(path: string, code: string): Set<string> {
   if (/\.(?:py|ipynb)$/i.test(path)) return scanImports(code);
   if (/\.(?:[cm]?jsx?|tsx?|vue)$/i.test(path)) return scanJsImports(code);
   if (/\.(?:java|kt|kts|cs)$/i.test(path)) return scanJvmImports(code);
   if (/\.dart$/i.test(path)) return scanDartImports(code);
+  if (/\.go$/i.test(path)) return scanGoImports(code);
+  if (/\.rs$/i.test(path)) return scanRustImports(code);
+  if (/\.php$/i.test(path)) return scanPhpImports(code);
+  if (/\.rb$/i.test(path)) return scanRubyImports(code);
+  if (/\.swift$/i.test(path)) return scanSwiftImports(code);
+  if (/\.(?:c|cc|cpp|cxx|h|hpp|hh|hxx)$/i.test(path)) return scanCIncludes(code);
   return new Set();
 }
 
@@ -1516,6 +2106,8 @@ interface RepoCorpus {
   infraText: string;
   /** Every path in the tree, vendored / build directories excluded. */
   paths: string[];
+  /** `paths` minus cross-platform app shells — path evidence for techs with `ignoreAppShells`. */
+  appPaths: string[];
   /** Lowercased topics + description + README, for metadata-tier hits only. */
   metaText: string;
   /** Lowercased topics alone (worth slightly more than prose). */
@@ -1528,15 +2120,23 @@ interface RepoCorpus {
   notebooks: number;
   /** Total blob count (used for the single-dump heuristic). */
   fileCount: number;
+  /** The root-most README as written (≤ 20 000 chars) — deploy links live here. */
+  readme: string;
 }
 
-/** Dependency manifests read for declared-dependency evidence. */
-const MANIFEST_RE =
+/** Dependency manifests read for declared-dependency evidence (the original set — see pickBlobs). */
+const BASE_MANIFEST_RE =
   /^(?:requirements[\w.-]*\.txt|pyproject\.toml|Pipfile|environment\.ya?ml|setup\.py|package\.json|pom\.xml|build\.gradle(?:\.kts)?|pubspec\.yaml)$/i;
+/** Manifests of the languages added later: Go, Rust, PHP, Ruby, Swift / iOS, C/C++. */
+const ADDED_MANIFEST_RE = /^(?:go\.mod|Cargo\.toml|composer\.json|Gemfile|Package\.swift|Podfile|vcpkg\.json|conanfile\.txt)$/i;
+/** Every manifest readManifest understands. */
+const MANIFEST_RE = new RegExp(`${BASE_MANIFEST_RE.source}|${ADDED_MANIFEST_RE.source}`, "i");
 /** The Python manifests — the only ones a `pip freeze` / bloat dump can hide in. */
 const PY_MANIFEST_RE = /^(?:requirements[\w.-]*\.txt|pyproject\.toml|Pipfile|environment\.ya?ml|setup\.py)$/i;
-/** Hand-written source code worth reading for imports and call sites. */
-const SOURCE_RE = /\.(?:py|[cm]?jsx?|tsx?|vue|java|kt|dart|cs|go)$/i;
+/** Hand-written source code worth reading for imports and call sites (the original languages — see pickBlobs). */
+const BASE_SOURCE_RE = /\.(?:py|[cm]?jsx?|tsx?|vue|java|kt|dart|cs|go)$/i;
+/** Source in the languages added later: Rust, C/C++, PHP, Ruby, Swift, Terraform. */
+const ADDED_SOURCE_RE = /\.(?:rs|c|cc|cpp|cxx|h|hpp|hh|hxx|php|rb|swift|tf)$/i;
 /**
  * Vendored dependencies and build output. Students often commit node_modules or a
  * venv; those files are someone else's code and must never count as evidence.
@@ -1546,12 +2146,34 @@ const VENDORED_RE =
 /** Generated / minified / config files: present in every project, prove nothing. */
 const LOW_SIGNAL_SOURCE_RE =
   /(?:\.min\.[cm]?js|\.d\.ts|(?:^|\/)(?:[\w.-]+\.config\.[cm]?[jt]s|setupTests\.[jt]s|reportWebVitals\.[jt]s|serviceWorker\.[jt]s|manage\.py|__init__\.py))$/i;
+/** Generated files in the added languages: protobuf output, Rails' schema dump, Flutter's plugin registrant. */
+const ADDED_LOW_SIGNAL_RE = /(?:\.pb\.(?:cc|h)|(?:^|\/)db\/schema\.rb|(?:^|\/)generated_plugin_registrant\.(?:cc|h|swift))$/i;
 /** Likely entrypoints / core modules, read before anything else. */
 const ENTRY_RE =
-  /(?:^|\/)(?:main|app|index|server|api|routes?|train|model|models|inference|predict|pipeline|controller|service)\.(?:py|[cm]?jsx?|tsx?|java|kt|dart|cs)$|(?:Controller|Service|Application|Activity)\.(?:java|kt)$/i;
+  /(?:^|\/)(?:main|app|index|server|api|routes?|train|model|models|inference|predict|pipeline|controller|service)\.(?:py|[cm]?jsx?|tsx?|java|kt|dart|cs|go|rs|c|cc|cpp|php|rb|swift|tf)$|(?:Controller|Service|Application|Activity)\.(?:java|kt|php)$|(?:^|\/)(?:lib\.rs|ContentView\.swift|\w+App\.swift|\w+_controller\.rb|web\.php)$/i;
 /** Test sources — the direct proof for QA / testing domains. */
 const TEST_RE =
-  /(?:\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]+\.py$|_test\.py$|Tests?\.(?:java|kt|cs)$|(?:^|\/)(?:tests?|__tests__|cypress|e2e)\/[^/]+\.(?:py|[cm]?[jt]sx?|java)$)/i;
+  /(?:\.(?:test|spec)\.[cm]?[jt]sx?$|(?:^|\/)test_[^/]+\.py$|_test\.py$|Tests?\.(?:java|kt|cs)$|(?:^|\/)(?:tests?|__tests__|cypress|e2e)\/[^/]+\.(?:py|[cm]?[jt]sx?|java)$|_test\.go$|(?:^|\/)tests\/[^/]+\.rs$|Test\.php$|_(?:spec|test)\.rb$|Tests?\.swift$)/i;
+
+/** Extra file reads per repo for the added languages — on top of, never instead of, the original ones. */
+const ADDED_LANGUAGE_BLOBS = 4;
+/** Byte allowance for those extra reads. */
+const ADDED_LANGUAGE_BYTES = 160 * 1024;
+
+/**
+ * Is a path inside a cross-platform app's generated platform shell — the ios/, android/,
+ * macos/, linux/, windows/ or web/ folder next to a Flutter pubspec.yaml or a React Native /
+ * Capacitor package.json, at any depth ("ios/…", "app/macos/…", "example/ios/…")? Template
+ * code, not the candidate's, so the languages added later never take evidence from it.
+ */
+function appShellTest(paths: string[]): (path: string) => boolean {
+  const roots = new Set(
+    paths.filter((p) => /(?:^|\/)(?:pubspec\.yaml|package\.json)$/i.test(p)).map((p) => p.slice(0, p.lastIndexOf("/") + 1)),
+  );
+  if (!roots.size) return () => false;
+  const shells = new RegExp(`^(?:${[...roots].map(escapeRe).join("|")})(?:ios|android|macos|linux|windows|web)/`, "i");
+  return (path) => shells.test(path);
+}
 
 /**
  * Choose which blobs to read. Manifests first (they are small and decisive), then infra
@@ -1565,26 +2187,25 @@ function pickBlobs(entries: GhTreeEntry[]): GhTreeEntry[] {
   const depth = (p: string): number => p.split("/").length;
 
   // Shallowest manifests first: the root package.json / pom.xml describes the project.
-  const manifests = blobs.filter((e) => MANIFEST_RE.test(base(e.path))).sort((a, b) => depth(a.path) - depth(b.path));
+  const manifests = blobs.filter((e) => BASE_MANIFEST_RE.test(base(e.path))).sort((a, b) => depth(a.path) - depth(b.path));
   const infra = blobs.filter(
     (e) =>
       /^(?:Dockerfile[^/]*|docker-compose[^/]*\.ya?ml|Procfile)$/i.test(base(e.path)) ||
       /^\.github\/workflows\/[^/]+\.ya?ml$/i.test(e.path),
   );
 
-  const sources = blobs.filter((e) => SOURCE_RE.test(e.path) && !LOW_SIGNAL_SOURCE_RE.test(e.path) && (e.size ?? 0) >= 80);
+  const entryFirst = (a: GhTreeEntry, b: GhTreeEntry): number => {
+    const pa = ENTRY_RE.test(a.path) ? 0 : 1;
+    const pb = ENTRY_RE.test(b.path) ? 0 : 1;
+    if (pa !== pb) return pa - pb;
+    const da = depth(a.path);
+    const db = depth(b.path);
+    if (da !== db) return da - db;
+    return (b.size ?? 0) - (a.size ?? 0);
+  };
+  const sources = blobs.filter((e) => BASE_SOURCE_RE.test(e.path) && !LOW_SIGNAL_SOURCE_RE.test(e.path) && (e.size ?? 0) >= 80);
   const tests = sources.filter((e) => TEST_RE.test(e.path));
-  const code = sources
-    .filter((e) => !TEST_RE.test(e.path))
-    .sort((a, b) => {
-      const pa = ENTRY_RE.test(a.path) ? 0 : 1;
-      const pb = ENTRY_RE.test(b.path) ? 0 : 1;
-      if (pa !== pb) return pa - pb;
-      const da = depth(a.path);
-      const db = depth(b.path);
-      if (da !== db) return da - db;
-      return (b.size ?? 0) - (a.size ?? 0);
-    });
+  const code = sources.filter((e) => !TEST_RE.test(e.path)).sort(entryFirst);
   const sourcePick = tests.length ? [...code.slice(0, 3), tests[0]] : code.slice(0, 4);
 
   // Notebooks embed their plots, so a real one is often 1-5 MB — far over the per-blob
@@ -1615,6 +2236,30 @@ function pickBlobs(entries: GhTreeEntry[]): GhTreeEntry[] {
     if (!isNotebook) bytes += e.size ?? 0;
     picked.push(e);
   }
+
+  // The languages added later (Go modules, Rust, C/C++, PHP, Ruby, Swift, Terraform) are read
+  // AFTER all of the above, in extra slots with their own byte allowance — so supporting a new
+  // language never changes which files are read for a repo in the original ones.
+  const inShell = appShellTest(own.map((e) => e.path));
+  const ownCode = (e: GhTreeEntry) => !inShell(e.path) && !ADDED_LOW_SIGNAL_RE.test(e.path);
+  const addedManifests = blobs
+    .filter((e) => ADDED_MANIFEST_RE.test(base(e.path)) && ownCode(e))
+    .sort((a, b) => depth(a.path) - depth(b.path))
+    .slice(0, 2);
+  const addedSources = blobs.filter(
+    (e) => ADDED_SOURCE_RE.test(e.path) && ownCode(e) && !LOW_SIGNAL_SOURCE_RE.test(e.path) && (e.size ?? 0) >= 80,
+  );
+  const addedTests = addedSources.filter((e) => TEST_RE.test(e.path));
+  const addedCode = addedSources.filter((e) => !TEST_RE.test(e.path)).sort(entryFirst);
+  const addedPick = addedTests.length ? [...addedCode.slice(0, 3), addedTests[0]] : addedCode.slice(0, 4);
+  let addedBytes = 0;
+  for (const e of [...addedManifests, ...addedPick]) {
+    if (picked.length >= MAX_BLOBS_PER_REPO + ADDED_LANGUAGE_BLOBS) break;
+    if (seen.has(e.path) || addedBytes + (e.size ?? 0) > ADDED_LANGUAGE_BYTES) continue;
+    seen.add(e.path);
+    addedBytes += e.size ?? 0;
+    picked.push(e);
+  }
   return picked;
 }
 
@@ -1622,7 +2267,15 @@ function pickBlobs(entries: GhTreeEntry[]): GhTreeEntry[] {
 async function buildCorpus(meta: GhRepoMeta, owner: string, entries: GhTreeEntry[], token: string): Promise<RepoCorpus> {
   const own = entries.filter((e) => e.type === "blob" && !VENDORED_RE.test(e.path));
   const paths = own.map((e) => e.path);
-  const srcEntries = own.filter((e) => SOURCE_RE.test(e.path) && !LOW_SIGNAL_SOURCE_RE.test(e.path));
+  // Code size: a repo with code in the original languages keeps exactly its original measure;
+  // a repo written only in an added language (Rust, C/C++, PHP, Ruby, Swift …) is measured by that.
+  const baseSrc = own.filter((e) => BASE_SOURCE_RE.test(e.path) && !LOW_SIGNAL_SOURCE_RE.test(e.path));
+  const inShell = appShellTest(paths);
+  const srcEntries = baseSrc.length
+    ? baseSrc
+    : own.filter(
+        (e) => ADDED_SOURCE_RE.test(e.path) && !LOW_SIGNAL_SOURCE_RE.test(e.path) && !ADDED_LOW_SIGNAL_RE.test(e.path) && !inShell(e.path),
+      );
 
   const corpus: RepoCorpus = {
     manifestDeps: new Map(),
@@ -1630,12 +2283,14 @@ async function buildCorpus(meta: GhRepoMeta, owner: string, entries: GhTreeEntry
     code: "",
     infraText: "",
     paths,
+    appPaths: paths.filter((p) => !inShell(p)),
     metaText: "",
     topicText: (meta.topics ?? []).join(" ").toLowerCase(),
     srcBytes: srcEntries.reduce((s, e) => s + (e.size ?? 0), 0),
     srcFiles: srcEntries.length,
     notebooks: own.filter((e) => /\.ipynb$/i.test(e.path)).length,
     fileCount: paths.length,
+    readme: "",
   };
 
   const picked = pickBlobs(entries);
@@ -1665,6 +2320,7 @@ async function buildCorpus(meta: GhRepoMeta, owner: string, entries: GhTreeEntry
     }
     if (/^README/i.test(base)) {
       metaParts.push(f.text.slice(0, 20_000));
+      if (!corpus.readme) corpus.readme = f.text.slice(0, 20_000);
       continue;
     }
     const code = /\.ipynb$/i.test(f.path) ? notebookCode(f.text) : f.text;
@@ -1705,6 +2361,7 @@ interface TechScore {
 function scoreTech(def: TechDef, corpus: RepoCorpus): TechScore {
   const hits: Hit[] = [];
   const thin = corpus.srcFiles < 3 && corpus.srcBytes < 4096 && corpus.notebooks === 0;
+  const paths = def.ignoreAppShells ? corpus.appPaths : corpus.paths;
 
   // T2 — declared in a manifest (exact canonical equality; never substring).
   for (const dist of def.dists ?? []) {
@@ -1748,7 +2405,7 @@ function scoreTech(def: TechDef, corpus: RepoCorpus): TechScore {
 
   // T3 — infra config. For Docker/CI the config file IS the proof; elsewhere it corroborates.
   for (const re of def.infraPaths ?? []) {
-    const p = corpus.paths.find((path) => re.test(path));
+    const p = paths.find((path) => re.test(path));
     if (!p) continue;
     hits.push({ family: "infra", weight: W_INFRA_PROOF, source: "tree", detail: `${p} present`, derivative: false });
     break;
@@ -1762,13 +2419,13 @@ function scoreTech(def: TechDef, corpus: RepoCorpus): TechScore {
 
   // T4 — artifacts left behind by the tech.
   for (const re of def.strongArtifactPaths ?? []) {
-    const p = corpus.paths.find((path) => re.test(path));
+    const p = paths.find((path) => re.test(path));
     if (!p) continue;
     hits.push({ family: "artifact", weight: W_ARTIFACT_STRONG, source: "tree", detail: `${p} committed`, derivative: false });
     break;
   }
   for (const re of def.artifactPaths ?? []) {
-    const p = corpus.paths.find((path) => re.test(path));
+    const p = paths.find((path) => re.test(path));
     if (!p) continue;
     hits.push({ family: "artifact", weight: W_ARTIFACT, source: "tree", detail: `${p} in repo`, derivative: false });
     break;
@@ -1923,6 +2580,8 @@ const AI_EMAIL_TOOLS: { tool: string; re: RegExp }[] = [
   { tool: "Fly.io agent", re: /dev@fly\.io/i },
   { tool: "Paperclip", re: /noreply@paperclip\.ing/i },
   { tool: "v0", re: /it\+v0agent@vercel\.com/i },
+  // No official trailer (Oct 2026): agents asked to credit themselves use this address.
+  { tool: "Google Antigravity", re: /antigravity@google\.com/i },
 ];
 
 /**
@@ -2338,6 +2997,8 @@ interface RepoOutcome {
   analysis: RepoAnalysis;
   /** Technology key → confidence + whether any non-metadata evidence backed it. */
   techConf: Map<string, { conf: number; hard: boolean }>;
+  /** Technology key → the strongest single finding behind it (empty when the repo isn't the candidate's work). */
+  techHits: Map<string, { source: string; detail: string }>;
   commits: CommitOutcome;
   /** Substance term input for the Depth component. */
   substance: number;
@@ -2374,31 +3035,35 @@ async function analyzeRepo(
     commits: emptyAudit().audit,
   };
 
-  // 1) Recursive tree. `HEAD` is accepted as a ref by both the trees API and raw, so a
-  //    non-standard default branch never needs a lookup. 409 = empty repo, 404 = gone.
+  // 1) Tree. `HEAD` is accepted as a ref by both the trees API and raw, so a non-standard
+  //    default branch never needs a lookup. 409 = empty repo, 404 = gone. A very large repo
+  //    (committed datasets / model weights) won't list recursively, so its top level is read
+  //    instead — the root manifests, Dockerfile, README and entry files still prove the stack.
   let entries: GhTreeEntry[] = [];
-  if ((meta.size ?? 0) <= TREE_SKIP_REPO_SIZE_KB) {
-    const tree = await ghGet<GhTree>(
-      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(meta.name)}/git/trees/HEAD?recursive=1`,
-      token,
-      budget,
-    );
-    if (tree.ok && tree.data) {
-      entries = Array.isArray(tree.data.tree) ? tree.data.tree : [];
+  const veryLarge = (meta.size ?? 0) > TREE_SKIP_REPO_SIZE_KB;
+  const tree = await ghGet<GhTree>(
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(meta.name)}/git/trees/HEAD${veryLarge ? "" : "?recursive=1"}`,
+    token,
+    budget,
+  );
+  if (tree.ok && tree.data) {
+    entries = Array.isArray(tree.data.tree) ? tree.data.tree : [];
+    if (veryLarge) {
+      base.evidence.push({ tech: "—", source: "tree", detail: "very large repository — only its top-level files were read" });
+    } else if (tree.data.truncated) {
       // A truncated tree is still usable — we only ever read the first handful of
       // interesting paths — but the tail is genuinely missing, so say so in evidence.
-      if (tree.data.truncated) {
-        base.evidence.push({ tech: "—", source: "tree", detail: "repository tree truncated by GitHub; analysis is partial" });
-      }
-    } else if (tree.status === 409) {
-      return { analysis: base, techConf: new Map(), commits: emptyAudit(), substance: 0, pushedAt: base.pushedAt };
+      base.evidence.push({ tech: "—", source: "tree", detail: "repository tree truncated by GitHub; analysis is partial" });
     }
+  } else if (tree.status === 409) {
+    return { analysis: base, techConf: new Map(), techHits: new Map(), commits: emptyAudit(), substance: 0, pushedAt: base.pushedAt };
   }
 
   // 2) Free blob reads → evidence corpus.
   const corpus = entries.length > 0 ? await buildCorpus(meta, owner, entries, token) : null;
 
   const techConf = new Map<string, { conf: number; hard: boolean }>();
+  const techHits = new Map<string, { source: string; detail: string }>();
   const evidence: TechEvidence[] = [...base.evidence];
   const confs: TechConf[] = [];
 
@@ -2406,9 +3071,10 @@ async function analyzeRepo(
     const scored = corpus ? scoreTech(def, corpus) : { conf: 0, hits: [], hard: false };
     techConf.set(def.key, { conf: scored.conf, hard: scored.hard });
     confs.push({ def, conf: scored.conf, hard: scored.hard, mandatory: isMandatory });
+    const best = [...scored.hits].sort((a, b) => b.weight - a.weight)[0];
+    if (best) techHits.set(def.key, { source: best.source, detail: best.detail });
     if (scored.conf >= HIT_CONF) {
       (isMandatory ? base.mandatoryHit : base.goodToHaveHit).push(def.label);
-      const best = [...scored.hits].sort((a, b) => b.weight - a.weight)[0];
       if (best) evidence.push({ tech: def.label, source: best.source, detail: best.detail });
     }
   };
@@ -2424,9 +3090,15 @@ async function analyzeRepo(
   base.relevant = provesDomain(confs, core);
 
   // 3) Commit audit — one page, no pagination. Also yields the candidate's newest own commit.
+  //    In someone else's repo (a team / org / course repo) only the candidate's own commits
+  //    matter, so GitHub is asked for exactly those: in a busy repo they may not be among the
+  //    latest 100 at all. Same single call either way.
+  const own = owner.toLowerCase() === username.toLowerCase();
   let commits = emptyAudit();
   const commitRes = await ghGet<GhCommitItem[]>(
-    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(meta.name)}/commits?per_page=${COMMITS_PER_REPO}`,
+    `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(meta.name)}/commits?per_page=${COMMITS_PER_REPO}${
+      own ? "" : `&author=${encodeURIComponent(username)}`
+    }`,
     token,
     budget,
   );
@@ -2438,12 +3110,27 @@ async function analyzeRepo(
   // A repo the resume cites but someone else owns (a team / course / famous repo) only
   // counts when the candidate's own account committed to it — otherwise its code is
   // not their evidence. In their own repo, an unlinked git email is still them.
-  const own = owner.toLowerCase() === username.toLowerCase();
   const contributed = own || commits.lastLinked !== null;
   base.lastOwnCommit = own ? commits.lastOwn : commits.lastLinked ? { date: commits.lastLinked, linked: true } : null;
   base.relevant = base.relevant && contributed;
 
-  return { analysis: base, techConf: contributed ? techConf : new Map(), commits, substance, pushedAt: base.pushedAt };
+  return {
+    analysis: base,
+    techConf: contributed ? techConf : new Map(),
+    techHits: contributed ? techHits : new Map(),
+    commits,
+    substance,
+    pushedAt: base.pushedAt,
+  };
+}
+
+/** The candidate behind a resume's GitHub links: the profile's user, else the first repo's owner. */
+export function githubUsernameFor(profileUrl: string, repoUrls: string[]): string | null {
+  return (
+    parseGithubUser(profileUrl) ||
+    (repoUrls ?? []).map((u) => parseGithubUser(u)).find((u): u is string => Boolean(u)) ||
+    null
+  );
 }
 
 /**
@@ -2463,10 +3150,7 @@ export async function analyzeGithubProfile(
   const token = githubToken();
   if (!token) return { ok: false, reason: "no-token", message: "GITHUB_TOKEN is not set in .env.local." };
 
-  const username =
-    parseGithubUser(profileUrl) ||
-    (repoUrls ?? []).map((u) => parseGithubUser(u)).find((u): u is string => Boolean(u)) ||
-    null;
+  const username = githubUsernameFor(profileUrl, repoUrls);
   if (!username) return { ok: false, reason: "no-username", message: "No GitHub username in the resume's links." };
 
   const mandatory = (jd?.mandatory ?? []).map(resolveTech);
@@ -2585,10 +3269,36 @@ export async function analyzeGithubProfile(
     const overallMatchPct = assessable ? domainScore(rolled, core, depth) : 0;
 
     // Technologies the profile genuinely proves — domain ones first, then plain languages.
-    const provenTechs = rolled
-      .filter((t) => t.hard && t.conf >= HIT_CONF)
-      .sort((a, b) => Number(core.has(b.def.key)) - Number(core.has(a.def.key)) || b.conf - a.conf)
-      .map((t) => t.def.label);
+    const proven = (t: TechConf) => t.hard && t.conf >= HIT_CONF;
+    const provenRolled = rolled
+      .filter(proven)
+      .sort((a, b) => Number(core.has(b.def.key)) - Number(core.has(a.def.key)) || b.conf - a.conf);
+    const provenTechs = provenRolled.map((t) => t.def.label);
+
+    // The proof behind each: the strongest finding in the repo that proves the tech best.
+    const bestProof = (def: TechDef): TechProof | null => {
+      let best: RepoOutcome | null = null;
+      for (const o of outcomes) {
+        const conf = o.techConf.get(def.key)?.conf ?? 0;
+        if (conf > 0 && (!best || conf > (best.techConf.get(def.key)?.conf ?? 0))) best = o;
+      }
+      const hit = best?.techHits.get(def.key);
+      return best && hit
+        ? { tech: def.label, repo: best.analysis.name, repoUrl: best.analysis.url, source: hit.source, detail: hit.detail }
+        : null;
+    };
+    const techEvidence = provenRolled.map((t) => bestProof(t.def)).filter((e): e is TechProof => e !== null);
+    const mandatoryGaps: TechGap[] = rolled
+      .filter((t) => t.mandatory && !proven(t))
+      .map((t) => {
+        const proof = bestProof(t.def);
+        return {
+          tech: t.def.label,
+          reason: t.conf <= 0 ? "none" : !t.hard ? "readme-only" : "weak",
+          confidence: Math.round(t.conf * 100),
+          detail: proof ? `${proof.detail} (${proof.repo})` : "",
+        };
+      });
 
     // Newest own commit to a domain-relevant repo.
     let lastDomainCommit: DomainCommit | null = null;
@@ -2676,6 +3386,8 @@ export async function analyzeGithubProfile(
         matchingCount: relevant.length,
         assessable,
         provenTechs,
+        techEvidence,
+        mandatoryGaps,
         lastDomainCommit,
         warning,
         languages,
@@ -2762,4 +3474,216 @@ export function describeJdTechSpec(jd: JdTechSpec): { core: string[]; languages:
  */
 export function auditRepoCommits(items: unknown[], username: string, fileCount: number): CommitAudit {
   return auditCommits(items as GhCommitItem[], username, fileCount).audit;
+}
+
+// ── Project-level inspection (Candidate Bucketing) ──────────────────────────
+//
+// Candidate Bucketing verifies ONE repository per resume project: what its own code
+// proves (every catalogued technology, not a JD subset), its whole commit history (for
+// the strict authorship audit in bucketing/commit-integrity.ts) and its tree paths (for
+// AI-tool trace files). It reuses the tree + free raw-read evidence pipeline above.
+
+/** A REST budget shared by every GitHub call one candidate's bucketing run makes. */
+export type GithubBudget = CallBudget;
+
+export function githubBudget(calls: number): GithubBudget {
+  return { restLeft: calls, stop: false, reason: "" };
+}
+
+/** A raw REST commit item (`GET /repos/{o}/{r}/commits`) — only the fields this module reads. */
+export type GithubCommitItem = GhCommitItem;
+
+export type GithubCommitClass = CommitClass;
+
+/** One technology a repository's own code / manifests / config / artifacts prove. */
+export interface DetectedTech {
+  key: string;
+  label: string;
+  /** 0-1 evidence confidence (see scoreTech). */
+  conf: number;
+  /** Backed by more than topics / README prose. */
+  hard: boolean;
+  /** The strongest quotable proof, e.g. "import express in server.js". */
+  detail: string;
+}
+
+export interface RepoInspection {
+  owner: string;
+  repo: string;
+  url: string;
+  defaultBranch: string;
+  fork: boolean;
+  /** "owner/repo" of the upstream when this is a fork. */
+  parent: string;
+  archived: boolean;
+  homepage: string;
+  description: string;
+  pushedAt: string;
+  sizeKb: number;
+  /** Every non-vendored path in the tree. */
+  paths: string[];
+  /** GitHub truncated the tree, or the repo was too large to list. */
+  treeTruncated: boolean;
+  techs: DetectedTech[];
+  /** Declared manifest dependencies (canonical names). */
+  dependencies: string[];
+  srcFiles: number;
+  srcBytes: number;
+  notebooks: number;
+  readme: string;
+  /** Default-branch history, newest first (merges included). */
+  commits: GithubCommitItem[];
+  /** History is longer than what was fetched (or a later page failed). */
+  commitsTruncated: boolean;
+}
+
+export type RepoInspectionFailure = "not-found" | "empty" | "unavailable";
+
+export type RepoInspectionResult =
+  | { ok: true; repo: RepoInspection }
+  | { ok: false; failure: RepoInspectionFailure; message: string };
+
+/** Why a REST call gave nothing: a missing / private repo is evidence, anything else is not. */
+function inspectionFailure(budget: GithubBudget, status: number, what: string): Extract<RepoInspectionResult, { ok: false }> {
+  if (status === 404 || status === 451) return { ok: false, failure: "not-found", message: `${what}: repository not found or private.` };
+  if (status === 401) return { ok: false, failure: "unavailable", message: `${what}: GitHub rejected GITHUB_TOKEN (401).` };
+  return {
+    ok: false,
+    failure: "unavailable",
+    message: `${what}: GitHub unavailable (${budget.reason || (status ? `HTTP ${status}` : "network error")}).`,
+  };
+}
+
+/** Authenticated REST GET for callers outside this module (profiles, PRs, repo lists), on a shared budget. */
+export async function githubGetJson<T>(path: string, budget: GithubBudget): Promise<{ ok: boolean; status: number; data: T | null }> {
+  const token = githubToken();
+  if (!token) return { ok: false, status: 401, data: null };
+  return ghGet<T>(path.startsWith("http") ? path : `https://api.github.com${path}`, token, budget);
+}
+
+/**
+ * Inspect one repository for a resume project. Costs 2 + ⌈commits/100⌉ REST calls
+ * (meta, tree, commit pages); file reads go through raw.githubusercontent.com (free).
+ * Never throws.
+ */
+export async function inspectRepository(
+  owner: string,
+  repo: string,
+  budget: GithubBudget,
+  opts: { maxCommits: number },
+): Promise<RepoInspectionResult> {
+  const token = githubToken();
+  if (!token) return { ok: false, failure: "unavailable", message: "GITHUB_TOKEN is not set in .env.local." };
+  const what = `${owner}/${repo}`;
+  try {
+    const metaRes = await ghGet<GhRepoMeta & { default_branch?: string; homepage?: string | null; parent?: { full_name?: string } }>(
+      `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`,
+      token,
+      budget,
+    );
+    if (!metaRes.ok || !metaRes.data) return inspectionFailure(budget, metaRes.status, what);
+    const meta = metaRes.data;
+    // Canonical casing / renamed repos.
+    const [o, r] = meta.full_name.includes("/") ? meta.full_name.split("/") : [owner, repo];
+    if ((meta.size ?? 0) === 0) return { ok: false, failure: "empty", message: `${what}: repository is empty.` };
+    const base = `https://api.github.com/repos/${encodeURIComponent(o)}/${encodeURIComponent(r)}`;
+
+    let entries: GhTreeEntry[] = [];
+    let treeTruncated = false;
+    if ((meta.size ?? 0) <= TREE_SKIP_REPO_SIZE_KB) {
+      const tree = await ghGet<GhTree>(`${base}/git/trees/HEAD?recursive=1`, token, budget);
+      if (tree.ok && tree.data) {
+        entries = Array.isArray(tree.data.tree) ? tree.data.tree : [];
+        treeTruncated = Boolean(tree.data.truncated);
+      } else if (tree.status === 409) {
+        return { ok: false, failure: "empty", message: `${what}: repository is empty.` };
+      } else {
+        return inspectionFailure(budget, tree.status, what);
+      }
+    } else {
+      treeTruncated = true;
+    }
+
+    const corpus = entries.length > 0 ? await buildCorpus({ ...meta, name: r }, o, entries, token) : null;
+    const techs: DetectedTech[] = [];
+    if (corpus) {
+      for (const def of TECHS) {
+        const scored = scoreTech(def, corpus);
+        if (scored.conf <= 0) continue;
+        const best = [...scored.hits].sort((a, b) => b.weight - a.weight)[0];
+        techs.push({ key: def.key, label: def.label, conf: Number(scored.conf.toFixed(2)), hard: scored.hard, detail: best?.detail ?? "" });
+      }
+      techs.sort((a, b) => b.conf - a.conf);
+    }
+
+    const commits: GhCommitItem[] = [];
+    let commitsTruncated = false;
+    const pages = Math.max(1, Math.ceil(opts.maxCommits / COMMITS_PER_REPO));
+    for (let page = 1; page <= pages; page++) {
+      const res = await ghGet<GhCommitItem[]>(`${base}/commits?per_page=${COMMITS_PER_REPO}&page=${page}`, token, budget);
+      if (!res.ok || !Array.isArray(res.data)) {
+        if (res.status === 409) break; // empty history
+        if (page === 1) return inspectionFailure(budget, res.status, what);
+        commitsTruncated = true; // a later page failed: the audit is partial
+        break;
+      }
+      commits.push(...res.data);
+      if (res.data.length < COMMITS_PER_REPO) break;
+      if (page === pages) commitsTruncated = true;
+    }
+
+    return {
+      ok: true,
+      repo: {
+        owner: o,
+        repo: r,
+        url: meta.html_url || `https://github.com/${o}/${r}`,
+        defaultBranch: meta.default_branch ?? "",
+        fork: Boolean(meta.fork),
+        parent: meta.fork ? (meta.parent?.full_name ?? "unknown upstream") : "",
+        archived: Boolean(meta.archived),
+        homepage: (meta.homepage ?? "").trim(),
+        description: meta.description ?? "",
+        pushedAt: meta.pushed_at ?? "",
+        sizeKb: meta.size ?? 0,
+        paths: corpus?.paths ?? [],
+        treeTruncated,
+        techs,
+        dependencies: corpus ? [...corpus.manifestDeps.keys()] : [],
+        srcFiles: corpus?.srcFiles ?? 0,
+        srcBytes: corpus?.srcBytes ?? 0,
+        notebooks: corpus?.notebooks ?? 0,
+        readme: corpus?.readme ?? "",
+        commits,
+        commitsTruncated,
+      },
+    };
+  } catch (err) {
+    return { ok: false, failure: "unavailable", message: `${what}: ${err instanceof Error ? err.message.slice(0, 160) : "inspection failed"}` };
+  }
+}
+
+/** Classify one commit against the AI-authorship rubric (vendor logins / emails / trailers / markers). */
+export function classifyCommitItem(item: GithubCommitItem): { cls: GithubCommitClass; tool: string; quote: string } {
+  const v = classifyCommit(item, "");
+  return { cls: v.cls, tool: v.tool, quote: v.quote };
+}
+
+/** dependabot / renovate / github-actions and other ordinary automation (never `web-flow`). */
+export function isOrdinaryAutomation(login: string): boolean {
+  return Boolean(login) && login.toLowerCase() !== "web-flow" && ORDINARY_AUTOMATION.test(login);
+}
+
+/** Catalogued technologies a piece of text names (by alias) — for what a resume CLAIMS, never as proof. */
+export function techKeysInText(text: string): string[] {
+  const t = (text ?? "").toLowerCase();
+  if (!t.trim()) return [];
+  return TECHS.filter(
+    (def) => def.aliases.some((a) => mentions(t, a)) || (!labelIsWord(def) && mentions(t, def.label)) || wordIn(def, text),
+  ).map((def) => def.key);
+}
+
+/** Technology key → display label. */
+export function techLabel(key: string): string {
+  return TECH_INDEX.get(canon(key))?.label ?? key;
 }

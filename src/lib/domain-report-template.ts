@@ -31,6 +31,12 @@ export interface DomainCardInput {
   githubTopRepos: DomainGithubRepo[];
   leetcodeSolved: number;
   codeforcesSolved: number;
+  /** CodeChef problems solved (0 = none / DSA off). */
+  codechefSolved?: number;
+  /** 0-100 DSA score (0 = none / DSA off). */
+  dsaScore?: number;
+  /** Highest rating per platform (null = unrated / unknown / DSA off). */
+  ratings?: { codeforces: number | null; codechef: number | null; leetcode: number | null };
   /** GitHub commit contributions in the last ~2 years (0 = none/off). */
   githubCommits2y: number;
   /** Latest commit to a domain-relevant repo (null = none / off). */
@@ -163,12 +169,18 @@ export function buildDomainReportHtml(input: DomainReportInput): string {
         }`;
       })();
 
-      // ── coding stats strip (LeetCode / Codeforces solved · GitHub commits · last domain commit) ─
+      // ── coding stats strip (DSA score · solved / rating per platform · GitHub commits · last domain commit) ─
       const nf = (n: number) => n.toLocaleString("en-US");
       const lastCommitDay = c.lastDomainCommit ? formatDay(c.lastDomainCommit.date) : "";
+      const solvedCell = (solved: number | undefined, rating: number | null | undefined, label: string) =>
+        (solved ?? 0) > 0 || (rating ?? 0) > 0
+          ? `<span class="cstat"><b>${(solved ?? 0) > 0 ? nf(solved ?? 0) : "—"}</b><i>${label}${rating ? ` · rating ${nf(rating)}` : ""}</i></span>`
+          : "";
       const statCells = [
-        c.leetcodeSolved > 0 ? `<span class="cstat"><b>${nf(c.leetcodeSolved)}</b><i>LeetCode</i></span>` : "",
-        c.codeforcesSolved > 0 ? `<span class="cstat"><b>${nf(c.codeforcesSolved)}</b><i>Codeforces</i></span>` : "",
+        (c.dsaScore ?? 0) > 0 ? `<span class="cstat"><b>${c.dsaScore}</b><i>DSA score /100</i></span>` : "",
+        solvedCell(c.codeforcesSolved, c.ratings?.codeforces, "Codeforces"),
+        solvedCell(c.codechefSolved, c.ratings?.codechef, "CodeChef"),
+        solvedCell(c.leetcodeSolved, c.ratings?.leetcode, "LeetCode"),
         c.githubCommits2y > 0 ? `<span class="cstat"><b>${nf(c.githubCommits2y)}</b><i>commits · 2y</i></span>` : "",
         c.lastDomainCommit && lastCommitDay
           ? `<span class="cstat"><b>${esc(lastCommitDay)}</b><i>last domain commit · ${esc(shortLabel(c.lastDomainCommit.repo, 24))}</i></span>`

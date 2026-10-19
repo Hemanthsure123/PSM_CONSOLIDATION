@@ -1,3 +1,4 @@
+import type { DsaSnapshot } from "@/lib/dsa-types";
 /** Shared domain types. */
 
 export type SearchType = "uuid" | "phone" | "name" | "email";
@@ -234,6 +235,25 @@ export interface DomainGithubRepo {
   techs: string[];
 }
 
+/** The quotable proof behind one technology the candidate's GitHub code proves. */
+export interface DomainGithubEvidence {
+  tech: string;
+  /** The repo that proves it best. */
+  repo: string;
+  repoUrl: string;
+  /** The finding, e.g. "import torch in src/train.py" or "fastapi declared in requirements.txt". */
+  detail: string;
+}
+
+/** A mandatory technology the candidate's GitHub code does not prove. */
+export interface DomainGithubGap {
+  tech: string;
+  /** none = no trace; readme-only = only named in a README / topics; weak = some evidence, below the bar. */
+  reason: "none" | "readme-only" | "weak";
+  /** The best (insufficient) finding with its repo ("" = none). */
+  detail: string;
+}
+
 /**
  * Where a candidate's GitHub inspection ended up:
  *  - "off": the run did not inspect GitHub;
@@ -274,10 +294,24 @@ export interface DomainCandidate extends DomainCandidateRow {
   githubAiLikelihood: "" | "none" | "low" | "medium" | "high";
   /** One factual line behind the authorship signal ("" = not checked). */
   githubAiSummary: string;
+  /** One quotable proof per technology the code proves (absent in older runs / when not checked). */
+  githubEvidence?: DomainGithubEvidence[];
+  /** Mandatory technologies the inspected code doesn't prove, with why. */
+  githubMandatoryGaps?: DomainGithubGap[];
+  /** The domain's technologies the resume names that the inspected code doesn't prove. */
+  githubClaimedNotFound?: string[];
+  /** When the GitHub inspection behind these numbers ran (ISO; "" / absent = not run). */
+  githubCheckedAt?: string;
+  /** The inspection was reused from the 24 h cache rather than run for this sheet. */
+  githubFromCache?: boolean;
+  /** The domain's catalogued technologies the resume names (GitHub runs only) — compared with what the code proves. */
+  resumeTechs?: string[];
   /** LeetCode problems solved (0 = none found / not fetched). */
   leetcodeSolved: number;
   /** Codeforces problems solved (0 = none found / not fetched). */
   codeforcesSolved: number;
+  /** Full DSA read the DSA-consolidation way — LeetCode / Codeforces / CodeChef solved, contests, rating (absent when DSA was off). */
+  dsa?: DsaSnapshot;
   /** Total GitHub commit contributions in the last ~2 years (0 = none/unknown). */
   githubCommits2y: number;
   /** Latest commit to a domain-relevant repo, from live GitHub inspection (null = none / off). */
@@ -292,6 +326,8 @@ export interface DomainCandidate extends DomainCandidateRow {
   presentationScore: number;
   /** One line naming what drives the presentation score ("" = check was off). */
   presentationNotes: string;
+  /** The model that judged the resume, e.g. "openai/gpt-5.4-mini" (absent in older runs). */
+  scoredBy?: string;
 }
 
 /** A scored candidate plus where they landed in the shortlist. */
@@ -322,7 +358,8 @@ export interface DomainReportResult {
   /** Whether the shortlist was cut to the top N. */
   limitedToTopN: boolean;
   /** How many domain-fit candidates each strict gate removed (funnel transparency). */
-  excluded: { mandatory: number; leetcode: number; commits: number; experience: number; presentation: number };
+  /** Removed per gate. `leetcode` is the old LeetCode-only gate (0 in new runs); `dsa` = the DSA gates. */
+  excluded: { mandatory: number; leetcode: number; dsa?: number; commits: number; experience: number; presentation: number };
   /** Set when the PDF couldn't be produced (e.g. Chromium OOM); CSV is unaffected. */
   pdfError?: string;
   /** True when the run was asked not to build a PDF report (link is ""). */

@@ -1,10 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { ClipboardCheck, Home } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { Notice } from "@/components/ui/notice";
 import { Stepper } from "@/components/ui/stepper";
+import { useReportBusy } from "@/components/busy-context";
+import { cn } from "@/lib/utils";
 import { AssignmentStep } from "@/components/assignment-eval/assignment-step";
 import { CriteriaStep } from "@/components/assignment-eval/criteria-step";
 import { CandidatesStep } from "@/components/assignment-eval/candidates-step";
@@ -29,8 +29,8 @@ interface AssignmentEvalProps {
 const STEPS = [
   { title: "Assignment", description: "Paste or upload" },
   { title: "Criteria", description: "Review the rubric" },
-  { title: "Candidates", description: "Mobile + GitHub" },
-  { title: "Evaluate", description: "Scores & CSV" },
+  { title: "Candidates", description: "Mobile and GitHub" },
+  { title: "Evaluate", description: "Scores and CSV" },
 ];
 
 const MAX_STORED_DOC = 150_000;
@@ -52,7 +52,7 @@ function defaultConfig(): AssignmentRunConfig {
  * it against that rubric. Runs are saved after every batch, so a long run
  * (50–200 candidates) survives a refresh and can be resumed from the dashboard.
  */
-export function AssignmentEval({ runId, onDone }: AssignmentEvalProps) {
+export function AssignmentEval({ runId }: AssignmentEvalProps) {
   const [id, setId] = React.useState<string>(() => runId || newAssignmentRunId());
   const [createdAt, setCreatedAt] = React.useState(() => new Date().toISOString());
   const [step, setStep] = React.useState(0);
@@ -70,6 +70,7 @@ export function AssignmentEval({ runId, onDone }: AssignmentEvalProps) {
   const [runError, setRunError] = React.useState("");
   const [storageFull, setStorageFull] = React.useState(false);
   const abortRef = React.useRef(false);
+  useReportBusy(running || analyzing);
 
   // Reopen a saved run.
   React.useEffect(() => {
@@ -216,32 +217,15 @@ export function AssignmentEval({ runId, onDone }: AssignmentEvalProps) {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
-            <ClipboardCheck className="h-6 w-6" /> Assignment Evaluation
-          </h2>
-          <p className="text-sm text-muted-foreground">
-            Derive the rubric strictly from the assignment, read every candidate&apos;s GitHub repository end to end,
-            and score each requirement with evidence — selection status, shortlist chance and remarks, exported as CSV.
-          </p>
-        </div>
-        <Button variant="outline" onClick={onDone} disabled={running}>
-          <Home className="h-4 w-4" /> Dashboard
-        </Button>
+      {/* One step per view; the stepper shows where the run is and how far is left. */}
+      <div className="max-w-3xl rounded-xl border bg-card px-5 py-4 shadow-surface">
+        <Stepper steps={STEPS} current={step} />
       </div>
 
-      <Card>
-        <CardContent className="py-5">
-          <Stepper steps={STEPS} current={step} />
-        </CardContent>
-      </Card>
-
       {storageFull ? (
-        <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-          Browser storage is full, so this run is no longer being saved. Export the CSV now, then delete older
-          assignment runs from the dashboard.
-        </p>
+        <Notice tone="warning" title="This run is no longer being saved" className={cn(step < 3 && "max-w-3xl")}>
+          Browser storage is full. Download the CSV now, then delete older assignment runs from the dashboard.
+        </Notice>
       ) : null}
 
       {step === 0 ? (

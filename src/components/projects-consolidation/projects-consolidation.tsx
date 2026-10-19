@@ -7,22 +7,33 @@ import {
   CheckCircle2,
   ExternalLink,
   FileSpreadsheet,
+  FileText,
   FolderGit2,
   Github,
   Globe,
-  Home,
   Loader2,
   Play,
   ShieldCheck,
   Square,
   Table2,
+  Trophy,
+  Users,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
+import { Textarea } from "@/components/ui/textarea";
+import { NativeSelect } from "@/components/ui/select";
+import { badgeVariants } from "@/components/ui/badge";
+import { Panel } from "@/components/ui/panel";
+import { Field } from "@/components/ui/field";
+import { SettingList, SettingRow } from "@/components/ui/setting-row";
+import { Segmented } from "@/components/ui/segmented";
+import { Disclosure } from "@/components/ui/disclosure";
+import { Notice } from "@/components/ui/notice";
+import { Progress } from "@/components/ui/progress";
+import { Stat, StatGrid } from "@/components/ui/stat";
+import { ActionBar } from "@/components/ui/action-bar";
+import { useReportBusy } from "@/components/busy-context";
 import { cn } from "@/lib/utils";
 import { listSubsheets, readSubsheet } from "@/actions/sheets";
 import { extractCandidateProjects, buildProjectsReport } from "@/actions/projects";
@@ -110,6 +121,8 @@ export function ProjectsConsolidation({ onDone }: ProjectsConsolidationProps) {
     droppedByStrict: number;
   } | null>(null);
   const abortRef = React.useRef(false);
+  // Leaving from the sidebar mid-run asks first.
+  useReportBusy(running);
 
   const update = (name: string, partial: Partial<SubConfig>) =>
     setSubs((prev) => prev.map((s) => (s.name === name ? { ...s, ...partial } : s)));
@@ -205,44 +218,20 @@ export function ProjectsConsolidation({ onDone }: ProjectsConsolidationProps) {
     }
   };
 
-  return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h2 className="text-2xl font-bold tracking-tight">Projects Consolidation</h2>
-          <p className="text-sm text-muted-foreground">
-            Mine every resume for the strongest projects matching your brief, and publish one
-            ranked report.
-          </p>
-        </div>
-        <Button variant="outline" onClick={onDone}>
-          <Home className="h-4 w-4" /> Dashboard
-        </Button>
-      </div>
+  // Presentation only: what the action bar says and which button is the primary one.
+  const selectedRows = selected.reduce((sum, s) => sum + s.rowCount, 0);
+  const strictLinks = [priorities.live ? "live demo" : "", priorities.github ? "GitHub" : ""].filter(Boolean).join(" and ") || "selected";
 
+  return (
+    <div className="max-w-3xl space-y-6">
       {/* 1 — source sheet */}
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <FileSpreadsheet className="h-4 w-4" /> Resume source
-          </CardTitle>
-          <CardDescription>
-            Any Google Sheet with a column of resume links — a placement drive sheet, a batch
-            roster, anything.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-2">
-            <Label htmlFor="proj-run-name">Report name</Label>
-            <Input
-              id="proj-run-name"
-              value={runName}
-              onChange={(e) => setRunName(e.target.value)}
-              placeholder="e.g. GenAI showcase — Batch 12"
-            />
-          </div>
-          <div className="grid gap-2">
-            <Label htmlFor="proj-url">Google Sheet URL</Label>
+      <Panel
+        icon={<FileSpreadsheet />}
+        title="Resume source"
+        description="Any Google Sheet with a column of resume links: a placement drive sheet, a batch roster, anything."
+      >
+        <div className="grid gap-5">
+          <Field label="Google Sheet URL" htmlFor="proj-url">
             <div className="flex flex-col gap-2 sm:flex-row">
               <Input
                 id="proj-url"
@@ -250,285 +239,300 @@ export function ProjectsConsolidation({ onDone }: ProjectsConsolidationProps) {
                 onChange={(e) => setUrl(e.target.value)}
                 placeholder="https://docs.google.com/spreadsheets/d/…"
               />
-              <Button onClick={fetchTabs} disabled={!url.trim() || fetching} variant="secondary">
+              <Button
+                onClick={fetchTabs}
+                disabled={!url.trim() || fetching}
+                variant={subs.length ? "outline" : "default"}
+                className="shrink-0"
+              >
                 {fetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <Table2 className="h-4 w-4" />}
                 {fetching ? "Reading…" : "Load tabs"}
               </Button>
             </div>
-          </div>
+          </Field>
           {sheetTitle ? (
-            <p className="text-sm text-muted-foreground">
-              Loaded <strong>{sheetTitle}</strong> — {subs.length} tab{subs.length === 1 ? "" : "s"}
+            <p className="-mt-2 flex items-center gap-1.5 text-[13px] text-muted-foreground">
+              <CheckCircle2 className="h-4 w-4 shrink-0 text-success" />
+              <span className="min-w-0">
+                Loaded <strong className="font-medium text-foreground">{sheetTitle}</strong>,{" "}
+                <span className="tabular-nums">{subs.length}</span> tab{subs.length === 1 ? "" : "s"}
+              </span>
             </p>
           ) : null}
-          {error ? <p className="text-sm text-destructive">{error}</p> : null}
-        </CardContent>
-      </Card>
+          <Field label="Report name" htmlFor="proj-run-name" hint="Filled in from the sheet's title if left empty.">
+            <Input
+              id="proj-run-name"
+              value={runName}
+              onChange={(e) => setRunName(e.target.value)}
+              placeholder="e.g. GenAI showcase — Batch 12"
+            />
+          </Field>
+        </div>
+      </Panel>
 
       {/* 2 — tabs + column mapping */}
       {subs.length ? (
-        <Card>
-          <CardHeader>
-            <CardTitle className="text-base">Tabs to scan</CardTitle>
-            <CardDescription>
-              Only the <strong>Resume</strong> column is required. Name and college are used for
-              attribution when you enable it.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-3">
-            {subs.map((s) => (
-              <div
+        <Panel
+          icon={<Table2 />}
+          title="Tabs to scan"
+          description="Turn on the tabs to read. Only the resume link column is required."
+        >
+          <SettingList>
+            {subs.map((s, i) => (
+              <SettingRow
                 key={s.name}
-                className={cn("rounded-lg border p-3 transition-colors", s.selected ? "border-primary bg-primary/5" : "")}
-              >
-                <label className="flex cursor-pointer items-center justify-between gap-3">
-                  <span className="flex items-center gap-2 text-sm font-medium">
+                id={`proj-tab-${i}`}
+                title={
+                  <span className="inline-flex flex-wrap items-center gap-2">
                     {s.name}
-                    <Badge variant="secondary">{s.rowCount} rows</Badge>
-                    {s.selected && !s.resumeColumn ? (
-                      <span className="text-xs font-normal text-destructive">no resume column found</span>
-                    ) : null}
+                    <span className={cn(badgeVariants({ variant: "secondary" }), "tabular-nums")}>{s.rowCount} rows</span>
                   </span>
-                  <Switch checked={s.selected} onCheckedChange={(v) => update(s.name, { selected: v })} />
-                </label>
-
-                {s.selected ? (
-                  <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                    {([
-                      ["resumeColumn", "Resume link *"],
-                      ["nameColumn", "Candidate name"],
-                      ["placedColumn", "Placed company"],
-                      ["ctcColumn", "CTC / pay scale"],
-                    ] as const).map(([key, label]) => (
-                      <div key={key} className="grid gap-1.5">
-                        <Label className="text-xs text-muted-foreground">{label}</Label>
-                        <select
-                          value={s[key]}
-                          onChange={(e) => update(s.name, { [key]: e.target.value } as Partial<SubConfig>)}
-                          className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                        >
-                          <option value="">— none —</option>
-                          {s.headers.map((h) => (
-                            <option key={h} value={h}>
-                              {h}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
+                }
+                description={
+                  s.selected && !s.resumeColumn ? (
+                    <span className="text-destructive">No resume column found. Pick one below.</span>
+                  ) : undefined
+                }
+                checked={s.selected}
+                onCheckedChange={(v) => update(s.name, { selected: v })}
+              >
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {([
+                    ["resumeColumn", "Resume link", false],
+                    ["nameColumn", "Candidate name", true],
+                    ["placedColumn", "Placed company", true],
+                    ["ctcColumn", "CTC / pay scale", true],
+                  ] as const).map(([key, label, optional]) => (
+                    <Field key={key} label={label} optional={optional} htmlFor={`proj-tab-${i}-${key}`}>
+                      <NativeSelect
+                        id={`proj-tab-${i}-${key}`}
+                        value={s[key]}
+                        onChange={(e) => update(s.name, { [key]: e.target.value } as Partial<SubConfig>)}
+                      >
+                        <option value="">None</option>
+                        {s.headers.map((h) => (
+                          <option key={h} value={h}>
+                            {h}
+                          </option>
+                        ))}
+                      </NativeSelect>
+                    </Field>
+                  ))}
+                </div>
+              </SettingRow>
             ))}
-          </CardContent>
-        </Card>
+          </SettingList>
+        </Panel>
       ) : null}
 
       {/* 3 — the brief */}
       {subs.length ? (
-        <Card>
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <FolderGit2 className="h-4 w-4" /> What makes a project worth showcasing?
-            </CardTitle>
-            <CardDescription>
-              Every project found is scored against this brief and on its own engineering merit —
-              only projects clearing both bars make the shortlist.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <textarea
-              rows={3}
-              value={brief}
-              onChange={(e) => setBrief(e.target.value)}
-              placeholder="e.g. Generative AI projects — LLM apps, RAG pipelines, agents or fine-tuning. Prefer deployed work with real users or measurable impact."
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-1 focus:ring-ring"
-            />
-
-            <div className="flex flex-wrap items-center gap-2">
-              <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                Shortlist size
-              </span>
-              {TOP_N_CHOICES.map((n) => (
-                <Button
-                  key={n}
-                  type="button"
-                  size="sm"
-                  variant={topN === n ? "default" : "outline"}
-                  onClick={() => setTopN(n)}
-                >
-                  Top {n}
-                </Button>
-              ))}
-            </div>
-
-            {/* Prioritisation — float the strongest proof to the top. */}
-            <div className="space-y-3 rounded-lg border bg-muted/30 p-3">
-              <div className="space-y-0.5">
-                <p className="text-sm font-medium">Prioritise the strongest proof</p>
-                <p className="text-xs text-muted-foreground">
-                  All best projects are ranked on merit first; these push the ones carrying real
-                  proof — a working demo, a public repo, a placed author — to the top.
-                </p>
-              </div>
-
-              <div className="grid gap-2 sm:grid-cols-3">
-                {([
-                  ["live", "Live demo", <Globe key="l" className="h-4 w-4" />],
-                  ["github", "GitHub repo", <Github key="g" className="h-4 w-4" />],
-                  ["placed", "Placed candidates", <Briefcase key="p" className="h-4 w-4" />],
-                ] as const).map(([key, label, icon]) => {
-                  const active = priorities[key];
-                  return (
-                    <button
-                      key={key}
-                      type="button"
-                      onClick={() => setPriority(key, !active)}
-                      className={cn(
-                        "flex items-center justify-between gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors",
-                        active ? "border-primary bg-primary/5 ring-1 ring-primary" : "hover:bg-accent",
-                      )}
-                    >
-                      <span className="flex items-center gap-2">
-                        <span className={active ? "text-primary" : "text-muted-foreground"}>{icon}</span>
-                        {label}
-                      </span>
-                      <Switch checked={active} onCheckedChange={(v) => setPriority(key, v)} />
-                    </button>
-                  );
-                })}
-              </div>
-
-              <div
-                className={cn(
-                  "flex items-start justify-between gap-3 rounded-md border p-3",
-                  !priorities.live && !priorities.github ? "opacity-50" : "",
-                )}
-              >
-                <div className="space-y-0.5">
-                  <Label htmlFor="proj-strict" className="flex items-center gap-2 text-sm">
-                    <ShieldCheck className="h-4 w-4" /> Strict — links required
-                  </Label>
-                  <p className="text-xs text-muted-foreground">
-                    Only include projects that actually have the{" "}
-                    {[priorities.live ? "live demo" : "", priorities.github ? "GitHub" : ""]
-                      .filter(Boolean)
-                      .join(" and ") || "selected"}{" "}
-                    link{priorities.live && priorities.github ? "s" : ""}. Off: everything strong is
-                    kept, link-carrying projects just rank higher. (Placement is never required —
-                    only ever a boost.)
-                  </p>
-                </div>
-                <Switch
-                  id="proj-strict"
-                  checked={priorities.strict}
-                  disabled={!priorities.live && !priorities.github}
-                  onCheckedChange={(v) => setPriority("strict", v)}
+        <Panel
+          icon={<FolderGit2 />}
+          title="What makes a project worth showcasing?"
+          description="Projects must match this brief and stand on their own engineering merit."
+        >
+          <div className="grid gap-5">
+            <Field
+              label="Brief"
+              htmlFor="proj-brief"
+              info="Every project found is scored against this brief and on its own engineering merit. Only projects clearing both bars make the shortlist."
+            >
+              <Textarea
+                id="proj-brief"
+                rows={3}
+                value={brief}
+                onChange={(e) => setBrief(e.target.value)}
+                placeholder="e.g. Generative AI projects — LLM apps, RAG pipelines, agents or fine-tuning. Prefer deployed work with real users or measurable impact."
+              />
+            </Field>
+            <Field label="Shortlist size">
+              <div>
+                <Segmented
+                  ariaLabel="Shortlist size"
+                  value={topN}
+                  onChange={setTopN}
+                  options={TOP_N_CHOICES.map((n) => ({ value: n, label: `Top ${n}` }))}
                 />
               </div>
-            </div>
-
-            <div className="flex items-start justify-between gap-3 rounded-lg border p-3">
-              <div className="space-y-0.5">
-                <Label htmlFor="proj-attrib" className="text-sm">
-                  Include candidate names &amp; resume links
-                </Label>
-                <p className="text-xs text-muted-foreground">
-                  Keep this <strong>off</strong> when sharing the report with a batch — a resume
-                  carries the candidate&apos;s phone number and email. Turn it on only for internal
-                  use.
-                </p>
-              </div>
-              <Switch id="proj-attrib" checked={showCandidates} onCheckedChange={setShowCandidates} />
-            </div>
-
-            {showCandidates ? (
-              <p className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50/60 p-2.5 text-xs text-amber-900">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-                The report will contain other people&apos;s names and resume links — don&apos;t
-                circulate it outside the team.
-              </p>
-            ) : null}
-          </CardContent>
-        </Card>
+            </Field>
+          </div>
+        </Panel>
       ) : null}
 
-      {/* 4 — run */}
+      {/* 4 — prioritisation: float the strongest proof to the top */}
       {subs.length ? (
-        <Card>
-          <CardContent className="space-y-3 py-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <Button onClick={run} disabled={!canRun}>
-                {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
-                {running ? `Scanning ${progress.done}/${progress.total}…` : `Build top ${topN} projects report`}
-              </Button>
-              {running ? (
-                <>
-                  <Button variant="outline" onClick={() => (abortRef.current = true)}>
-                    <Square className="h-4 w-4" /> Stop
-                  </Button>
-                  <span className="text-sm text-muted-foreground">
-                    {progress.found} project{progress.found === 1 ? "" : "s"} found so far
-                  </span>
-                </>
-              ) : null}
-            </div>
+        <Panel
+          icon={<ShieldCheck />}
+          title="Prioritise the strongest proof"
+          description="Projects are ranked on merit first; these push the ones with real proof to the top."
+        >
+          <SettingList>
+            <SettingRow
+              id="proj-pri-live"
+              icon={<Globe />}
+              title="Live demo"
+              description="Projects with a working demo rank higher."
+              checked={priorities.live}
+              onCheckedChange={(v) => setPriority("live", v)}
+            />
+            <SettingRow
+              id="proj-pri-github"
+              icon={<Github />}
+              title="GitHub repo"
+              description="Projects with a public repo rank higher."
+              checked={priorities.github}
+              onCheckedChange={(v) => setPriority("github", v)}
+            />
+            <SettingRow
+              id="proj-pri-placed"
+              icon={<Briefcase />}
+              title="Placed candidates"
+              description="Projects by candidates who were placed rank higher."
+              checked={priorities.placed}
+              onCheckedChange={(v) => setPriority("placed", v)}
+            />
+            <SettingRow
+              id="proj-strict"
+              icon={<ShieldCheck />}
+              title="Strict: links required"
+              description={`Only include projects that have the ${strictLinks} link${priorities.live && priorities.github ? "s" : ""}.`}
+              info="Off: everything strong is kept, and projects with links just rank higher. Placement is never required, only ever a boost. Needs Live demo or GitHub repo turned on."
+              checked={priorities.strict}
+              disabled={!priorities.live && !priorities.github}
+              onCheckedChange={(v) => setPriority("strict", v)}
+            />
+          </SettingList>
+        </Panel>
+      ) : null}
 
-            {!canRun && !running && subs.some((s) => s.selected) && !brief.trim() ? (
-              <p className="text-xs text-muted-foreground">Describe the projects you want first.</p>
-            ) : null}
+      {/* 5 — what the report may show */}
+      {subs.length ? (
+        <Panel icon={<Users />} title="Privacy">
+          <SettingRow
+            id="proj-attrib"
+            title="Include candidate names and resume links"
+            description="Keep this off when sharing the report with a batch. Turn it on only for internal use."
+            info="A resume carries the candidate's phone number and email."
+            checked={showCandidates}
+            onCheckedChange={setShowCandidates}
+          >
+            <Notice tone="warning">
+              The report will contain other people&apos;s names and resume links. Don&apos;t circulate it outside the team.
+            </Notice>
+          </SettingRow>
+        </Panel>
+      ) : null}
 
-            {result ? (
-              <div className="space-y-2 rounded-lg border border-emerald-200 bg-emerald-50/50 p-3">
-                <p className="flex items-center gap-2 text-sm font-medium text-emerald-900">
-                  <CheckCircle2 className="h-4 w-4" />
-                  Shortlisted {result.shortlisted} of {result.considered} projects found across{" "}
-                  {progress.total} resume{progress.total === 1 ? "" : "s"}
-                </p>
+      {/* 6 — result */}
+      {result ? (
+        <section aria-label="Projects report" className="space-y-4">
+          <StatGrid cols={4}>
+            <Stat icon={<Trophy />} label="Shortlisted" value={result.shortlisted} tone="highlight" />
+            <Stat icon={<FolderGit2 />} label="Projects found" value={result.considered} />
+            <Stat icon={<FileText />} label="Resumes scanned" value={progress.done} hint={`of ${progress.total}`} />
+            <Stat
+              icon={<AlertTriangle />}
+              label="Resumes skipped"
+              value={skipped.length}
+              tone={skipped.length ? "warning" : "default"}
+            />
+          </StatGrid>
+          <Panel
+            icon={<CheckCircle2 />}
+            title="Projects report"
+            description={`Shortlisted ${result.shortlisted} of ${result.considered} projects found across ${progress.total} resume${progress.total === 1 ? "" : "s"}.`}
+            actions={
+              <a href={result.link} target="_blank" rel="noreferrer" className={buttonVariants({ variant: "default" })}>
+                <ExternalLink className="h-4 w-4" /> Open the projects report
+              </a>
+            }
+          >
+            {result.droppedByStrict > 0 || result.storage === "local" || result.shortlisted === 0 ? (
+              <div className="space-y-3">
                 {result.droppedByStrict > 0 ? (
-                  <p className="text-xs text-muted-foreground">
-                    Strict mode excluded {result.droppedByStrict} otherwise-strong project
-                    {result.droppedByStrict === 1 ? "" : "s"} that lacked the required link
+                  <p className="text-[13px] text-muted-foreground">
+                    Strict mode excluded <span className="tabular-nums">{result.droppedByStrict}</span> otherwise-strong
+                    project{result.droppedByStrict === 1 ? "" : "s"} that lacked the required link
                     {priorities.live && priorities.github ? "s" : ""}.
                   </p>
                 ) : null}
-                <a
-                  href={result.link}
-                  target="_blank"
-                  rel="noreferrer"
-                  className="inline-flex items-center gap-1.5 text-sm font-medium text-primary hover:underline"
-                >
-                  <ExternalLink className="h-4 w-4" /> Open the projects report
-                </a>
                 {result.storage === "local" ? (
-                  <p className="text-xs text-amber-700">
-                    Saved locally (Drive storage quota unavailable) — served by this app.
-                  </p>
+                  <Notice tone="info">Saved locally (Drive storage quota unavailable), served by this app.</Notice>
                 ) : null}
                 {result.shortlisted === 0 ? (
-                  <p className="text-xs text-amber-700">
-                    Nothing cleared the quality bar for this brief — try widening the wording.
-                  </p>
+                  <Notice tone="warning">Nothing cleared the quality bar for this brief. Try widening the wording.</Notice>
                 ) : null}
               </div>
             ) : null}
+          </Panel>
+        </section>
+      ) : null}
 
-            {skipped.length ? (
-              <details className="text-xs text-muted-foreground">
-                <summary className="cursor-pointer">
-                  {skipped.length} resume{skipped.length === 1 ? "" : "s"} skipped
-                </summary>
-                <ul className="mt-1 space-y-0.5 pl-4">
-                  {skipped.slice(0, 15).map((s) => (
-                    <li key={s} className="list-disc">
-                      {s}
-                    </li>
-                  ))}
-                </ul>
-              </details>
-            ) : null}
-          </CardContent>
-        </Card>
+      {skipped.length ? (
+        <Disclosure
+          title={`${skipped.length} resume${skipped.length === 1 ? "" : "s"} skipped`}
+          summary={skipped.length > 15 ? "First 15 shown" : undefined}
+        >
+          <ul className="list-disc space-y-1 pl-5 text-[13px] leading-relaxed text-muted-foreground">
+            {skipped.slice(0, 15).map((s) => (
+              <li key={s}>{s}</li>
+            ))}
+          </ul>
+        </Disclosure>
+      ) : null}
+
+      {error ? <Notice tone="danger">{error}</Notice> : null}
+
+      {/* 7 — run */}
+      {subs.length ? (
+        <ActionBar
+          status={
+            running ? (
+              <div className="space-y-2">
+                {progress.total ? (
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5">
+                    <span>
+                      Scanning <span className="font-medium tabular-nums text-foreground">{progress.done}</span> of{" "}
+                      <span className="tabular-nums">{progress.total}</span> resumes
+                    </span>
+                    <span>
+                      <span className="tabular-nums">{progress.found}</span> project{progress.found === 1 ? "" : "s"} found so far
+                    </span>
+                  </div>
+                ) : (
+                  <span>Reading the selected tabs…</span>
+                )}
+                <Progress value={progress.done} max={progress.total} label="Scanning resumes" />
+              </div>
+            ) : !canRun && subs.some((s) => s.selected) && !brief.trim() ? (
+              "Describe the projects you want first."
+            ) : !selected.length ? (
+              "Turn on at least one tab with a resume column."
+            ) : (
+              <>
+                Ready to scan <span className="tabular-nums">{selected.length}</span> tab{selected.length === 1 ? "" : "s"} (
+                <span className="tabular-nums">{selectedRows}</span> rows).
+              </>
+            )
+          }
+        >
+          {running ? (
+            <Button variant="outline" onClick={() => (abortRef.current = true)}>
+              <Square className="h-4 w-4" /> Stop
+            </Button>
+          ) : null}
+          <Button
+            size="lg"
+            className="h-auto min-h-11 whitespace-normal py-2 text-left"
+            onClick={run}
+            disabled={!canRun}
+            variant={result && !running ? "outline" : "default"}
+          >
+            {running ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+            {running ? `Scanning ${progress.done}/${progress.total}…` : `Build top ${topN} projects report`}
+          </Button>
+        </ActionBar>
       ) : null}
     </div>
   );

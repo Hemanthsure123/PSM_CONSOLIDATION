@@ -312,13 +312,23 @@ async function llmExtract(text: string): Promise<{ leetcode: string; codeforces:
 
 // ── Orchestration ────────────────────────────────────────────────────────────
 
+/** A platform named in the text (for "if-mentioned": only then can a model find a handle-only mention). */
+const PLATFORM_WORDS: Record<keyof ExtractedProfiles, RegExp> = {
+  leetcode: /leet\s*code/i,
+  codeforces: /code\s*forces/i,
+  codechef: /code\s*chef/i,
+};
+
 /**
  * Extract LeetCode, Codeforces + CodeChef profile links from a resume's bytes.
- * `useLlm` controls whether the LLM fallback (Gemini, Mistral on rate limits) runs.
+ * `useLlm` controls the LLM fallback (Gemini, Mistral on rate limits) for handle-only
+ * mentions: true = whenever a platform is still missing (DSA consolidation);
+ * "if-mentioned" = only when the resume names a platform it has no link for (Domain
+ * Shortlisting — no model call for the many resumes that name none); false = never.
  */
 export async function extractProfileLinksFromResume(
   resume: ResumeBytes,
-  useLlm = true,
+  useLlm: boolean | "if-mentioned" = true,
 ): Promise<ExtractedProfiles> {
   const result: ExtractedProfiles = { leetcode: null, codeforces: null, codechef: null };
   const complete = () => Boolean(result.leetcode && result.codeforces && result.codechef);
@@ -358,7 +368,8 @@ export async function extractProfileLinksFromResume(
   }
 
   // LLM fallback for handle-only mentions.
-  if (useLlm && !complete() && text.trim().length > 40) {
+  const mentioned = (Object.keys(PLATFORM_WORDS) as (keyof ExtractedProfiles)[]).some((k) => !result[k] && PLATFORM_WORDS[k].test(text));
+  if ((useLlm === true || (useLlm === "if-mentioned" && mentioned)) && !complete() && text.trim().length > 40) {
     const llm = await llmExtract(text);
     if (!result.leetcode && llm.leetcode) result.leetcode = { url: llm.leetcode, source: "llm" };
     if (!result.codeforces && llm.codeforces) result.codeforces = { url: llm.codeforces, source: "llm" };

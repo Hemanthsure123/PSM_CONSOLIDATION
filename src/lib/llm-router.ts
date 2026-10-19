@@ -2,7 +2,7 @@ import "server-only";
 import type { Part, Schema } from "@google/generative-ai";
 import { env } from "@/lib/env";
 import { geminiJsonForModel, geminiUsableKeyCount, type GeminiFailureKind } from "@/lib/gemini-keys";
-import { ChatPoolError, hasProviderKeys, pooledChatJson } from "@/lib/key-pool";
+import { ChatPoolError, filePart, hasProviderKeys, pooledChatJson, strictJsonSchema, type ChatProvider } from "@/lib/key-pool";
 
 /**
  * LLM routing for long-context jobs (Assignment Evaluation).
@@ -23,9 +23,13 @@ import { ChatPoolError, hasProviderKeys, pooledChatJson } from "@/lib/key-pool";
  * Override the order with ASSIGNMENT_LLM_CHAIN="provider:model,…" (Groq may be
  * added there explicitly; it is not in the default chain — its small free-tier
  * window is too shallow for whole-repository review).
+ *
+ * "openai:<model>" tiers (OPENAI_API_KEY_1…N) are fallbacks like Mistral, tried in
+ * chain order; they answer to a strict JSON schema and can read the file itself
+ * (ChainPrompt.inline) — so they can stand in for Gemini on scanned resumes.
  */
 
-export type LlmProvider = "gemini" | "mistral" | "groq";
+export type LlmProvider = "gemini" | "openai" | "mistral" | "groq";
 
 export interface LlmTier {
   provider: LlmProvider;
@@ -48,6 +52,8 @@ const DEFAULT_CHAIN =
 /** Content budgets — well inside each provider's context window and free-tier TPM. */
 const BUDGET: Record<LlmProvider, number> = {
   gemini: 380_000,
+  // ~50k tokens: inside one OpenAI key's per-minute token allowance.
+  openai: 200_000,
   mistral: 280_000,
   groq: 22_000,
 };
@@ -71,6 +77,8 @@ export interface ChainPrompt {
   geminiParts: string | Array<string | Part>;
   /** Plain-text user message for the OpenAI-compatible providers. */
   text: string;
+  /** The file itself (PDF / image) for providers that can read it — OpenAI; sent with `text`. */
+  inline?: { mimeType: string; data: string };
 }
 
 export interface ChainRequest {
@@ -87,6 +95,8 @@ export interface ChainRequest {
   maxOutputTokens?: number;
   /** Gemini thinking effort ("low" for extraction-style jobs that must be fast). Omit = model default. */
   thinking?: "low" | "high";
+  /** OpenAI reasoning effort for "openai:" tiers (default: `thinking`, else OPENAI_REASONING_EFFORT). */
+  openaiReasoning?: string;
   /** A different "provider:model,…" chain (e.g. a fast one for small extraction jobs). */
   chain?: string;
   /** Latency-first: never wait for a rate-limited Mistral key to cool down — move on. */
@@ -189,9 +199,17 @@ export async function runLlmChain(req: ChainRequest): Promise<ChainResult> {
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
         const prompt = req.build(tier, budget);
-        const { text } = await pooledChatJson(tier.provider as "mistral" | "groq", tier.model, {
+        const openai = tier.provider === "openai";
+        const { text } = await pooledChatJson(tier.provider as ChatProvider, tier.model, {
           system: `${req.system}\n\n${req.shapeHint}`,
           user: prompt.text,
+          ...(openai
+            ? {
+                userParts: prompt.inline ? [filePart(prompt.inline), { type: "text" as const, text: prompt.text }] : undefined,
+                jsonSchema: { name: "answer", schema: strictJsonSchema(req.schema) },
+                reasoningEffort: req.openaiReasoning ?? req.thinking ?? env.openai.reasoningEffort,
+              }
+            : {}),
           temperature: req.temperature,
           timeoutMs: req.timeoutMs ?? 240_000,
           singleRound: req.fast,

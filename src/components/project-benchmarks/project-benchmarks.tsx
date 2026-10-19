@@ -1,11 +1,19 @@
 "use client";
 
 import * as React from "react";
-import { Home, Loader2, Play, Target, Trophy } from "lucide-react";
+import { FileText, Loader2, Play, Target } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
+import { NativeSelect } from "@/components/ui/select";
+import { Panel } from "@/components/ui/panel";
+import { Field } from "@/components/ui/field";
+import { Disclosure } from "@/components/ui/disclosure";
+import { InfoHint } from "@/components/ui/info-hint";
+import { Notice } from "@/components/ui/notice";
+import { ActionBar } from "@/components/ui/action-bar";
+import { useReportBusy } from "@/components/busy-context";
+import { cn } from "@/lib/utils";
 import { BenchmarkPaste } from "@/components/project-benchmarks/benchmark-paste";
 import { BenchmarkResults, CONCURRENCY_OPTIONS, type ExportSettings } from "@/components/project-benchmarks/benchmark-results";
 import { consolidateBenchmarks } from "@/lib/benchmark-report";
@@ -50,9 +58,6 @@ const META_SAVE_MS = 3_000;
 const DEFAULT_CONCURRENCY = 10;
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-const fieldClass = "h-9 w-full rounded-md border border-input bg-background px-2 text-sm";
-const textareaClass =
-  "min-h-[72px] w-full rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring";
 const NO_EXISTING = new Map<string, number>();
 const DEFAULT_SETTINGS: ExportSettings = {
   minScore: DEFAULT_MIN_SCORE,
@@ -183,6 +188,8 @@ export function ProjectBenchmarks({ runId, autoStart, onDone, onOpenRun }: Proje
   const [error, setError] = React.useState("");
   // Shown on the results page after a saved run was repaired on opening.
   const [notice, setNotice] = React.useState("");
+  // Leaving from the sidebar mid-run asks first.
+  useReportBusy(running);
 
   // The run loop outlives renders: it reads and writes through refs, and the UI
   // is refreshed on a short timer instead of once per resume.
@@ -479,7 +486,7 @@ export function ProjectBenchmarks({ runId, autoStart, onDone, onOpenRun }: Proje
 
   if (loading) {
     return (
-      <div className="flex items-center gap-2 py-16 text-sm text-muted-foreground">
+      <div role="status" className="flex items-center justify-center gap-2 rounded-xl border bg-card py-16 text-sm text-muted-foreground shadow-surface">
         <Loader2 className="h-4 w-4 animate-spin" /> Opening the saved run…
       </div>
     );
@@ -515,165 +522,164 @@ export function ProjectBenchmarks({ runId, autoStart, onDone, onOpenRun }: Proje
 
   const domain = domainInput.trim();
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardContent className="flex items-center gap-4 py-4">
-          <Button variant="ghost" size="sm" onClick={onDone} className="shrink-0">
-            <Home className="h-4 w-4" /> Dashboard
-          </Button>
-          <div className="min-w-0">
-            <h2 className="flex items-center gap-2 text-base font-semibold">
-              <Trophy className="h-4 w-4 text-muted-foreground" /> Benchmark Projects (15+ LPA)
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              Type a domain or tech stack, paste resumes, and get that domain&apos;s best industry-standard projects —
-              complex, production-grade work worth 15+ LPA — grouped by its sub-areas as a Markdown file for Notion, to
-              use as benchmark ideas when training students.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Target className="h-4 w-4" /> Domain
-          </CardTitle>
-          <CardDescription>
-            Everything is judged against this domain: only its projects are picked, the 15+ LPA bar is set by what
-            production-grade work looks like in it, and the export is grouped by its sub-areas. Projects from other
-            domains are ignored.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-1.5">
-            <Label htmlFor="bench-domain">Domain or tech stack</Label>
+    <div className="max-w-3xl space-y-6">
+      <Panel
+        title="Domain"
+        icon={<Target />}
+        description="Only this domain's projects are picked, and the export is grouped by its sub-areas."
+      >
+        <div className="grid gap-5">
+          <Field
+            label="Domain or tech stack"
+            htmlFor="bench-domain"
+            info={
+              <>
+                Everything is judged against this domain: only its projects are picked, the 15+ LPA bar is set by what
+                production-grade work looks like in it, and the export is grouped by its sub-areas. Projects from other
+                domains are ignored.
+              </>
+            }
+          >
             <Input
               id="bench-domain"
               placeholder="e.g. Generative AI"
               value={domainInput}
               onChange={(e) => setDomainInput(e.target.value)}
             />
-            <div className="flex flex-wrap gap-1.5 pt-1">
+            <div className="flex flex-wrap items-center gap-1.5 pt-1">
+              <span className="mr-0.5 text-xs text-muted-foreground">Examples:</span>
               {DOMAIN_EXAMPLES.map((ex) => (
                 <button
                   key={ex}
                   type="button"
                   onClick={() => setDomainInput(ex)}
-                  className="rounded-full border px-2.5 py-0.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                  className={cn(
+                    "rounded-md border px-2 py-0.5 text-xs transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/25",
+                    domain === ex
+                      ? "border-primary/40 bg-accent text-accent-foreground"
+                      : "bg-card text-muted-foreground hover:bg-muted hover:text-foreground",
+                  )}
                 >
                   {ex}
                 </button>
               ))}
             </div>
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="bench-focus">
-              Focus <span className="font-normal text-muted-foreground">(optional — what to include or leave out)</span>
-            </Label>
-            <textarea
+          </Field>
+          <Field label="Focus" optional htmlFor="bench-focus" hint="What to include or leave out.">
+            <Textarea
               id="bench-focus"
-              className={textareaClass}
+              className="min-h-[72px]"
               placeholder="e.g. RAG, AI agents and fine-tuning; leave out computer vision"
               value={focusInput}
               onChange={(e) => setFocusInput(e.target.value)}
             />
-          </div>
-        </CardContent>
-      </Card>
+          </Field>
+        </div>
+      </Panel>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">How resumes are screened</CardTitle>
-          <CardDescription>
-            Each resume is read by a Senior Technical Recruiter / Principal Architect prompt for {domain || "your domain"}:
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <ul className="list-disc space-y-1 pl-5 text-sm">
-            <li>
-              <span className="font-medium">Domain first</span> — only {domain || "the domain"}&apos;s projects count; work
-              from other domains is ignored however good it is.
-            </li>
-            <li>
-              <span className="font-medium">15+ LPA quality filter</span> — only complex, production-grade{" "}
-              {domain || "domain"} projects, judged against what advanced work looks like in that domain.
-            </li>
-            <li>
-              <span className="font-medium">Basic projects ignored</span> — the domain&apos;s tutorial-level and overdone
-              projects, plus calculators, to-do lists, CRUD apps and UI clones.
-            </li>
-            <li>
-              <span className="font-medium">Quality over quantity</span> — every project that meets the bar, none that
-              doesn&apos;t.
-            </li>
-            <li>
-              <span className="font-medium">Links ignored</span> — judged only on the description, features and tech
-              stack; each project must be traceable to the resume text, so nothing is invented.
-            </li>
-          </ul>
-        </CardContent>
-      </Card>
+      <Panel
+        title="Batch 1 resumes"
+        icon={<FileText />}
+        description="Each resume starts with its number on its own line. More batches can be added from the results."
+        actions={
+          <InfoHint align="end" label="About pasting resumes">
+            Paste the resumes one after another, each starting with its number (serial or mobile number) on its own
+            line, or rows copied from a sheet with a number and a resume link or resume text. Thousands at a time is
+            fine. Resume links must be shared with the service account or be public. One run holds the whole pool, and
+            the export covers every batch.
+          </InfoHint>
+        }
+      >
+        <BenchmarkPaste batch={1} existing={NO_EXISTING} onParsed={setFirstRows} />
+      </Panel>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Run</CardTitle>
-          <CardDescription>One run holds the whole pool — add more batches from the results page; the export covers every batch.</CardDescription>
-        </CardHeader>
-        <CardContent className="grid gap-4 sm:grid-cols-2">
-          <div className="space-y-1.5">
-            <Label htmlFor="bench-name">
-              Title of the Notion page <span className="font-normal text-muted-foreground">(optional)</span>
-            </Label>
+      <Disclosure title="How resumes are screened" summary="5 rules">
+        <p className="text-[13px] text-muted-foreground">
+          Each resume is read by a Senior Technical Recruiter / Principal Architect prompt for {domain || "your domain"}.
+        </p>
+        <ul className="mt-3 space-y-2 text-[13px] leading-relaxed">
+          <li>
+            <span className="font-medium">Domain first.</span>{" "}
+            <span className="text-muted-foreground">
+              Only {domain || "the domain"}&apos;s projects count; work from other domains is ignored however good it is.
+            </span>
+          </li>
+          <li>
+            <span className="font-medium">15+ LPA quality filter.</span>{" "}
+            <span className="text-muted-foreground">
+              Only complex, production-grade {domain || "domain"} projects, judged against what advanced work looks like
+              in that domain.
+            </span>
+          </li>
+          <li>
+            <span className="font-medium">Basic projects ignored.</span>{" "}
+            <span className="text-muted-foreground">
+              The domain&apos;s tutorial-level and overdone projects, plus calculators, to-do lists, CRUD apps and UI
+              clones.
+            </span>
+          </li>
+          <li>
+            <span className="font-medium">Quality over quantity.</span>{" "}
+            <span className="text-muted-foreground">Every project that meets the bar, none that doesn&apos;t.</span>
+          </li>
+          <li>
+            <span className="font-medium">Links ignored.</span>{" "}
+            <span className="text-muted-foreground">
+              Judged only on the description, features and tech stack. Each project must be traceable to the resume
+              text, so nothing is invented.
+            </span>
+          </li>
+        </ul>
+      </Disclosure>
+
+      <Disclosure title="Advanced options" summary={`${concurrency} at a time${name.trim() ? " · custom title" : ""}`}>
+        <div className="grid gap-4 sm:grid-cols-2">
+          <Field label="Title of the Notion page" optional htmlFor="bench-name">
             <Input
               id="bench-name"
               placeholder={defaultTitle(domain || "<Domain>")}
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
-          </div>
-          <div className="space-y-1.5">
-            <Label htmlFor="bench-conc">Resumes screened in parallel</Label>
-            <select id="bench-conc" value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))} className={fieldClass}>
+          </Field>
+          <Field label="Resumes screened in parallel" htmlFor="bench-conc">
+            <NativeSelect id="bench-conc" value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))}>
               {CONCURRENCY_OPTIONS.map((n) => (
                 <option key={n} value={n}>
                   {n} at a time{n === DEFAULT_CONCURRENCY ? " (recommended)" : ""}
                 </option>
               ))}
-            </select>
-          </div>
-        </CardContent>
-      </Card>
+            </NativeSelect>
+          </Field>
+        </div>
+      </Disclosure>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="text-base">Batch 1 — paste resumes</CardTitle>
-          <CardDescription>
-            Paste the resumes one after another, each starting with its number (serial or mobile number) on its own
-            line — or rows copied from a sheet with a number and a resume link / resume text. Thousands at a time is
-            fine; resume links must be shared with the service account or public.
-          </CardDescription>
-        </CardHeader>
-        <CardContent>
-          <BenchmarkPaste batch={1} existing={NO_EXISTING} onParsed={setFirstRows} />
-        </CardContent>
-      </Card>
+      {error ? <Notice tone="danger">{error}</Notice> : null}
 
-      {error ? <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p> : null}
-
-      <div className="flex items-center justify-between">
-        <p className="text-sm text-muted-foreground">
-          {!domain
-            ? "Type the domain to screen for."
-            : firstRows.length
-              ? `${firstRows.length} resumes ready to screen for ${domain}.`
-              : "Paste at least one resume."}
-        </p>
-        <Button size="lg" onClick={start} disabled={!firstRows.length || !domain || preparing}>
+      <ActionBar
+        status={
+          !domain ? (
+            "Type the domain to screen for."
+          ) : firstRows.length ? (
+            <>
+              <span className="font-medium tabular-nums text-foreground">{firstRows.length}</span> resumes ready to screen
+              for {domain}.
+            </>
+          ) : (
+            "Paste at least one resume."
+          )
+        }
+      >
+        <Button
+          size="lg"
+          className="h-auto min-h-11 whitespace-normal py-2 text-left"
+          onClick={start}
+          disabled={!firstRows.length || !domain || preparing}
+        >
           {preparing ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
           {preparing ? `Preparing ${domain}…` : `Find ${domain || "domain"} benchmark projects`}
         </Button>
-      </div>
+      </ActionBar>
     </div>
   );
 }

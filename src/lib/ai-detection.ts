@@ -82,7 +82,8 @@ const EMOJI_RE = /(?![©®™])\p{Extended_Pictographic}/gu;
 const LOG_RE =
   /\b(?:console\.(?:log|info|warn|error|debug)|print|println|printf|logger\.\w+|logging\.\w+|log\.(?:info|warn|error|debug)|System\.out\.print(?:ln)?|fmt\.Print(?:f|ln)?|puts)\s*\(([^\n]{0,300})/g;
 
-const TOOL_FILES: { tool: string; re: RegExp }[] = [
+/** Agent config files AI coding tools leave in a repository (also used by Candidate Bucketing). */
+export const TOOL_FILES: { tool: string; re: RegExp }[] = [
   { tool: "Cursor", re: /(^|\/)(\.cursorrules|\.cursor\/)/i },
   { tool: "Claude Code", re: /(^|\/)(CLAUDE\.md$|\.claude\/)/i },
   { tool: "AI agent (AGENTS.md)", re: /(^|\/)AGENTS\.md$/i },
@@ -95,9 +96,12 @@ const TOOL_FILES: { tool: string; re: RegExp }[] = [
   { tool: "Continue", re: /(^|\/)\.continue\//i },
   { tool: "Bolt", re: /(^|\/)\.bolt\//i },
   { tool: "Devin / Junie / Trae / Augment", re: /(^|\/)\.(devin|junie|trae|augment)\//i },
+  // Workspace rules / workflows: `.agents/` is the current default, the older `.agent/` is still read.
+  { tool: "Google Antigravity", re: /(^|\/)\.agents?\/(rules|workflows)\//i },
 ];
 
-const GENERATOR_TEXT: { tool: string; re: RegExp }[] = [
+/** App-generator residue in package.json / README / HTML (Lovable, Bolt, v0 …). */
+export const GENERATOR_TEXT: { tool: string; re: RegExp }[] = [
   { tool: "Lovable", re: /lovable-tagger|lovable\.dev\/projects|content=["']Lovable["']|gptengineer/i },
   { tool: "Bolt", re: /\bbolt\.new\b|stackblitz\.com\/~\/|made with bolt/i },
   { tool: "v0", re: /\bv0\.dev\b|generated (by|with) v0\b/i },

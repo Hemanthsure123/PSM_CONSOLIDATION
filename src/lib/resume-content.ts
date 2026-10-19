@@ -1,7 +1,7 @@
 import "server-only";
 import { SchemaType, type Part, type Schema } from "@google/generative-ai";
 import { runLlmChain } from "@/lib/llm-router";
-import { fetchResumeBytes } from "@/lib/resume";
+import { fetchResume, type ResumeBytes } from "@/lib/resume";
 import { pdfBufferToLines } from "@/lib/pdf-text";
 import { docxToText, isZip } from "@/lib/docx-text";
 import { linkOnly } from "@/lib/resume-input";
@@ -81,9 +81,25 @@ function sniff(data: Buffer): "pdf" | "zip" | "ole" | { image: string } | null {
   return null;
 }
 
+/** Prefix of the error for a download that failed for a passing reason (network, rate limit, 5xx) — worth a retry. */
+export const RESUME_DOWNLOAD_RETRY = "Resume download failed temporarily";
+
 async function loadFromLink(url: string): Promise<ResumeContent | string> {
-  const resume = await fetchResumeBytes(url);
-  if (!resume) return "Resume could not be downloaded — check that it is shared with the service account or public.";
+  const fetched = await fetchResume(url);
+  if (!fetched.ok) {
+    return fetched.transient
+      ? `${RESUME_DOWNLOAD_RETRY} (${fetched.error.slice(0, 80)}) — re-run this candidate.`
+      : "Resume could not be downloaded — check that it is shared with the service account or public.";
+  }
+  return contentFromBytes(fetched.bytes);
+}
+
+/**
+ * Read already-downloaded resume bytes by what the file really is (PDF text layer,
+ * .docx, image, HTML / text) — for callers that also need the raw bytes (e.g. to read
+ * the PDF's hidden links) and must not download the file twice.
+ */
+export async function contentFromBytes(resume: ResumeBytes): Promise<ResumeContent | string> {
   const mime = (resume.mimeType || "").toLowerCase();
   const kind = sniff(resume.data);
 
@@ -152,15 +168,18 @@ const str = (v: unknown, max = 400) =>
         .slice(0, max)
     : "";
 
+const DOC_ASK = "What is this file? If it is a resume, transcribe it.";
+
 /**
- * What is this file — and, if it is a resume, its text. Gemini only (it is the
- * model that can see): `chain` should list Gemini tiers only.
+ * What is this file — and, if it is a resume, its text. Only models that can see
+ * the file may do this: `chain` should list Gemini (and optionally OpenAI) tiers
+ * only — see `geminiOnly` / `visionTiers`.
  */
 export async function transcribeDocument(
   inline: { mimeType: string; data: string },
   opts: { chain: string; label: string; timeoutMs: number },
 ): Promise<Transcript> {
-  if (!opts.chain) return { ok: false, error: "Image / scanned resumes need a Gemini model in the LLM chain." };
+  if (!opts.chain) return { ok: false, error: "Image / scanned resumes need a Gemini or OpenAI model in the LLM chain." };
   const res = await runLlmChain({
     label: opts.label,
     chain: opts.chain,
@@ -174,8 +193,10 @@ export async function transcribeDocument(
     thinking: "low",
     accept: (j) => DOC_TYPES.includes((j as { documentType?: string }).documentType as DocType),
     build: () => ({
-      geminiParts: [{ inlineData: inline }, "What is this file? If it is a resume, transcribe it."] as Array<string | Part>,
-      text: "",
+      geminiParts: [{ inlineData: inline }, DOC_ASK] as Array<string | Part>,
+      // OpenAI tiers read the same file; text-only tiers never reach here (see vision chains).
+      text: DOC_ASK,
+      inline,
     }),
   });
   if (!res.ok) return res;
@@ -194,5 +215,13 @@ export function geminiOnly(chain: string): string {
   return chain
     .split(",")
     .filter((t) => t.trim().startsWith("gemini:"))
+    .join(",");
+}
+
+/** The Gemini and OpenAI tiers of a chain — every tier that reads the file itself. */
+export function visionTiers(chain: string): string {
+  return chain
+    .split(",")
+    .filter((t) => /^(gemini|openai):/.test(t.trim()))
     .join(",");
 }

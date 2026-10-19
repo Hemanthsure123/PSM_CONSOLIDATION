@@ -3,11 +3,13 @@
 import * as React from "react";
 import { CheckCircle2, Download, Loader2, Table2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
+import { Panel } from "@/components/ui/panel";
+import { Field } from "@/components/ui/field";
+import { NativeSelect } from "@/components/ui/select";
+import { Notice } from "@/components/ui/notice";
+import { EmptyState } from "@/components/ui/empty-state";
 import { cn } from "@/lib/utils";
 import { readSubsheet } from "@/actions/sheets";
 import type { SubsheetConfig, WizardState } from "@/components/wizard/wizard-shared";
@@ -31,14 +33,19 @@ export function SubsheetStep({ state, patch }: StepProps) {
     });
 
   return (
-    <div className="space-y-6">
-      <Card className="border-indigo-200 bg-indigo-50/40">
-        <CardContent className="py-4 text-sm text-indigo-900">
-          Select which subsheet(s) hold candidates. For each, choose the columns to
-          pull, point to the <strong>identifier</strong> and <strong>resume link</strong>{" "}
-          columns, then load the rows.
-        </CardContent>
-      </Card>
+    <div className="max-w-3xl space-y-6">
+      <p className="text-[13px] leading-relaxed text-muted-foreground">
+        Include the subsheets that hold candidates. For each one, pick the columns, map the identifier and
+        resume link, then load its rows.
+      </p>
+
+      {state.subsheets.length === 0 ? (
+        <EmptyState
+          icon={<Table2 />}
+          title="No subsheets yet"
+          description="Go back to Setup and fetch the sheet's subsheets."
+        />
+      ) : null}
 
       {state.subsheets.map((sub) => (
         <SubsheetCard key={sub.name} sub={sub} url={state.spreadsheetUrl} update={update} />
@@ -58,6 +65,7 @@ function SubsheetCard({
 }) {
   const [error, setError] = React.useState<string | null>(null);
   const [pending, startTransition] = React.useTransition();
+  const uid = React.useId();
 
   const toggleColumn = (header: string) => {
     const next = new Set(sub.selectedColumns);
@@ -86,79 +94,124 @@ function SubsheetCard({
   const selected = new Set(sub.selectedColumns);
 
   return (
-    <Card className={cn(sub.selected && "border-primary/40")}>
-      <CardHeader>
-        <div className="flex items-center justify-between">
-          <CardTitle className="flex items-center gap-2 text-base">
-            <Table2 className="h-4 w-4 text-muted-foreground" /> {sub.name}
-            <Badge variant="secondary">{sub.rowCount} rows</Badge>
-          </CardTitle>
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-muted-foreground">{sub.selected ? "Included" : "Excluded"}</span>
-            <Switch
-              checked={sub.selected}
-              onCheckedChange={(v) => update(sub.name, { selected: v })}
-            />
-          </div>
+    <Panel
+      icon={<Table2 />}
+      title={<span className="break-words">{sub.name}</span>}
+      description={
+        <span className="tabular-nums">
+          {sub.rowCount} rows · {sub.headers.length} columns
+        </span>
+      }
+      actions={
+        <div className="flex items-center gap-2.5">
+          <label htmlFor={`${uid}-include`} className="cursor-pointer text-[13px] text-muted-foreground">
+            {sub.selected ? "Included" : "Excluded"}
+          </label>
+          <Switch
+            id={`${uid}-include`}
+            checked={sub.selected}
+            onCheckedChange={(v) => update(sub.name, { selected: v })}
+          />
         </div>
-        {sub.selected ? (
-          <CardDescription>
-            Pick columns and map the identifier + resume columns.
-          </CardDescription>
-        ) : null}
-      </CardHeader>
-
+      }
+      flush={!sub.selected}
+      className={cn("transition-colors", sub.selected && "border-primary/40")}
+      footer={
+        sub.selected ? (
+          <>
+            <span className="min-w-0 flex-1 text-[13px]">
+              {sub.loaded ? (
+                <span className="inline-flex items-center gap-1.5 font-medium text-success">
+                  <CheckCircle2 className="h-4 w-4" /> Loaded <span className="tabular-nums">{sub.rows.length}</span> rows.
+                </span>
+              ) : (
+                <span className="text-muted-foreground">Load this subsheet&apos;s rows to continue.</span>
+              )}
+            </span>
+            <Button
+              variant={sub.loaded ? "outline" : "soft"}
+              size="sm"
+              onClick={load}
+              disabled={pending || sub.selectedColumns.length === 0 || !sub.identifierColumn || !sub.resumeColumn}
+            >
+              {pending ? <Loader2 className="animate-spin" /> : <Download />}
+              {pending ? "Loading…" : sub.loaded ? "Reload rows" : "Load rows"}
+            </Button>
+          </>
+        ) : undefined
+      }
+    >
       {sub.selected ? (
-        <CardContent className="space-y-5">
+        <div className="space-y-5">
           {/* Column picker */}
           <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <Label>Columns to include ({sub.selectedColumns.length})</Label>
-              <div className="flex gap-2 text-xs">
-                <button onClick={selectAll} className="text-primary hover:underline">All</button>
-                <button onClick={clearAll} className="text-muted-foreground hover:underline">None</button>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <p id={`${uid}-cols`} className="text-[13px] font-medium">
+                Columns to include{" "}
+                <span className="font-normal tabular-nums text-muted-foreground">
+                  ({sub.selectedColumns.length} of {sub.headers.length})
+                </span>
+              </p>
+              <div className="flex gap-1">
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={selectAll}>
+                  Select all
+                </Button>
+                <Button variant="ghost" size="sm" className="h-7 px-2" onClick={clearAll}>
+                  Clear
+                </Button>
               </div>
             </div>
-            <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              {sub.headers.map((h) => (
-                <label
-                  key={h}
-                  className="flex cursor-pointer items-center gap-2 rounded-md border px-3 py-2 text-sm transition-colors hover:bg-accent"
-                >
-                  <Checkbox checked={selected.has(h)} onCheckedChange={() => toggleColumn(h)} />
-                  <span className="min-w-0 flex-1 truncate" title={h}>
-                    {h}
-                    {sub.columnLabels?.[h] && sub.columnLabels[h] !== h ? (
-                      <span className="text-muted-foreground"> → {sub.columnLabels[h]}</span>
-                    ) : null}
-                  </span>
-                </label>
-              ))}
+            <div role="group" aria-labelledby={`${uid}-cols`} className="grid gap-1.5 sm:grid-cols-2">
+              {sub.headers.map((h) => {
+                const label = sub.columnLabels?.[h];
+                const renamed = Boolean(label && label !== h);
+                return (
+                  <label
+                    key={h}
+                    className={cn(
+                      "flex cursor-pointer items-center gap-2.5 rounded-lg border px-3 py-2 text-[13px] transition-colors hover:bg-muted/60",
+                      selected.has(h) && "border-primary/30 bg-accent/40",
+                    )}
+                  >
+                    <Checkbox checked={selected.has(h)} onCheckedChange={() => toggleColumn(h)} />
+                    <span className="min-w-0 flex-1 truncate" title={renamed ? `${h} (shown as ${label})` : h}>
+                      {h}
+                      {renamed ? <span className="text-muted-foreground"> as {label}</span> : null}
+                    </span>
+                  </label>
+                );
+              })}
             </div>
           </div>
 
           {/* Mapping */}
           <div className="grid gap-4 sm:grid-cols-3">
-            <Field label="Identifier column">
+            <Field
+              label="Identifier column"
+              htmlFor={`${uid}-id`}
+              info="Each candidate is matched in BigQuery by this value."
+            >
               <SelectBox
+                id={`${uid}-id`}
                 value={sub.identifierColumn}
                 onChange={(v) => update(sub.name, { identifierColumn: v, loaded: false })}
                 options={sub.headers}
               />
             </Field>
-            <Field label="Identifier type">
-              <select
+            <Field label="Identifier type" htmlFor={`${uid}-type`}>
+              <NativeSelect
+                id={`${uid}-type`}
                 value={sub.identifierType}
                 onChange={(e) => update(sub.name, { identifierType: e.target.value as IdentifierType, loaded: false })}
-                className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
               >
                 {ID_TYPES.map((t) => (
                   <option key={t.value} value={t.value}>{t.label}</option>
                 ))}
-              </select>
+              </NativeSelect>
             </Field>
-            <Field label="Resume link column">
+            <Field label="Resume link column" htmlFor={`${uid}-resume`}>
               <SelectBox
+                id={`${uid}-resume`}
                 value={sub.resumeColumn}
                 onChange={(v) => update(sub.name, { resumeColumn: v, loaded: false })}
                 options={sub.headers}
@@ -166,58 +219,34 @@ function SubsheetCard({
             </Field>
           </div>
 
-          <div className="flex items-center justify-between">
-            {sub.loaded ? (
-              <span className="inline-flex items-center gap-2 text-sm text-emerald-700">
-                <CheckCircle2 className="h-4 w-4" /> Loaded {sub.rows.length} rows.
-              </span>
-            ) : error ? (
-              <span className="text-sm text-destructive">{error}</span>
-            ) : (
-              <span className="text-sm text-muted-foreground">Load this subsheet&apos;s rows to continue.</span>
-            )}
-            <Button
-              onClick={load}
-              disabled={pending || sub.selectedColumns.length === 0 || !sub.identifierColumn || !sub.resumeColumn}
-            >
-              {pending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-              {pending ? "Loading…" : sub.loaded ? "Reload rows" : "Load rows"}
-            </Button>
-          </div>
-        </CardContent>
+          {!sub.loaded && error ? (
+            <Notice tone="danger" title="Couldn't load the rows">
+              {error}
+            </Notice>
+          ) : null}
+        </div>
       ) : null}
-    </Card>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-1.5">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      {children}
-    </div>
+    </Panel>
   );
 }
 
 function SelectBox({
+  id,
   value,
   onChange,
   options,
 }: {
+  id?: string;
   value: string;
   onChange: (v: string) => void;
   options: string[];
 }) {
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-    >
-      <option value="">—</option>
+    <NativeSelect id={id} value={value} onChange={(e) => onChange(e.target.value)}>
+      <option value="">Choose a column</option>
       {options.map((o) => (
         <option key={o} value={o}>{o}</option>
       ))}
-    </select>
+    </NativeSelect>
   );
 }

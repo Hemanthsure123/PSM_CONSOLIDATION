@@ -1,7 +1,10 @@
 "use client";
 
 import * as React from "react";
-import { AlertTriangle, CheckCircle2 } from "lucide-react";
+import { AlertTriangle, CheckCircle2, ChevronDown } from "lucide-react";
+import { Textarea } from "@/components/ui/textarea";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { cn } from "@/lib/utils";
 import { parseBenchmarkPaste, type ParsedBenchmarkRow, type PasteFormat } from "@/lib/benchmark-parse";
 import type { BenchmarkCandidateInput } from "@/lib/benchmark-types";
 
@@ -13,13 +16,10 @@ interface BenchmarkPasteProps {
   disabled?: boolean;
 }
 
-const textareaClass =
-  "min-h-[220px] w-full rounded-md border border-input bg-background px-3 py-2 font-mono text-xs leading-relaxed placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60";
-
 const FORMAT_LABEL: Record<PasteFormat, string> = {
-  table: "read as sheet rows (number + resume link / text)",
-  links: "read as one resume link per line",
-  text: "read as resume text, split at each number",
+  table: "Read as sheet rows (number + resume link or text)",
+  links: "Read as one resume link per line",
+  text: "Read as resume text, split at each number",
 };
 
 /**
@@ -51,8 +51,9 @@ export function BenchmarkPaste({ batch, existing, onParsed, disabled }: Benchmar
 
   return (
     <div className="space-y-3">
-      <textarea
-        className={textareaClass}
+      <Textarea
+        aria-label={`Resumes for batch ${batch}`}
+        className="min-h-[220px] font-mono text-xs"
         value={text}
         disabled={disabled}
         spellCheck={false}
@@ -66,43 +67,59 @@ export function BenchmarkPaste({ batch, existing, onParsed, disabled }: Benchmar
         }
       />
       {rows.length ? (
-        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
-          <span className="inline-flex items-center gap-1.5 text-emerald-700">
-            <CheckCircle2 className="h-4 w-4" /> {valid.length} resume{valid.length === 1 ? "" : "s"} ready
-            {linked ? ` (${linked} as links)` : ""}
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1.5 text-[13px]" aria-live="polite">
+          <span className="inline-flex items-center gap-1.5 font-medium text-success">
+            <CheckCircle2 className="h-4 w-4" />
+            <span>
+              <span className="tabular-nums">{valid.length}</span> resume{valid.length === 1 ? "" : "s"} ready
+              {linked ? (
+                <span className="font-normal">
+                  {" "}
+                  (<span className="tabular-nums">{linked}</span> as links)
+                </span>
+              ) : null}
+            </span>
           </span>
-          <span className="text-xs text-muted-foreground">Paste {FORMAT_LABEL[format]}</span>
+          <span className="text-xs text-muted-foreground">{FORMAT_LABEL[format]}</span>
           {problems.length ? (
             <button
               type="button"
-              className="inline-flex items-center gap-1.5 text-amber-700 hover:underline"
+              aria-expanded={showProblems}
+              className="inline-flex items-center gap-1.5 rounded-md font-medium text-warning hover:underline focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/25"
               onClick={() => setShowProblems((v) => !v)}
             >
-              <AlertTriangle className="h-4 w-4" /> {problems.length} skipped — {showProblems ? "hide" : "show why"}
+              <AlertTriangle className="h-4 w-4" />
+              <span className="tabular-nums">{problems.length}</span> skipped
+              <span className="font-normal text-muted-foreground">· {showProblems ? "Hide" : "Show why"}</span>
+              <ChevronDown className={cn("h-3.5 w-3.5 transition-transform", showProblems && "rotate-180")} />
             </button>
           ) : null}
         </div>
       ) : null}
       {showProblems && problems.length ? (
-        <div className="max-h-56 overflow-auto rounded-md border text-xs">
-          <table className="w-full">
-            <thead className="sticky top-0 bg-muted text-left">
-              <tr>
-                <th className="px-2 py-1 font-medium">#</th>
-                <th className="px-2 py-1 font-medium">Problem</th>
-                <th className="px-2 py-1 font-medium">Content</th>
-              </tr>
-            </thead>
-            <tbody>
+        <div className="overflow-hidden rounded-lg border">
+          <Table containerClassName="max-h-56">
+            <TableHeader>
+              <TableRow>
+                <TableHead className="w-16 text-right">#</TableHead>
+                <TableHead>Problem</TableHead>
+                <TableHead>Content</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
               {problems.slice(0, 300).map((p) => (
-                <tr key={`${p.row}-${p.preview.slice(0, 20)}`} className="border-t">
-                  <td className="px-2 py-1 tabular-nums">{p.row || "—"}</td>
-                  <td className="px-2 py-1 text-amber-800">{p.problem}</td>
-                  <td className="px-2 py-1 font-mono text-muted-foreground">{p.preview}</td>
-                </tr>
+                <TableRow key={`${p.row}-${p.preview.slice(0, 20)}`}>
+                  <TableCell className="text-right tabular-nums text-muted-foreground">{p.row || "—"}</TableCell>
+                  <TableCell>{p.problem}</TableCell>
+                  <TableCell className="text-muted-foreground">
+                    <div className="max-w-[360px] truncate" title={p.preview}>
+                      {p.preview}
+                    </div>
+                  </TableCell>
+                </TableRow>
               ))}
-            </tbody>
-          </table>
+            </TableBody>
+          </Table>
         </div>
       ) : null}
     </div>

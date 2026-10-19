@@ -4,6 +4,7 @@ import { env } from "@/lib/env";
 import { runLlmChain, type ChainResult } from "@/lib/llm-router";
 import {
   DOC_LABEL,
+  RESUME_DOWNLOAD_RETRY,
   geminiOnly,
   loadResumeContent,
   looksLikeResume,
@@ -355,7 +356,8 @@ export async function evaluateQaCandidate(c: QaCandidateInput): Promise<QaEvalua
 
   try {
     const content = await loadResume(c);
-    if (typeof content === "string") return fail(content);
+    // A download that failed for a passing reason (network, Drive outage) is retried by the browser.
+    if (typeof content === "string") return fail(content, content.startsWith(RESUME_DOWNLOAD_RETRY));
 
     const invalid = (error: string, model = ""): QaEvaluation => ({
       ...fail(error),

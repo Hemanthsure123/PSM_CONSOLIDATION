@@ -9,34 +9,30 @@ export interface SwitchProps {
   disabled?: boolean;
   id?: string;
   className?: string;
+  "aria-label"?: string;
 }
 
-/** Lightweight, dependency-free toggle switch styled to match shadcn/ui. */
-export function Switch({
-  checked,
-  onCheckedChange,
-  disabled,
-  id,
-  className,
-}: SwitchProps) {
+/** Lightweight, dependency-free toggle switch. */
+export function Switch({ checked, onCheckedChange, disabled, id, className, "aria-label": ariaLabel }: SwitchProps) {
   return (
     <button
       type="button"
       role="switch"
       id={id}
       aria-checked={checked}
+      aria-label={ariaLabel}
       disabled={disabled}
       onClick={() => onCheckedChange(!checked)}
       className={cn(
-        "peer inline-flex h-6 w-11 shrink-0 cursor-pointer items-center rounded-full border-2 border-transparent transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
-        checked ? "bg-primary" : "bg-input",
+        "peer relative inline-flex h-6 w-10 shrink-0 cursor-pointer items-center rounded-full p-0.5 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/25 disabled:cursor-not-allowed disabled:opacity-50",
+        checked ? "bg-primary" : "bg-[hsl(218_20%_80%)] hover:bg-[hsl(218_20%_74%)]",
         className,
       )}
     >
       <span
         className={cn(
-          "pointer-events-none block h-5 w-5 rounded-full bg-background shadow-lg ring-0 transition-transform",
-          checked ? "translate-x-5" : "translate-x-0",
+          "pointer-events-none block h-5 w-5 rounded-full bg-white shadow-[0_1px_2px_rgba(16,24,40,0.25)] transition-transform duration-150",
+          checked ? "translate-x-4" : "translate-x-0",
         )}
       />
     </button>

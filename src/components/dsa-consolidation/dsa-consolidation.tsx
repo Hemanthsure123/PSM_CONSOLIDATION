@@ -1,24 +1,17 @@
 "use client";
 
 import * as React from "react";
-import {
-  CheckCircle2,
-  Code2,
-  FileSpreadsheet,
-  Home,
-  Link2,
-  Loader2,
-  Play,
-  Square,
-  Table2,
-} from "lucide-react";
+import { CheckCircle2, FileSpreadsheet, Link2, Loader2, Play, Square, Table2 } from "lucide-react";
+import { useReportBusy } from "@/components/busy-context";
+import { ActionBar } from "@/components/ui/action-bar";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
-import { cn } from "@/lib/utils";
+import { Notice } from "@/components/ui/notice";
+import { Panel } from "@/components/ui/panel";
+import { Progress } from "@/components/ui/progress";
+import { NativeSelect } from "@/components/ui/select";
+import { SettingList, SettingRow } from "@/components/ui/setting-row";
 import { listSubsheets, readSubsheet } from "@/actions/sheets";
 import { resolveDsaBatch } from "@/actions/dsa";
 import { saveDsaRun, newDsaId } from "@/lib/dsa-store";
@@ -80,6 +73,7 @@ export function DsaConsolidation({ onDone }: DsaConsolidationProps) {
   const [results, setResults] = React.useState<DsaResult[]>([]);
   const [progress, setProgress] = React.useState({ done: 0, total: 0 });
   const abortRef = React.useRef(false);
+  useReportBusy(running);
 
   const update = (name: string, partial: Partial<SubConfig>) =>
     setSubs((prev) => prev.map((s) => (s.name === name ? { ...s, ...partial } : s)));
@@ -200,211 +194,206 @@ export function DsaConsolidation({ onDone }: DsaConsolidationProps) {
   if (running || finished || results.length > 0) {
     const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
     return (
-      <div className="space-y-4">
-        {running ? (
-          <Card>
-            <CardContent className="space-y-2 py-4">
-              <div className="flex items-center justify-between text-sm">
-                <span className="inline-flex items-center gap-2 font-medium">
-                  <Loader2 className="h-4 w-4 animate-spin" /> Resolving profiles &amp; reading solved, contests &amp; ratings…
-                </span>
-                <span className="tabular-nums text-muted-foreground">
-                  {progress.done}/{progress.total} ({pct}%)
-                </span>
-              </div>
-              <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
-                <div className="h-full rounded-full bg-primary transition-all" style={{ width: `${pct}%` }} />
-              </div>
-            </CardContent>
-          </Card>
-        ) : finished ? (
-          <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
-            Done — saved to the dashboard. Download the CSV below or reopen it anytime.
-          </p>
+      <div className="space-y-6">
+        {finished && !running ? (
+          <Notice tone="success" title="Done">
+            Saved to the dashboard. Download the CSV below, or reopen the run from the dashboard any time.
+          </Notice>
         ) : null}
 
         <DsaResultsView
           results={results}
           title={runName || "DSA Consolidation"}
           subtitle={`${sheetTitle}${selected.length ? " · " + selected.map((s) => s.name).join(", ") : ""}`}
-          onBack={running ? undefined : onDone}
-          backLabel="Done — back to dashboard"
           headerRight={
-            running ? (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => {
-                  abortRef.current = true;
-                }}
-              >
-                <Square className="h-4 w-4" /> Stop
+            running ? null : (
+              <Button variant="outline" size="sm" onClick={onDone}>
+                Done
               </Button>
-            ) : null
+            )
           }
         />
+
+        {running ? (
+          <ActionBar
+            status={
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1">
+                  <span className="inline-flex items-center gap-2 font-medium text-foreground">
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" /> Reading solved, contests and rating from each profile
+                  </span>
+                  <span className="tabular-nums">
+                    {progress.total > 0 ? `${progress.done} of ${progress.total} candidates · ${pct}%` : "Reading the subsheets…"}
+                  </span>
+                </div>
+                <Progress value={progress.done} max={progress.total} label="Reading DSA profiles" />
+              </div>
+            }
+          >
+            <Button
+              variant="outline"
+              onClick={() => {
+                abortRef.current = true;
+              }}
+            >
+              <Square className="h-4 w-4" /> Stop
+            </Button>
+          </ActionBar>
+        ) : null}
       </div>
     );
   }
 
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardContent className="flex items-center gap-4 py-4">
-          <Button variant="ghost" size="sm" onClick={onDone} className="shrink-0">
-            <Home className="h-4 w-4" /> Dashboard
-          </Button>
-          <div className="min-w-0">
-            <h2 className="flex items-center gap-2 text-base font-semibold">
-              <Code2 className="h-4 w-4 text-muted-foreground" /> DSA Problems-Solved Consolidation
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              Pull each candidate&apos;s LeetCode, Codeforces &amp; CodeChef solved count, contests
-              participated and rating — links from the sheet or their resume (incl. links hidden
-              behind icons/text).
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <FileSpreadsheet className="h-4 w-4" /> Company sheet
-          </CardTitle>
-          <CardDescription>
-            Paste the sheet link (must be shared with the service account). Resume files linked in
-            it must be shared too, so they can be read.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="dsa-name">Run name</Label>
-              <Input
-                id="dsa-name"
-                placeholder="e.g. Acme Corp — DSA"
-                value={runName}
-                onChange={(e) => setRunName(e.target.value)}
-              />
+    <div className="max-w-3xl space-y-6">
+      <Panel
+        title="Company sheet"
+        icon={<FileSpreadsheet />}
+        description="The sheet, and the resume files it links, must be shared with the service account."
+      >
+        <div className="space-y-4">
+          <Field
+            label="Sheet link"
+            htmlFor="dsa-url"
+            info="Profile links come from the sheet's columns, or else from the resume (including links hidden behind icons or text)."
+          >
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <div className="relative flex-1">
+                <Link2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+                <Input
+                  id="dsa-url"
+                  className="pl-9"
+                  placeholder="https://docs.google.com/spreadsheets/d/…"
+                  value={url}
+                  onChange={(e) => {
+                    setUrl(e.target.value);
+                    setSubs([]);
+                    setSheetTitle("");
+                  }}
+                  onKeyDown={(e) => e.key === "Enter" && url.trim() && !fetching && fetchTabs()}
+                />
+              </div>
+              <Button variant="outline" onClick={fetchTabs} disabled={fetching || !url.trim()}>
+                {fetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
+                {fetching ? "Reading…" : "Load sheet"}
+              </Button>
             </div>
-          </div>
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Link2 className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                className="pl-9"
-                placeholder="https://docs.google.com/spreadsheets/d/…"
-                value={url}
-                onChange={(e) => {
-                  setUrl(e.target.value);
-                  setSubs([]);
-                  setSheetTitle("");
-                }}
-                onKeyDown={(e) => e.key === "Enter" && url.trim() && !fetching && fetchTabs()}
-              />
-            </div>
-            <Button onClick={fetchTabs} disabled={fetching || !url.trim()}>
-              {fetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
-              {fetching ? "Reading…" : "Fetch Subsheets"}
-            </Button>
-          </div>
+          </Field>
 
-          {error ? (
-            <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p>
-          ) : null}
+          <Field label="Run name" htmlFor="dsa-name" hint="Filled in with the sheet's title if left empty.">
+            <Input id="dsa-name" placeholder="e.g. Acme Corp — DSA" value={runName} onChange={(e) => setRunName(e.target.value)} />
+          </Field>
+
+          {error ? <Notice tone="danger">{error}</Notice> : null}
 
           {subs.length > 0 ? (
-            <span className="inline-flex items-center gap-2 text-sm text-emerald-700">
-              <CheckCircle2 className="h-4 w-4" />
+            <p className="inline-flex items-center gap-2 text-[13px] text-success">
+              <CheckCircle2 className="h-4 w-4 shrink-0" />
               {sheetTitle} · {subs.length} subsheet{subs.length === 1 ? "" : "s"} found.
-            </span>
+            </p>
           ) : null}
-        </CardContent>
-      </Card>
-
-      {subs.map((sub) => (
-        <Card key={sub.name} className={cn(sub.selected && "border-primary/40")}>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Table2 className="h-4 w-4 text-muted-foreground" /> {sub.name}
-                <Badge variant="secondary">{sub.rowCount} rows</Badge>
-              </CardTitle>
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-muted-foreground">{sub.selected ? "Included" : "Excluded"}</span>
-                <Switch checked={sub.selected} onCheckedChange={(v) => update(sub.name, { selected: v })} />
-              </div>
-            </div>
-          </CardHeader>
-          {sub.selected ? (
-            <CardContent className="grid gap-4 sm:grid-cols-2">
-              <Field label="Mobile number column (uuid)">
-                <SelectBox value={sub.mobileColumn} onChange={(v) => update(sub.name, { mobileColumn: v })} options={sub.headers} />
-              </Field>
-              <Field label="Resume link column">
-                <SelectBox value={sub.resumeColumn} onChange={(v) => update(sub.name, { resumeColumn: v })} options={sub.headers} />
-              </Field>
-              <Field label="LeetCode link column (optional)">
-                <SelectBox value={sub.leetcodeColumn} onChange={(v) => update(sub.name, { leetcodeColumn: v })} options={sub.headers} />
-              </Field>
-              <Field label="Codeforces link column (optional)">
-                <SelectBox value={sub.codeforcesColumn} onChange={(v) => update(sub.name, { codeforcesColumn: v })} options={sub.headers} />
-              </Field>
-              <Field label="CodeChef link column (optional)">
-                <SelectBox value={sub.codechefColumn} onChange={(v) => update(sub.name, { codechefColumn: v })} options={sub.headers} />
-              </Field>
-            </CardContent>
-          ) : null}
-        </Card>
-      ))}
+        </div>
+      </Panel>
 
       {subs.length > 0 ? (
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted-foreground">
-            {selected.length > 0
-              ? `${selected.length} subsheet${selected.length === 1 ? "" : "s"} selected. Links come from the columns above, else the resume.`
-              : "Include at least one subsheet (map its Mobile or Resume column)."}
-          </p>
-          <Button size="lg" onClick={run} disabled={!canRun}>
-            <Play className="h-4 w-4" /> Fetch DSA stats
-          </Button>
-        </div>
+        <Panel title="Subsheets" description="Include the tabs to read, then check which column holds each link.">
+          <SettingList>
+            {subs.map((sub, i) => (
+              <SettingRow
+                key={sub.name}
+                id={`dsa-sub-${i}`}
+                icon={<Table2 />}
+                title={sub.name}
+                description={`${sub.rowCount} rows`}
+                checked={sub.selected}
+                onCheckedChange={(v) => update(sub.name, { selected: v })}
+              >
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label="Mobile number column" htmlFor={`dsa-sub-${i}-mobile`} info="The mobile number is the candidate's unique id.">
+                    <ColumnSelect
+                      id={`dsa-sub-${i}-mobile`}
+                      value={sub.mobileColumn}
+                      onChange={(v) => update(sub.name, { mobileColumn: v })}
+                      options={sub.headers}
+                    />
+                  </Field>
+                  <Field label="Resume link column" htmlFor={`dsa-sub-${i}-resume`}>
+                    <ColumnSelect
+                      id={`dsa-sub-${i}-resume`}
+                      value={sub.resumeColumn}
+                      onChange={(v) => update(sub.name, { resumeColumn: v })}
+                      options={sub.headers}
+                    />
+                  </Field>
+                  <Field label="LeetCode link column" optional htmlFor={`dsa-sub-${i}-leetcode`}>
+                    <ColumnSelect
+                      id={`dsa-sub-${i}-leetcode`}
+                      value={sub.leetcodeColumn}
+                      onChange={(v) => update(sub.name, { leetcodeColumn: v })}
+                      options={sub.headers}
+                    />
+                  </Field>
+                  <Field label="Codeforces link column" optional htmlFor={`dsa-sub-${i}-codeforces`}>
+                    <ColumnSelect
+                      id={`dsa-sub-${i}-codeforces`}
+                      value={sub.codeforcesColumn}
+                      onChange={(v) => update(sub.name, { codeforcesColumn: v })}
+                      options={sub.headers}
+                    />
+                  </Field>
+                  <Field label="CodeChef link column" optional htmlFor={`dsa-sub-${i}-codechef`}>
+                    <ColumnSelect
+                      id={`dsa-sub-${i}-codechef`}
+                      value={sub.codechefColumn}
+                      onChange={(v) => update(sub.name, { codechefColumn: v })}
+                      options={sub.headers}
+                    />
+                  </Field>
+                </div>
+              </SettingRow>
+            ))}
+          </SettingList>
+        </Panel>
       ) : null}
+
+      <ActionBar
+        status={
+          subs.length === 0
+            ? "Load a sheet to choose its subsheets."
+            : selected.length === 0
+              ? "Include at least one subsheet (map its Mobile or Resume column)."
+              : !runName.trim()
+                ? "Name the run to start."
+                : `${selected.length} subsheet${selected.length === 1 ? "" : "s"} selected. Links come from the columns above, else the resume.`
+        }
+      >
+        <Button size="lg" onClick={run} disabled={!canRun}>
+          <Play className="h-4 w-4" /> Fetch DSA stats
+        </Button>
+      </ActionBar>
     </div>
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-1.5">
-      <Label className="text-xs text-muted-foreground">{label}</Label>
-      {children}
-    </div>
-  );
-}
-
-function SelectBox({
+function ColumnSelect({
+  id,
   value,
   onChange,
   options,
 }: {
+  id: string;
   value: string;
   onChange: (v: string) => void;
   options: string[];
 }) {
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="h-9 w-full rounded-md border border-input bg-background px-2 text-sm"
-    >
+    <NativeSelect id={id} value={value} onChange={(e) => onChange(e.target.value)}>
       <option value="">—</option>
       {options.map((o) => (
         <option key={o} value={o}>
           {o}
         </option>
       ))}
-    </select>
+    </NativeSelect>
   );
 }

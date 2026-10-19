@@ -13,55 +13,41 @@ export interface StepperProps {
   current: number;
 }
 
-/** Horizontal multi-stage stepper for the consolidation wizard. */
+/**
+ * Progress through a real sequence (a wizard). Done steps are checked, the current one is
+ * filled, the rest are quiet — the remaining distance is always visible (goal-gradient).
+ */
 export function Stepper({ steps, current }: StepperProps) {
   return (
-    <ol className="flex w-full items-center">
-      {steps.map((step, i) => {
-        const isComplete = i < current;
-        const isActive = i === current;
-        const isLast = i === steps.length - 1;
-        return (
-          <li
-            key={step.title}
-            className={cn("flex items-center", !isLast && "flex-1")}
-          >
-            <div className="flex items-center gap-3">
-              <div
+    <nav aria-label="Progress" className="w-full">
+      <ol className="flex w-full items-center gap-2">
+        {steps.map((step, i) => {
+          const done = i < current;
+          const active = i === current;
+          const last = i === steps.length - 1;
+          return (
+            <li key={step.title} className={cn("flex min-w-0 items-center gap-2", !last && "flex-1")} aria-current={active ? "step" : undefined}>
+              <span
                 className={cn(
-                  "flex h-9 w-9 shrink-0 items-center justify-center rounded-full border-2 text-sm font-semibold transition-colors",
-                  isComplete && "border-primary bg-primary text-primary-foreground",
-                  isActive && "border-primary text-primary",
-                  !isComplete && !isActive && "border-muted-foreground/30 text-muted-foreground",
+                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-semibold tabular transition-colors",
+                  done && "bg-primary text-primary-foreground",
+                  active && "bg-primary text-primary-foreground ring-4 ring-primary/15",
+                  !done && !active && "border border-input bg-card text-muted-foreground",
                 )}
               >
-                {isComplete ? <Check className="h-4 w-4" strokeWidth={3} /> : i + 1}
-              </div>
-              <div className="hidden sm:block">
-                <div
-                  className={cn(
-                    "text-sm font-medium",
-                    isActive || isComplete ? "text-foreground" : "text-muted-foreground",
-                  )}
-                >
+                {done ? <Check className="h-3.5 w-3.5" strokeWidth={3} /> : i + 1}
+              </span>
+              <span className="hidden min-w-0 sm:block">
+                <span className={cn("block truncate text-[13px] font-medium", active || done ? "text-foreground" : "text-muted-foreground")}>
                   {step.title}
-                </div>
-                {step.description ? (
-                  <div className="text-xs text-muted-foreground">{step.description}</div>
-                ) : null}
-              </div>
-            </div>
-            {!isLast ? (
-              <div
-                className={cn(
-                  "mx-3 h-0.5 flex-1 rounded transition-colors",
-                  isComplete ? "bg-primary" : "bg-muted-foreground/20",
-                )}
-              />
-            ) : null}
-          </li>
-        );
-      })}
-    </ol>
+                </span>
+                {step.description ? <span className="block truncate text-xs text-muted-foreground">{step.description}</span> : null}
+              </span>
+              {!last ? <span className={cn("mx-1 h-px min-w-4 flex-1", done ? "bg-primary" : "bg-border")} aria-hidden /> : null}
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
   );
 }

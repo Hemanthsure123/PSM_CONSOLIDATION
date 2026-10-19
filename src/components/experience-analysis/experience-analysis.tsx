@@ -1,18 +1,21 @@
 "use client";
 
 import * as React from "react";
-import { Briefcase, CheckCircle2, FileSpreadsheet, Home, Link2, Loader2, Play, Table2 } from "lucide-react";
+import { CircleCheck, FileSpreadsheet, Link2, Loader2, Play, Table2 } from "lucide-react";
+import { useReportBusy } from "@/components/busy-context";
+import { ActionBar } from "@/components/ui/action-bar";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Disclosure } from "@/components/ui/disclosure";
+import { Field } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
-import { Badge } from "@/components/ui/badge";
-import { Switch } from "@/components/ui/switch";
+import { Notice } from "@/components/ui/notice";
+import { Panel } from "@/components/ui/panel";
+import { NativeSelect } from "@/components/ui/select";
+import { SettingList, SettingRow } from "@/components/ui/setting-row";
 import { ExperienceResults } from "@/components/experience-analysis/experience-results";
 import { listSubsheets, readSubsheet } from "@/actions/sheets";
 import { getExperienceRun, newExperienceRunId, saveExperienceRun } from "@/lib/experience-store";
 import type { ExperienceCandidateInput, ExperienceResult, ExperienceRun } from "@/lib/experience-types";
-import { cn } from "@/lib/utils";
 
 interface ExperienceAnalysisProps {
   /** Reopen a saved run; omit to start a new one. */
@@ -50,7 +53,12 @@ function detectSub(name: string, headers: string[], rowCount: number): SubConfig
   };
 }
 
-const fieldClass = "h-9 w-full rounded-md border border-input bg-background px-2 text-sm";
+/** The three column pickers shown under an included subsheet. */
+const COLUMN_FIELDS = [
+  ["mobileColumn", "Mobile number column", "The candidate's ID (uuid) in the CSVs."],
+  ["resumeColumn", "Resume link column", ""],
+  ["nameColumn", "Name column", ""],
+] as const;
 
 /**
  * Experience Analysis — reads every candidate's resume and lists each
@@ -78,6 +86,7 @@ export function ExperienceAnalysis({ runId, onDone }: ExperienceAnalysisProps) {
   const [storageFull, setStorageFull] = React.useState(false);
   const [subsheetNames, setSubsheetNames] = React.useState<string[]>([]);
   const abortRef = React.useRef(false);
+  useReportBusy(running);
 
   // Reopen a saved run.
   React.useEffect(() => {
@@ -237,12 +246,12 @@ export function ExperienceAnalysis({ runId, onDone }: ExperienceAnalysisProps) {
 
   if (stage === "results") {
     return (
-      <div className="space-y-4">
+      <div className="space-y-6">
         {storageFull ? (
-          <p className="rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+          <Notice tone="warning">
             Browser storage is full, so this run is no longer being saved. Download the CSVs now, then delete older runs
             from the dashboard.
-          </p>
+          </Notice>
         ) : null}
         <ExperienceResults
           title={runName || sheetTitle || "Experience analysis"}
@@ -261,136 +270,119 @@ export function ExperienceAnalysis({ runId, onDone }: ExperienceAnalysisProps) {
   }
 
   return (
-    <div className="space-y-6">
-      <Card>
-        <CardContent className="flex items-center gap-4 py-4">
-          <Button variant="ghost" size="sm" onClick={onDone} className="shrink-0">
-            <Home className="h-4 w-4" /> Dashboard
-          </Button>
-          <div className="min-w-0">
-            <h2 className="flex items-center gap-2 text-base font-semibold">
-              <Briefcase className="h-4 w-4 text-muted-foreground" /> Experience Analysis
-            </h2>
-            <p className="text-sm text-muted-foreground">
-              Read every resume&apos;s internships &amp; jobs — company, role, duration in months, tech stack (or what
-              they did) — in a fixed column format for Google Sheets filters.
-            </p>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Card>
-        <CardHeader>
-          <CardTitle className="flex items-center gap-2 text-base">
-            <FileSpreadsheet className="h-4 w-4" /> Candidate sheet
-          </CardTitle>
-          <CardDescription>
-            Paste the sheet link (shared with the service account). Resume files linked in it must be shared too.
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid gap-4 sm:grid-cols-2">
-            <div className="space-y-1.5">
-              <Label htmlFor="ex-name">Run name</Label>
-              <Input id="ex-name" placeholder="e.g. Acme — internship screen" value={runName} onChange={(e) => setRunName(e.target.value)} />
-            </div>
-            <div className="space-y-1.5">
-              <Label htmlFor="ex-conc">Resumes read in parallel</Label>
-              <select
-                id="ex-conc"
-                value={concurrency}
-                onChange={(e) => setConcurrency(Number(e.target.value))}
-                className={fieldClass}
-              >
-                {[1, 2, 3, 4, 5, 6, 8].map((n) => (
-                  <option key={n} value={n}>
-                    {n} at a time{n === 4 ? " (recommended)" : ""}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <Link2 className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-              <Input
-                className="pl-9"
-                placeholder="https://docs.google.com/spreadsheets/d/…"
-                value={url}
-                onChange={(e) => {
-                  setUrl(e.target.value);
-                  setSubs([]);
-                  setSheetTitle("");
-                }}
-                onKeyDown={(e) => e.key === "Enter" && url.trim() && !fetching && fetchTabs()}
-              />
-            </div>
-            <Button onClick={fetchTabs} disabled={fetching || !url.trim()}>
-              {fetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
-              {fetching ? "Reading…" : "Fetch Subsheets"}
-            </Button>
-          </div>
-          {error ? <p className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">{error}</p> : null}
-          {subs.length ? (
-            <span className="inline-flex items-center gap-2 text-sm text-emerald-700">
-              <CheckCircle2 className="h-4 w-4" /> {sheetTitle} · {subs.length} subsheet{subs.length === 1 ? "" : "s"} found.
-            </span>
-          ) : null}
-        </CardContent>
-      </Card>
-
-      {subs.map((sub) => (
-        <Card key={sub.name} className={cn(sub.selected && "border-primary/40")}>
-          <CardHeader>
-            <div className="flex items-center justify-between">
-              <CardTitle className="flex items-center gap-2 text-base">
-                <Table2 className="h-4 w-4 text-muted-foreground" /> {sub.name}
-                <Badge variant="secondary">{sub.rowCount} rows</Badge>
-              </CardTitle>
-              <div className="flex items-center gap-2">
-                <span className="text-sm text-muted-foreground">{sub.selected ? "Included" : "Excluded"}</span>
-                <Switch checked={sub.selected} onCheckedChange={(v) => update(sub.name, { selected: v })} />
+    <div className="max-w-3xl space-y-6">
+      <Panel
+        icon={<FileSpreadsheet />}
+        title="Candidate sheet"
+        description="Share the sheet, and the resume files it links to, with the service account."
+      >
+        <div className="space-y-4">
+          <Field label="Sheet link" htmlFor="ex-url">
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <div className="relative flex-1">
+                <Link2 className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden />
+                <Input
+                  id="ex-url"
+                  className="pl-9"
+                  placeholder="https://docs.google.com/spreadsheets/d/…"
+                  value={url}
+                  onChange={(e) => {
+                    setUrl(e.target.value);
+                    setSubs([]);
+                    setSheetTitle("");
+                  }}
+                  onKeyDown={(e) => e.key === "Enter" && url.trim() && !fetching && fetchTabs()}
+                />
               </div>
+              <Button variant="outline" onClick={fetchTabs} disabled={fetching || !url.trim()}>
+                {fetching ? <Loader2 className="h-4 w-4 animate-spin" /> : <FileSpreadsheet className="h-4 w-4" />}
+                {fetching ? "Reading…" : "Load sheet"}
+              </Button>
             </div>
-          </CardHeader>
-          {sub.selected ? (
-            <CardContent className="grid gap-4 sm:grid-cols-3">
-              {(
-                [
-                  ["mobileColumn", "Mobile number column (uuid)"],
-                  ["resumeColumn", "Resume link column (required)"],
-                  ["nameColumn", "Name column (optional)"],
-                ] as const
-              ).map(([key, label]) => (
-                <div key={key} className="space-y-1.5">
-                  <Label className="text-xs text-muted-foreground">{label}</Label>
-                  <select value={sub[key]} onChange={(e) => update(sub.name, { [key]: e.target.value })} className={fieldClass}>
-                    <option value="">—</option>
-                    {sub.headers.map((h) => (
-                      <option key={h} value={h}>
-                        {h}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              ))}
-            </CardContent>
+          </Field>
+          {error && !subs.length ? <Notice tone="danger">{error}</Notice> : null}
+          {subs.length ? (
+            <p className="inline-flex items-center gap-2 text-[13px] font-medium text-success">
+              <CircleCheck className="h-4 w-4 shrink-0" aria-hidden /> {sheetTitle} · {subs.length} subsheet{subs.length === 1 ? "" : "s"} found.
+            </p>
           ) : null}
-        </Card>
-      ))}
+          <Field label="Run name" htmlFor="ex-name" hint="Filled in from the sheet title if left empty.">
+            <Input id="ex-name" placeholder="e.g. Acme — internship screen" value={runName} onChange={(e) => setRunName(e.target.value)} />
+          </Field>
+        </div>
+      </Panel>
 
       {subs.length ? (
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-muted-foreground">
-            {selected.length
-              ? `${selected.length} subsheet${selected.length === 1 ? "" : "s"} selected.`
-              : "Include at least one subsheet and map its Resume link column."}
-          </p>
-          <Button size="lg" onClick={start} disabled={!selected.length || !runName.trim() || loading}>
-            {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} Analyse experience
-          </Button>
-        </div>
+        <Panel icon={<Table2 />} title="Subsheets" description="Include the tabs to analyse and pick their columns.">
+          <SettingList>
+            {subs.map((sub, i) => (
+              <SettingRow
+                key={sub.name}
+                id={`ex-sub-${i}`}
+                title={sub.name}
+                description={<span className="tabular-nums">{sub.rowCount} rows</span>}
+                checked={sub.selected}
+                onCheckedChange={(v) => update(sub.name, { selected: v })}
+              >
+                <div className="grid gap-3 sm:grid-cols-3">
+                  {COLUMN_FIELDS.map(([key, label, info]) => (
+                    <Field
+                      key={key}
+                      label={label}
+                      htmlFor={`ex-sub-${i}-${key}`}
+                      info={info || undefined}
+                      optional={key === "nameColumn"}
+                      error={key === "resumeColumn" && !sub[key] ? "Pick the resume link column." : undefined}
+                    >
+                      <NativeSelect id={`ex-sub-${i}-${key}`} value={sub[key]} onChange={(e) => update(sub.name, { [key]: e.target.value })}>
+                        <option value="">—</option>
+                        {sub.headers.map((h) => (
+                          <option key={h} value={h}>
+                            {h}
+                          </option>
+                        ))}
+                      </NativeSelect>
+                    </Field>
+                  ))}
+                </div>
+              </SettingRow>
+            ))}
+          </SettingList>
+        </Panel>
       ) : null}
+
+      <Disclosure title="Advanced options" summary={`${concurrency} at a time`}>
+        <Field label="Resumes read in parallel" htmlFor="ex-conc">
+          <NativeSelect
+            id="ex-conc"
+            value={concurrency}
+            onChange={(e) => setConcurrency(Number(e.target.value))}
+            wrapperClassName="sm:max-w-xs"
+          >
+            {[1, 2, 3, 4, 5, 6, 8].map((n) => (
+              <option key={n} value={n}>
+                {n} at a time{n === 4 ? " (recommended)" : ""}
+              </option>
+            ))}
+          </NativeSelect>
+        </Field>
+      </Disclosure>
+
+      {error && subs.length ? <Notice tone="danger">{error}</Notice> : null}
+
+      <ActionBar
+        status={
+          !subs.length
+            ? "Load the sheet to choose its subsheets."
+            : selected.length
+              ? `${selected.length} subsheet${selected.length === 1 ? "" : "s"} selected.${runName.trim() ? "" : " Name the run to start."}`
+              : "Include at least one subsheet and map its Resume link column."
+        }
+      >
+        <Button size="lg" onClick={start} disabled={!selected.length || !runName.trim() || loading}>
+          {loading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />} Analyse experience
+        </Button>
+      </ActionBar>
     </div>
   );
 }

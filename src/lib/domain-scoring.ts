@@ -1,3 +1,5 @@
+import { dsaBonus } from "@/lib/dsa-scoring";
+
 /**
  * Shared domain-shortlisting scoring constants + combination formula. Kept in a
  * plain module (not the "use server" action file) so both the client component
@@ -64,15 +66,22 @@ export function presentationBonus(presentationScore: number, checkPresentation: 
   return Math.round((Math.min(presentationScore, 100) - PRES_FLOOR) / span * PRES_WEIGHT);
 }
 
-/** Final rank score: resume domain fit + the (optional) GitHub / presentation bonuses. */
+/**
+ * Final rank score: resume domain fit + the (optional) GitHub / DSA / presentation
+ * bonuses. DSA (up to +15, dsa-scoring.ts) sits between GitHub (+20) and presentation
+ * (+10): with the DSA toggle on, a strong Codeforces / CodeChef / LeetCode record lifts
+ * a candidate among comparable domain fits.
+ */
 export function combinedScore(
-  c: { domainScore: number; githubScore: number; presentationScore?: number },
+  c: { domainScore: number; githubScore: number; presentationScore?: number; dsa?: { score: number } },
   useGithub: boolean,
   checkPresentation = false,
+  useDsa = false,
 ): number {
   return (
     c.domainScore +
     githubBonus(c.githubScore, useGithub) +
+    dsaBonus(c.dsa?.score, useDsa) +
     presentationBonus(c.presentationScore ?? 0, checkPresentation)
   );
 }

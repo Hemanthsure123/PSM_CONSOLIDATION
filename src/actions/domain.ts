@@ -3,184 +3,31 @@
 import { htmlToPdf } from "@/lib/pdf";
 import { buildDomainReportHtml, type DomainCardInput } from "@/lib/domain-report-template";
 import { storePdf } from "@/lib/report-storage";
-import { fetchResumeBytes } from "@/lib/resume";
-import { extractProfileLinksFromResume, collectResumeUrls } from "@/lib/resume-links";
-import { getLeetCodeSolved, getCodeforcesSolved, getGithubContributions, parseGithubUser } from "@/lib/coding-stats";
-import {
-  analyzeGithubProfile,
-  buildJdTechSpec,
-  checkGithubAccess,
-  describeJdTechSpec,
-  type GithubFailure,
-} from "@/lib/github-analysis";
+import { buildJdTechSpec, checkGithubAccess, describeJdTechSpec } from "@/lib/github-analysis";
 import { mapWithConcurrency } from "@/lib/rate-limit";
 import { GITHUB_BATCH_SIZE, MIN_DOMAIN_SCORE, combinedScore } from "@/lib/domain-scoring";
+import { bestRating, dsaGateFailure, dsaGatesActive, type DsaGates } from "@/lib/dsa-scoring";
+import {
+  inspectDomainGithub,
+  screenDomainCandidate,
+  type DomainScreenOptions,
+  type GithubInspectInput,
+  type GithubInspectResult,
+} from "@/lib/domain-screen";
 import { slugify } from "@/lib/utils";
-import { analyzeCandidateForDomain } from "@/actions/llm";
-import type {
-  ActionResult,
-  DomainCandidate,
-  DomainCandidateOutcome,
-  DomainCandidateRow,
-  DomainCommit,
-  DomainGithubRepo,
-  DomainGithubStatus,
-  DomainReportResult,
-} from "@/lib/types";
-
-/** github.com first path segments that are GitHub's own pages, never a user. */
-const GITHUB_NON_USER =
-  /^(orgs|features|about|pricing|topics|sponsors|marketplace|settings|apps|login|join|signup|explore|trending|collections|events|readme|new|notifications|codespaces|enterprise|customer-stories|security|site|contact|resources|solutions|team|search|issues|pulls|gist)$/i;
+import type { ActionResult, DomainCandidate, DomainCandidateOutcome, DomainCandidateRow, DomainReportResult } from "@/lib/types";
 
 /**
- * Split the resume's GitHub URLs into the candidate's profile URL + repo URLs. The
- * candidate is the user the resume links as a PROFILE; failing that, the owner of most
- * of the linked repos (so a teammate's or a course's repo listed first doesn't win);
- * failing that, the user behind a `<user>.github.io` portfolio.
- */
-function splitGithub(urls: string[]): { profile: string; repos: string[] } {
-  const repos: string[] = [];
-  const profileUsers: string[] = [];
-  const owners = new Map<string, { user: string; count: number }>();
-  let pagesUser = "";
-  for (const u of urls) {
-    const pages = u.match(/^https?:\/\/([a-z0-9][a-z0-9-]*)\.github\.io(?:[/?#]|$)/i);
-    if (pages) {
-      pagesUser ||= pages[1];
-      continue;
-    }
-    if (!/^https?:\/\/(www\.)?github\.com\//i.test(u)) continue;
-    const path = u.replace(/^https?:\/\/(www\.)?github\.com\//i, "").replace(/[?#].*$/, "").replace(/\/+$/, "");
-    const parts = path.split("/").filter(Boolean);
-    if (!parts.length || GITHUB_NON_USER.test(parts[0])) continue;
-    const user = parseGithubUser(u);
-    if (!user) continue;
-    if (parts.length >= 2) {
-      repos.push(u);
-      const key = user.toLowerCase();
-      owners.set(key, { user, count: (owners.get(key)?.count ?? 0) + 1 });
-    } else {
-      profileUsers.push(user);
-    }
-  }
-  const topOwner = [...owners.values()].sort((a, b) => b.count - a.count)[0]?.user ?? "";
-  const user = profileUsers[0] || topOwner || pagesUser;
-  return { profile: user ? `https://github.com/${user}` : "", repos };
-}
-
-/**
- * Assess ONE candidate's fit for `domain`. When `useDsa`, the resume's LeetCode /
- * Codeforces profiles are resolved (including links hidden behind an icon) and
- * their solved counts are folded in as a secondary strength signal. Called per
- * row by the client so progress is visible and one bad resume can't fail the run.
+ * Assess ONE candidate's fit for `domain`. The browser now screens candidates in
+ * parallel through /api/domain/analyze (server actions from one page run one at a
+ * time); this action stays for callers that still use it. See domain-screen.ts.
  */
 export async function analyzeDomainCandidate(
   row: DomainCandidateRow,
-  opts: {
-    domain: string;
-    /** Fetch + weigh LeetCode/Codeforces (also forced on by a min-LeetCode gate). */
-    useDsa: boolean;
-    /** Capture the resume's GitHub links for later live inspection. */
-    useGithub: boolean;
-    /** Strict must-haves the model checks (meetsMandatory). */
-    mandatory: string;
-    /** Emphasise that domain internship/work experience is required. */
-    requireExperience: boolean;
-    /** Also grade the resume's structure / alignment / visual presentation. */
-    checkPresentation: boolean;
-  },
+  opts: DomainScreenOptions,
 ): Promise<ActionResult<DomainCandidate>> {
-  const { domain, useDsa, useGithub, mandatory, requireExperience, checkPresentation } = opts;
-  if (!domain.trim()) return { ok: false, error: "Enter the domain to shortlist for first." };
-  if (!/^https?:\/\//i.test((row.resumeUrl ?? "").trim())) {
-    return { ok: false, error: "No resume link in the sheet." };
-  }
-
-  const resume = await fetchResumeBytes(row.resumeUrl);
-  if (!resume) {
-    return {
-      ok: false,
-      error:
-        "Couldn't download the resume from the sheet link. Ensure the file is " +
-        "shared with the service account (or publicly viewable).",
-    };
-  }
-
-  // DSA signal — resolve profiles from the resume, then fetch counts. Stored on
-  // the candidate (shown in the report/CSV and used by the min-LeetCode gate).
-  let dsaContext = "";
-  let leetcodeSolved = 0;
-  let codeforcesSolved = 0;
-  if (useDsa) {
-    try {
-      const profiles = await extractProfileLinksFromResume(resume, false);
-      const [lc, cf] = await Promise.all([
-        profiles.leetcode ? getLeetCodeSolved(profiles.leetcode.url) : Promise.resolve(null),
-        profiles.codeforces ? getCodeforcesSolved(profiles.codeforces.url) : Promise.resolve(null),
-      ]);
-      if (typeof lc === "number" && lc > 0) leetcodeSolved = lc;
-      if (typeof cf === "number" && cf > 0) codeforcesSolved = cf;
-      const parts: string[] = [];
-      if (leetcodeSolved) parts.push(`LeetCode ${leetcodeSolved} solved`);
-      if (codeforcesSolved) parts.push(`Codeforces ${codeforcesSolved} solved`);
-      dsaContext = parts.join(", ");
-    } catch {
-      dsaContext = "";
-    }
-  }
-
-  // GitHub links (for later inspection of the shortlisted candidates only).
-  let githubProfile = "";
-  let githubRepos: string[] = [];
-  if (useGithub) {
-    try {
-      const urls = await collectResumeUrls(resume);
-      const gh = splitGithub(urls);
-      githubProfile = gh.profile;
-      githubRepos = gh.repos.slice(0, 20);
-    } catch {
-      /* best-effort */
-    }
-  }
-
-  const res = await analyzeCandidateForDomain(
-    resume,
-    domain,
-    dsaContext,
-    mandatory,
-    requireExperience,
-    checkPresentation,
-  );
-  if (!res.ok) return res;
-
-  return {
-    ok: true,
-    data: {
-      ...row,
-      domainScore: res.data.domainScore,
-      coreSkills: res.data.coreSkills,
-      evidence: res.data.evidence,
-      meetsMandatory: res.data.meetsMandatory,
-      hasDomainExperience: res.data.hasDomainExperience,
-      experience: res.data.experience,
-      presentationScore: checkPresentation ? res.data.presentationScore : 0,
-      presentationNotes: checkPresentation ? res.data.presentationNotes : "",
-      githubProfile,
-      githubRepos,
-      githubStatus: !useGithub ? "off" : githubProfile || githubRepos.length ? "not-inspected" : "no-link",
-      githubNote: "",
-      githubScore: 0,
-      githubMatches: 0,
-      githubTechs: [],
-      githubTopRepos: [],
-      githubAiLikelihood: "",
-      githubAiSummary: "",
-      leetcodeSolved,
-      codeforcesSolved,
-      githubCommits2y: 0,
-      githubLastDomainCommit: null,
-    },
-  };
+  const res = await screenDomainCandidate(row, opts);
+  return res.ok ? { ok: true, data: res.candidate } : { ok: false, error: res.error };
 }
 
 /**
@@ -199,106 +46,10 @@ export async function checkGithubForDomain(
   return { ok: true, data: { remaining: access.remaining, limit: access.limit, resetAt: access.resetAt, ...techs } };
 }
 
-/** One candidate to inspect (the client sends a few per call). */
-export interface GithubInspectInput {
-  id: string;
-  githubProfile: string;
-  githubRepos: string[];
-}
-
-/** Everything the deep GitHub inspection learned about one candidate. */
-export interface GithubInspectResult {
-  id: string;
-  status: DomainGithubStatus;
-  note: string;
-  score: number;
-  matches: number;
-  techs: string[];
-  topRepos: DomainGithubRepo[];
-  commits2y: number;
-  lastDomainCommit: DomainCommit | null;
-  aiLikelihood: "" | "none" | "low" | "medium" | "high";
-  aiSummary: string;
-}
-
-const FAILURE_STATUS: Record<GithubFailure, DomainGithubStatus> = {
-  "no-username": "no-link",
-  "not-found": "not-found",
-  "no-repos": "no-repos",
-  "no-token": "failed",
-  auth: "failed",
-  "rate-limited": "failed",
-  error: "failed",
-};
-
 /**
- * Deep GitHub inspection for one candidate: what their public repos' CODE actually
- * uses (manifests, imports, config — not repo names), scored 0-100 against the domain,
- * plus the domain-relevant repos, the newest own commit to one of them, the commit-
- * authorship signal, and 2-year commit activity. Never throws; every failure comes back
- * as a status + note rather than a silent 0.
- */
-async function inspectOne(input: GithubInspectInput, domain: string, mandatory: string): Promise<GithubInspectResult> {
-  const empty: GithubInspectResult = {
-    id: input.id,
-    status: "failed",
-    note: "",
-    score: 0,
-    matches: 0,
-    techs: [],
-    topRepos: [],
-    commits2y: 0,
-    lastDomainCommit: null,
-    aiLikelihood: "",
-    aiSummary: "",
-  };
-  try {
-    const spec = buildJdTechSpec(mandatory, domain, { modelledOnly: true });
-    // The profile URL, or any repo URL — its owner is the candidate.
-    const who = input.githubProfile || input.githubRepos[0] || "";
-    const [deep, commits] = await Promise.all([
-      analyzeGithubProfile(input.githubProfile, input.githubRepos, spec),
-      getGithubContributions(who),
-    ]);
-    if (!deep.ok) {
-      return { ...empty, status: FAILURE_STATUS[deep.reason], note: deep.message, commits2y: commits ?? 0 };
-    }
-
-    const a = deep.analysis;
-    const notes: string[] = [];
-    if (!a.assessable) {
-      notes.push("The domain names no technology GitHub can verify — add tools / frameworks to “What defines it”.");
-    }
-    if (a.warning) notes.push(a.warning);
-    if (commits === null) notes.push("2-year commit count unavailable (GitHub GraphQL error).");
-    return {
-      id: input.id,
-      status: "checked",
-      note: notes.join(" "),
-      score: a.overallMatchPct,
-      matches: a.matchingCount,
-      techs: a.provenTechs,
-      topRepos: a.topRepos
-        .filter((r) => r.relevant)
-        .slice(0, 3)
-        .map((r) => ({ name: r.name, url: r.url, matchPct: r.matchPct, techs: [...r.mandatoryHit, ...r.goodToHaveHit] })),
-      commits2y: commits ?? 0,
-      lastDomainCommit: a.lastDomainCommit,
-      aiLikelihood: a.authenticity.aiLikelihood,
-      aiSummary: a.authenticity.summary,
-    };
-  } catch (err) {
-    const message = err instanceof Error ? err.message : "GitHub inspection failed.";
-    console.warn("[domain] github inspection failed:", message);
-    return { ...empty, note: message.slice(0, 160) };
-  }
-}
-
-/**
- * Deep-inspect a small batch of domain-fit candidates concurrently. The client sends
- * batches (server actions run one at a time) and shows progress between them. Called
- * only for candidates that already cleared the resume domain-fit bar, so the API cost
- * is bounded.
+ * Deep-inspect a small batch of domain-fit candidates concurrently. The browser now
+ * inspects in parallel through /api/domain/github; this action stays for callers that
+ * still use it.
  */
 export async function inspectGithubBatch(
   inputs: GithubInspectInput[],
@@ -306,7 +57,7 @@ export async function inspectGithubBatch(
   mandatory: string,
 ): Promise<ActionResult<GithubInspectResult[]>> {
   try {
-    const results = await mapWithConcurrency(inputs, GITHUB_BATCH_SIZE, (input) => inspectOne(input, domain, mandatory));
+    const results = await mapWithConcurrency(inputs, GITHUB_BATCH_SIZE, (input) => inspectDomainGithub(input, domain, mandatory));
     return { ok: true, data: results };
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : "GitHub inspection failed." };
@@ -338,7 +89,10 @@ export async function buildDomainReport(
     /** Build and store the PDF report. Off = rank and return the outcomes only (table + CSVs). Default on. */
     generateReport?: boolean;
     /** Strict gates. 0 disables a numeric gate; the *Active flags gate on booleans. */
-    minLeetcode: number;
+    /** @deprecated LeetCode-only gate of older clients — use `dsaGates.minSolved`. */
+    minLeetcode?: number;
+    /** DSA gates (solved / contests / rating / DSA score across LeetCode, Codeforces, CodeChef). */
+    dsaGates?: DsaGates;
     minCommits: number;
     mandatoryActive: boolean;
     requireExperience: boolean;
@@ -348,13 +102,16 @@ export async function buildDomainReport(
     minPresentation: number;
   },
 ): Promise<ActionResult<DomainReportResult>> {
-  const { domain, topN, limitToTopN, runName, resumesScanned, useDsa, useGithub, showDomainCommit, showStats, minLeetcode, minCommits, mandatoryActive, requireExperience, checkPresentation, minPresentation } = opts;
+  const { domain, topN, limitToTopN, runName, resumesScanned, useDsa, useGithub, showDomainCommit, showStats, minCommits, mandatoryActive, requireExperience, checkPresentation, minPresentation } = opts;
+  const minLeetcode = opts.minLeetcode ?? 0;
+  const dsaGates = opts.dsaGates;
+  const dsaGated = dsaGatesActive(dsaGates);
 
   // Domain-fit floor first, then the STRICT gates — a candidate must clear every
   // enabled one and is dropped at the first it fails. Track how many each gate
   // removes so the UI can explain the funnel, and keep the reason per candidate
   // for the all-candidates view.
-  const excluded = { mandatory: 0, leetcode: 0, commits: 0, experience: 0, presentation: 0 };
+  const excluded = { mandatory: 0, leetcode: 0, dsa: 0, commits: 0, experience: 0, presentation: 0 };
   const presentationGate = checkPresentation && minPresentation > 0;
   const rejectionReason = (c: DomainCandidate): string => {
     if (c.domainScore < MIN_DOMAIN_SCORE) return `Domain fit ${c.domainScore} is below the ${MIN_DOMAIN_SCORE} bar`;
@@ -363,6 +120,13 @@ export async function buildDomainReport(
     if (minLeetcode > 0 && c.leetcodeSolved < minLeetcode) {
       excluded.leetcode++;
       return `${c.leetcodeSolved} LeetCode solved, below the ${minLeetcode} minimum`;
+    }
+    if (dsaGated) {
+      const why = dsaGateFailure(c.dsa, dsaGates);
+      if (why) {
+        excluded.dsa++;
+        return why;
+      }
     }
     if (minCommits > 0 && c.githubCommits2y < minCommits) {
       excluded.commits++;
@@ -383,7 +147,7 @@ export async function buildDomainReport(
   // Final rank folds the live GitHub signal — and, when graded, the resume's
   // presentation polish — into the resume domain fit.
   const byRank = (a: DomainCandidate, b: DomainCandidate) =>
-    combinedScore(b, useGithub, checkPresentation) - combinedScore(a, useGithub, checkPresentation);
+    combinedScore(b, useGithub, checkPresentation, useDsa) - combinedScore(a, useGithub, checkPresentation, useDsa);
   const matches = judged.filter((j) => !j.reason).map((j) => j.c).sort(byRank);
   const considered = matches.length;
   const ranked = limitToTopN ? matches.slice(0, Math.max(1, topN)) : matches;
@@ -416,6 +180,11 @@ export async function buildDomainReport(
     // Coding stats shown only when the relevant fetch was enabled.
     leetcodeSolved: useDsa ? c.leetcodeSolved : 0,
     codeforcesSolved: useDsa ? c.codeforcesSolved : 0,
+    codechefSolved: useDsa ? (c.dsa?.codechef.solved ?? 0) : 0,
+    dsaScore: useDsa ? (c.dsa?.score ?? 0) : 0,
+    ratings: useDsa && c.dsa
+      ? { codeforces: bestRating(c.dsa.codeforces), codechef: bestRating(c.dsa.codechef), leetcode: bestRating(c.dsa.leetcode) }
+      : { codeforces: null, codechef: null, leetcode: null },
     githubCommits2y: useGithub ? c.githubCommits2y : 0,
     lastDomainCommit: showDomainCommit ? c.githubLastDomainCommit : null,
     showCoding: useDsa || useGithub || showDomainCommit,

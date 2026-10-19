@@ -65,6 +65,24 @@ export interface DsaResult {
   error?: string;
 }
 
+/**
+ * One candidate's DSA, read the DSA-consolidation way (all three platforms: solved,
+ * rated contests, current / highest rating) — what Domain Shortlisting screens on.
+ */
+export interface DsaSnapshot {
+  leetcode: DsaPlatformResult;
+  codeforces: DsaPlatformResult;
+  codechef: DsaPlatformResult;
+  /** Sum of the known solved counts (null = none known). */
+  totalSolved: number | null;
+  /** Sum of the known rated-contest counts (null = none known). */
+  totalContests: number | null;
+  /** 0-100 DSA strength, Codeforces > CodeChef > LeetCode (dsa-scoring.ts). */
+  score: number;
+  /** A linked profile couldn't be read in full (rate limit / timeout) — the numbers may be low. */
+  partial: boolean;
+}
+
 /** A saved DSA consolidation run — persisted for the dashboard. */
 export interface DsaAnalysis {
   id: string;

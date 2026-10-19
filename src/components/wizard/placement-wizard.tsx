@@ -1,9 +1,9 @@
 "use client";
 
 import * as React from "react";
-import { ArrowLeft, ArrowRight, Home, LayoutDashboard } from "lucide-react";
+import { Check } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
+import { ActionBar } from "@/components/ui/action-bar";
 import { Stepper } from "@/components/ui/stepper";
 import {
   WIZARD_STEPS,
@@ -68,18 +68,47 @@ export function PlacementWizard({ onComplete, onCancel }: PlacementWizardProps) 
     onComplete();
   };
 
+  // What the current step still needs (or what it holds), shown beside the actions.
+  const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? "" : "s"}`;
+  const statusText = (() => {
+    switch (step) {
+      case 0:
+        if (!state.companyName.trim()) return "Enter the company name to continue.";
+        if (state.subsheets.length === 0) return "Fetch the sheet's subsheets to continue.";
+        return `${plural(state.subsheets.length, "subsheet")} found.`;
+      case 1:
+        if (selectedSubs.length === 0) return "Include at least one subsheet to continue.";
+        if (!subsReady) return "Map the columns and load the rows of every included subsheet.";
+        return `${plural(selectedSubs.length, "subsheet")} ready · ${plural(
+          selectedSubs.reduce((n, s) => n + s.rows.length, 0),
+          "row",
+        )}.`;
+      case 2:
+        return state.useBigQuery
+          ? `${plural(state.selectedBqColumnIds.length, "BigQuery column")} selected.`
+          : "No BigQuery columns. The sheet uses the internal sheet only.";
+      case 3:
+        return state.consolidated.length > 0
+          ? `${plural(state.consolidated.length, "candidate")} in the company sheet.`
+          : "No candidates consolidated yet.";
+      default:
+        return "Download the sheet, then save it to the dashboard.";
+    }
+  })();
+
+  const current = WIZARD_STEPS[step];
+
   return (
     <div className="space-y-6">
-      <Card>
-        <CardContent className="flex items-center gap-4 py-6">
-          <Button variant="ghost" size="sm" onClick={onCancel} className="shrink-0">
-            <Home className="h-4 w-4" /> Dashboard
-          </Button>
-          <div className="min-w-0 flex-1">
-            <Stepper steps={WIZARD_STEPS} current={step} />
-          </div>
-        </CardContent>
-      </Card>
+      <div className="rounded-xl border bg-card px-4 py-4 shadow-surface sm:px-5">
+        <Stepper steps={WIZARD_STEPS} current={step} />
+        <p className="mt-3 text-[13px] sm:hidden">
+          <span className="font-medium">
+            Step {step + 1} of {WIZARD_STEPS.length}: {current.title}
+          </span>
+          {current.description ? <span className="text-muted-foreground"> · {current.description}</span> : null}
+        </p>
+      </div>
 
       <div>
         {step === 0 && <SetupStep state={state} patch={patch} />}
@@ -89,20 +118,33 @@ export function PlacementWizard({ onComplete, onCancel }: PlacementWizardProps) 
         {step === 4 && <ExportStep state={state} />}
       </div>
 
-      <div className="flex items-center justify-between">
-        <Button variant="outline" onClick={back} disabled={step === 0}>
-          <ArrowLeft className="h-4 w-4" /> Back
-        </Button>
+      <ActionBar
+        status={
+          <div className="flex min-w-0 items-center gap-3">
+            <Button variant="ghost" size="sm" onClick={onCancel} className="-ml-1 shrink-0">
+              Cancel
+            </Button>
+            <span className="min-w-0" aria-live="polite">
+              {statusText}
+            </span>
+          </div>
+        }
+      >
+        {step > 0 ? (
+          <Button variant="outline" onClick={back}>
+            Back
+          </Button>
+        ) : null}
         {!isLast ? (
           <Button onClick={next} disabled={!canAdvance}>
-            Continue <ArrowRight className="h-4 w-4" />
+            Continue
           </Button>
         ) : (
           <Button onClick={finish} disabled={state.consolidated.length === 0}>
-            <LayoutDashboard className="h-4 w-4" /> Save to Dashboard & Finish
+            <Check /> Save and finish
           </Button>
         )}
-      </div>
+      </ActionBar>
     </div>
   );
 }
