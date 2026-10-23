@@ -1,39 +1,143 @@
 import {
   BUCKETING_PROMPT_VERSION,
-  STAGE_TIER,
+  TRACK_BUCKET,
+  TRACK_LABEL,
+  priorityTier,
   stageLabel,
   type Bucket,
   type DomainKey,
   type ReasonCode,
   type Stage,
+  type Tr2Verdict,
   type Track,
 } from "@/lib/bucketing/config";
 
 /**
  * Candidate Bucketing — data shapes shared by the graph (server) and the UI
- * (browser). Client-safe: types plus one pure helper.
+ * (browser). Client-safe: types plus a few pure helpers.
  */
 
 // ── Input ────────────────────────────────────────────────────────────────────
+
+/** One TR-2 hire verdict from the interview export ("TR2 <track> Verdict"). */
+export interface InterviewTr2 {
+  track: Track;
+  verdict: Tr2Verdict;
+}
+
+/**
+ * The internal assessments from the interview export — the strongest signal there is.
+ * The drive's funnel: assessment → DSA interview (TR-1; "Shortlisted" = cleared) →
+ * resume-based interview (TR-2, one per track), or a single combined interview.
+ * Fields marked optional were added after the first v2 runs were saved.
+ */
+export interface InterviewRecord {
+  /** Hire verdicts by track, best first. */
+  tr2: InterviewTr2[];
+  /** Tracks where the candidate sat TR-2 and was rejected. */
+  tr2Rejected: Track[];
+  /** TR-2 tracks assigned but not interviewed yet ("TR2 <track> State" = assigned). */
+  tr2Pending?: Track[];
+  /** Combined-interview path verdict (no track) — counted as TR-2. */
+  combined: Tr2Verdict | null;
+  /** The combined interview was taken and rejected. */
+  combinedRejected?: boolean;
+  /** combinedInterviewState: "pending" / "completed" / "" (separate path). */
+  combinedState?: string;
+  /** interviewPath: "separate" / "combined". */
+  interviewPath?: string;
+  /** currentStage in the drive: dsa_interview / resume_based_interview / combined_interview … */
+  currentStage?: string;
+  /** The DSA interview (the TR-1 round): qualifying status ("shortlisted" = cleared) and its scores. */
+  dsaInterview?: { qualifying: string; dsaScore: number | null; csScore: number | null };
+  /** journeyStatus "closed" (not responding, placed …) — such candidates are not bucketed. */
+  journey?: { status: string; reason: string; notes: string };
+  tr1: {
+    /** tr1Status: "pass" / "fail" / "" (not taken). */
+    status: string;
+    selfIntro: number | null;
+    dsaOverall: number | null;
+    problemSolving: number | null;
+    coding: number | null;
+    communication: number | null;
+    debugging: number | null;
+    /** tr1OverallTechnicalScore, out of 100. */
+    overallTechnical: number | null;
+  };
+  assessment: {
+    /** offlineOverallScore, out of 160 (DSA coding 120 + CS fundamentals 40). */
+    offlineOverall: number | null;
+    dsaCoding: number | null;
+    csFundamentals: number | null;
+    /** Out of 15 each. */
+    sqlMcq: number | null;
+    sqlCoding: number | null;
+  };
+}
 
 export interface BucketingCandidateInput {
   /** Normalised mobile number — the candidate's id. */
   id: string;
   mobile: string;
   name: string;
+  /** "" when the sheets have no resume link for this candidate. */
   resumeUrl: string;
   /** Pasted resume text (used only when there is no readable link). */
   resumeText?: string;
   /** Highest cleared stage. */
   stage: Stage;
-  /** TR-2 track (null for TR-1 / Assessment, or a TR-2 row without one). */
+  /** TR-2 track of the best hire verdict (null: TR-1 / Assessment, or a combined-interview hire). */
   track: Track | null;
+  /** Best TR-2 hire verdict (TR-2 only). */
+  verdict?: Tr2Verdict | null;
+  /** Internal assessments, when the sheet is the interview export. */
+  interview?: InterviewRecord;
+  /** The export's own candidate id, email and college — for the exports; never shown to the models. */
+  externalId?: string;
+  email?: string;
+  college?: string;
   /** Sheet columns override links found in the resume. */
   githubUrl?: string;
   leetcodeUrl?: string;
   codechefUrl?: string;
   codeforcesUrl?: string;
   batch: number;
+}
+
+/** Ranking tier of a candidate: 1 TR-2 strong hire … 5 Assessment. */
+export const tierOf = (c: Pick<BucketingCandidateInput, "stage" | "verdict">) => priorityTier(c.stage, c.verdict ?? null);
+
+/** Where the candidate stands beyond the tag: pending / rejected interviews, a closed journey. "" when nothing to add. */
+export function interviewNote(iv: InterviewRecord | null | undefined): string {
+  if (!iv) return "";
+  const parts: string[] = [];
+  if (iv.journey?.status === "closed") parts.push(`Journey closed${iv.journey.reason ? ` (${iv.journey.reason.replace(/_/g, " ")})` : ""}`);
+  if (iv.tr2Pending?.length) parts.push(`TR-2 pending: ${iv.tr2Pending.map((t) => TRACK_LABEL[t]).join(", ")}`);
+  if (iv.tr2Rejected.length) parts.push(`TR-2 rejected: ${iv.tr2Rejected.map((t) => TRACK_LABEL[t]).join(", ")}`);
+  if (iv.combinedState === "pending") parts.push("Combined interview pending");
+  else if (iv.combinedRejected) parts.push("Combined interview rejected");
+  const tr1Taken = Boolean(iv.tr1.status) || Boolean(iv.dsaInterview?.qualifying);
+  const tr1Cleared = /^pass/.test(iv.tr1.status) || iv.dsaInterview?.qualifying === "shortlisted";
+  if (!iv.tr2.length && !iv.combined && !iv.tr2Rejected.length && !iv.tr2Pending?.length && tr1Taken && !tr1Cleared) parts.push("TR-1 not cleared");
+  return parts.join(" · ");
+}
+
+/** A closed journey in the drive (not responding, placed …). */
+export const journeyClosed = (c: Pick<BucketingCandidateInput, "interview">) => c.interview?.journey?.status === "closed";
+
+/**
+ * Buckets of the TR-2 tracks the candidate was hired in, at the best verdict among
+ * tracks that have a bucket (Product has none). Empty for combined-interview hires,
+ * TR-1 and Assessment.
+ */
+export function hireTrackBuckets(c: Pick<BucketingCandidateInput, "stage" | "track" | "interview">): Bucket[] {
+  if (c.stage !== "TR2") return [];
+  const hires = (c.interview?.tr2 ?? []).filter((t) => TRACK_BUCKET[t.track]);
+  if (!hires.length) {
+    const b = c.track ? TRACK_BUCKET[c.track] : undefined;
+    return b ? [b] : [];
+  }
+  return hires.filter((t) => t.verdict === hires[0].verdict).map((t) => TRACK_BUCKET[t.track]!);
 }
 
 // ── Ingest ───────────────────────────────────────────────────────────────────
@@ -108,6 +212,17 @@ export interface OssClaim {
   urls: string[];
 }
 
+export type AchievementKind = "win" | "rank" | "publication" | "award" | "participation" | "certification" | "other";
+
+export interface ExtractedAchievement {
+  /** A1, A2 … */
+  id: string;
+  title: string;
+  kind: AchievementKind;
+  description: string;
+  quote: string;
+}
+
 export type ProfileSource = "row" | "annotation" | "text" | "llm";
 
 export interface ProfileLink {
@@ -121,6 +236,8 @@ export interface Extraction {
   projects: ExtractedProject[];
   experience: ExtractedExperience[];
   openSource: OssClaim[];
+  /** Hackathons, competitions, ranks, publications, awards — good to have. */
+  achievements: ExtractedAchievement[];
   profiles: {
     github: ProfileLink | null;
     leetcode: ProfileLink | null;
@@ -227,6 +344,8 @@ export interface RepoEvidence {
   integrity: CommitIntegrity | null;
   homepage: string;
   srcFiles: number;
+  /** Jupyter notebooks in the repo (a bonus for DS/ML and GenAI work). */
+  notebooks: number;
 }
 
 export interface DemoCheck {
@@ -240,16 +359,19 @@ export interface DemoCheck {
   note: string;
 }
 
-/** A valid GitHub + live demo · B valid GitHub · C demo only · D not evidence. */
-export type Tier = "A" | "B" | "C" | "D";
+/**
+ * A valid GitHub + live demo · B valid GitHub · C demo only · R an ML / GenAI project
+ * described on the resume with no GitHub (GitHub is optional there) · D not evidence.
+ */
+export type Tier = "A" | "B" | "C" | "R" | "D";
 
-export type ProjectStatus = "verified" | "invalid" | "unavailable" | "demo_only" | "no_link" | "not_audited";
+export type ProjectStatus = "verified" | "invalid" | "unavailable" | "demo_only" | "resume_only" | "no_link" | "not_audited";
 
 export interface ProjectEvidence {
   projectId: string;
   title: string;
   status: ProjectStatus;
-  /** Tier A, B or C. */
+  /** Tier A, B, C or R. */
   valid: boolean;
   tier: Tier;
   invalidReason: ReasonCode | null;
@@ -261,6 +383,8 @@ export interface ProjectEvidence {
   buckets: Bucket[];
   /** Has a backend of its own. */
   backend: boolean;
+  /** Its repo holds Jupyter notebooks. */
+  notebooks: boolean;
   note: string;
 }
 
@@ -298,6 +422,8 @@ export interface BucketDecision {
   noBucketReason: string;
   /** The bucket rests on a demo-only project + internship (trust capped). */
   tierCBacked: boolean;
+  /** Buckets backed only by an internship / job (no project). */
+  roleOnly: Bucket[];
   model: string;
   attempt: number;
   error: string;
@@ -339,20 +465,41 @@ export interface DsaResult {
 export type BucketingStatus = "bucketed" | "not_bucketed" | "retry_needed";
 
 export interface Scores {
+  /** 40% internal assessments + 30% projects + 20% experience + 10% achievements. */
   overall: number;
-  validation: number;
+  /** TR-2 verdict, TR-1 technical score and assessment score, 0-100. */
+  internal: number;
+  /** Projects backing the bucket: flagship strength, verified evidence, domain fit. */
+  projects: number;
+  experience: number;
+  achievements: number;
   /** Verified domain score of the final bucket. */
   domain: number;
   flagship: number;
   dsa: number;
+  /** Kept for older results; no longer part of the overall score. */
+  validation: number;
+}
+
+/** The internal-assessment parts behind `scores.internal` (null = not in the export). */
+export interface InternalParts {
+  tr2: number | null;
+  tr1: number | null;
+  assessment: number | null;
+  sql: number | null;
 }
 
 export interface FinalDecision {
   status: BucketingStatus;
   bucket: Bucket | null;
   stageLabel: string;
-  priorityTier: 1 | 2 | 3;
+  /** 1 TR-2 strong hire · 2 medium · 3 low · 4 TR-1 · 5 Assessment. */
+  priorityTier: number;
+  /** At least one verified project (tier A, B or R). */
   validated: boolean;
+  /** How the bucket was decided. */
+  placedBy: "tr2-track" | "evidence" | "";
+  internalParts: InternalParts;
   /** Why there is no bucket (or why a re-run is needed). */
   reasonCodes: ReasonCode[];
   /** Flags on a bucketed candidate (TRACK_MISMATCH, LOW_TRUST). */
@@ -395,9 +542,15 @@ export interface BucketingResult {
   batch: number;
   stage: Stage;
   track: Track | null;
+  verdict: Tr2Verdict | null;
   stageLabel: string;
-  priorityTier: 1 | 2 | 3;
+  /** 1 TR-2 strong hire · 2 medium · 3 low · 4 TR-1 · 5 Assessment. */
+  priorityTier: number;
   status: BucketingStatus;
+  placedBy: "tr2-track" | "evidence" | "";
+  /** The internal assessments as read from the export. */
+  interview: InterviewRecord | null;
+  internalParts: InternalParts;
   bucket: Bucket | null;
   validated: boolean;
   reasonCodes: ReasonCode[];
@@ -419,6 +572,7 @@ export interface BucketingResult {
   projects: (ExtractedProject & { evidence: ProjectEvidence | null })[];
   experience: ExtractedExperience[];
   openSource: (OssClaim & { evidence: OssEvidence[] })[];
+  achievements: ExtractedAchievement[];
   dsa: DsaResult;
   reviews: {
     domain: DomainReview | null;
@@ -438,6 +592,8 @@ export interface BucketingResult {
   models: string[];
   durationMs: number;
   evaluatedAt: string;
+  /** The candidate's data changed (a newer export / resume sheet) — this result waits for a re-run. */
+  stale?: boolean;
 }
 
 // ── A saved run (browser) ────────────────────────────────────────────────────
@@ -446,6 +602,8 @@ export interface BucketingBatch {
   n: number;
   addedAt: string;
   count: number;
+  /** The file (or "pasted rows") the batch came from. */
+  source?: string;
 }
 
 export interface BucketingRunStats {
@@ -498,18 +656,8 @@ export function emptyDsa(): DsaResult {
   };
 }
 
-/** A sheet row with no resume link: recorded (so every candidate is accounted for), never sent to the models. */
-export function noResumeResult(c: BucketingCandidateInput): BucketingResult {
-  const r = failedBucketingResult(c, "No resume link in the sheet — add the resume and re-run this candidate.");
-  return {
-    ...r,
-    status: "not_bucketed",
-    reasonCodes: ["NO_RESUME_LINK"],
-    trust: { ...r.trust, verdict: "pass", trust: 100, band: "High", needsReview: true, issues: [] },
-    resume: { status: "unreadable", source: "", transcribed: false, chars: 0, note: "No resume link in the sheet", model: "" },
-    errors: [],
-  };
-}
+export const EMPTY_SCORES: Scores = { overall: 0, internal: 0, projects: 0, experience: 0, achievements: 0, domain: 0, flagship: 0, dsa: 0, validation: 0 };
+export const EMPTY_INTERNAL: InternalParts = { tr2: null, tr1: null, assessment: null, sql: null };
 
 /** A row that could not be evaluated (timeout, crash) — always "re-run", never a rejection. */
 export function failedBucketingResult(c: BucketingCandidateInput, error: string, durationMs = 0): BucketingResult {
@@ -520,15 +668,19 @@ export function failedBucketingResult(c: BucketingCandidateInput, error: string,
     batch: c.batch,
     stage: c.stage,
     track: c.track,
-    stageLabel: stageLabel(c.stage, c.track),
-    priorityTier: STAGE_TIER[c.stage],
+    verdict: c.verdict ?? null,
+    stageLabel: stageLabel(c.stage, c.track, c.verdict ?? null),
+    priorityTier: tierOf(c),
     status: "retry_needed",
+    placedBy: "",
+    interview: c.interview ?? null,
+    internalParts: EMPTY_INTERNAL,
     bucket: null,
     validated: false,
     reasonCodes: ["PIPELINE_ERROR"],
     flags: [],
     remarks: [error],
-    scores: { overall: 0, validation: 0, domain: 0, flagship: 0, dsa: 0 },
+    scores: EMPTY_SCORES,
     trust: {
       verdict: "fail",
       trust: null,
@@ -545,6 +697,7 @@ export function failedBucketingResult(c: BucketingCandidateInput, error: string,
     projects: [],
     experience: [],
     openSource: [],
+    achievements: [],
     dsa: emptyDsa(),
     reviews: { domain: null, bucket: null, dsa: null },
     resume: { status: "error", source: "", transcribed: false, chars: 0, note: error, model: "" },
@@ -558,5 +711,21 @@ export function failedBucketingResult(c: BucketingCandidateInput, error: string,
     models: [],
     durationMs,
     evaluatedAt: new Date().toISOString(),
+  };
+}
+
+/** Older saved results (bucketing-v1) lack the v2 fields — fill them so the screens never break. */
+export function upgradeResult(r: BucketingResult): BucketingResult {
+  const legacy = r as Partial<BucketingResult> & BucketingResult;
+  return {
+    ...legacy,
+    verdict: legacy.verdict ?? null,
+    placedBy: legacy.placedBy ?? "",
+    interview: legacy.interview ?? null,
+    internalParts: legacy.internalParts ?? EMPTY_INTERNAL,
+    achievements: legacy.achievements ?? [],
+    scores: { ...EMPTY_SCORES, ...legacy.scores },
+    // v1 numbered tiers by stage only (TR-2 1, TR-1 2, Assessment 3).
+    priorityTier: legacy.verdict === undefined ? priorityTier(legacy.stage, null) : legacy.priorityTier,
   };
 }

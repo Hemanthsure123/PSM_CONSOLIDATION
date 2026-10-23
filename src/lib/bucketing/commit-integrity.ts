@@ -86,6 +86,13 @@ function unlinkedIsCandidate(email: string, name: string, id: CandidateIdentity)
   return false;
 }
 
+/** Is this commit the candidate's (their linked account, or an unlinked git identity that is theirs)? The audit's own test. */
+export function isCandidateCommit(c: GithubCommitItem, id: CandidateIdentity): boolean {
+  const login = (c.author?.login ?? "").toLowerCase();
+  if (login) return id.logins.has(login);
+  return unlinkedIsCandidate(c.commit?.author?.email ?? "", c.commit?.author?.name ?? "", id);
+}
+
 /** Unambiguous AI coding-tool names (a human called "Claude" or "Jules" must not match — their emails do). */
 const AI_NAME = /\b(antigravity|copilot|codex|chatgpt|openai|gemini|windsurf|codeium|aider|cline|kiro|junie|tabnine|lovable|qwen[- ]?coder|deepseek|cursor ?agent|claude ?code|claude (?:opus|sonnet|haiku)|gpt-?\d|amazon q|codewhisperer|replit agent|devin-ai)\b/i;
 const AI_EMAIL_DOMAIN = /@(?:anthropic\.com|cursor\.com|openai\.com|windsurf\.ai|codeium\.com|aider\.chat|cognition\.ai|devin\.ai|lovable\.dev)$|^antigravity@|^gemini[^@]*@google\.com$/i;
@@ -122,11 +129,7 @@ export function auditStrict(
   let unlinkedForeign = 0;
   const dates: number[] = [];
 
-  const isCandidate = (c: GithubCommitItem) => {
-    const login = (c.author?.login ?? "").toLowerCase();
-    if (login) return id.logins.has(login);
-    return unlinkedIsCandidate(c.commit?.author?.email ?? "", c.commit?.author?.name ?? "", id);
-  };
+  const isCandidate = (c: GithubCommitItem) => isCandidateCommit(c, id);
 
   for (const c of commits) {
     const authorLogin = c.author?.login ?? "";

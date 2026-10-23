@@ -11,7 +11,9 @@ import { synthFromText } from "@/lib/bucketing/bucket-rules";
 import { LIMITS, TIMEOUTS } from "@/lib/bucketing/config";
 import { callAgent, fence, producerChain, str, strList } from "@/lib/bucketing/llm";
 import type {
+  AchievementKind,
   ExperienceKind,
+  ExtractedAchievement,
   ExtractedExperience,
   ExtractedProject,
   Extraction,
@@ -51,17 +53,20 @@ EXPERIENCE — each internship, job, apprenticeship, freelance or research posit
 
 OPEN SOURCE — contributions to OTHER people's repositories (merged pull requests, GSoC, Hacktoberfest, maintainer roles): title, quote, description, urls (PR / repository URLs from the URL list).
 
+ACHIEVEMENTS — hackathon / competition results, ranks (e.g. "Top 5% in …", "AIR 120"), publications or patents, awards and scholarships, notable certifications. title (as written), kind ("win" for a hackathon / competition win or podium, "rank" for a rank or percentile, "publication", "award", "participation" for taking part / finalist, "certification", "other"), quote (3-25 words copied exactly), description (as written, max 300 characters). Only what the resume states — never infer.
+
 PROFILES — the candidate's own GitHub profile and LeetCode / CodeChef / Codeforces profiles: a URL from the list, or a handle written next to the platform's name. "" when absent.
 
 Also: isResume (false only when this is not a resume / CV at all) and candidateName (as written at the top).
 
-Skills lists, summary / objective, education, coursework, certifications and achievements are NOT projects or experience — leave them out.`;
+Skills lists, summary / objective, education and coursework are NOT projects, experience or achievements — leave them out.`;
 
 const SHAPE = `Return ONLY a JSON object:
 {"isResume":boolean,"candidateName":string,
 "projects":[{"title":string,"quote":string,"description":string,"tech":[string],"github":[string],"live":[string],"period":string}],
 "experience":[{"company":string,"role":string,"kind":"internship"|"job"|"freelance"|"research"|"other","durationText":string,"startDate":string,"endDate":string,"tech":[string],"quote":string,"description":string}],
 "openSource":[{"title":string,"quote":string,"description":string,"urls":[string]}],
+"achievements":[{"title":string,"kind":"win"|"rank"|"publication"|"award"|"participation"|"certification"|"other","quote":string,"description":string}],
 "profiles":{"github":string,"leetcode":string,"codechef":string,"codeforces":string}}`;
 
 const STRS = { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } } as const;
@@ -117,6 +122,19 @@ const SCHEMA: Schema = {
         required: ["title", "quote", "description", "urls"],
       },
     },
+    achievements: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          title: { type: SchemaType.STRING },
+          kind: { type: SchemaType.STRING, format: "enum", enum: ["win", "rank", "publication", "award", "participation", "certification", "other"] },
+          quote: { type: SchemaType.STRING },
+          description: { type: SchemaType.STRING },
+        },
+        required: ["title", "kind", "quote", "description"],
+      },
+    },
     profiles: {
       type: SchemaType.OBJECT,
       properties: {
@@ -128,7 +146,7 @@ const SCHEMA: Schema = {
       required: ["github", "leetcode", "codechef", "codeforces"],
     },
   },
-  required: ["isResume", "candidateName", "projects", "experience", "openSource", "profiles"],
+  required: ["isResume", "candidateName", "projects", "experience", "openSource", "achievements", "profiles"],
 };
 
 type Raw = Record<string, unknown>;
@@ -240,6 +258,9 @@ function profileFrom(url: string, handle: string, ctx: TextCtx, sourceIfAbsent: 
 
 // ── Node ─────────────────────────────────────────────────────────────────────
 
+/** The note on a candidate whose sheets carry no resume link. */
+export const NO_RESUME_NOTE = "No resume link in the sheet";
+
 function stop(status: ResumeInfo["status"], note: string, extra: Partial<ResumeInfo> = {}): Update {
   return {
     resume: { status, source: "", transcribed: false, chars: 0, note, model: "", ...extra },
@@ -252,6 +273,9 @@ export async function ingestNode(s: State): Promise<Update> {
   const label = `bucketing:${c.mobile || c.id}`;
   const trace = (decision: string, model?: string) => ({ trace: [{ node: "ingest", ms: Date.now() - t0, model, decision }] });
 
+  if (!c.resumeUrl.trim() && !(c.resumeText ?? "").trim()) {
+    return { ...stop("unreadable", NO_RESUME_NOTE), ...trace("no resume link in the sheets — interview data only") };
+  }
   const content = await loadResumeContent({ resumeUrl: c.resumeUrl, resumeText: c.resumeText });
   if (typeof content === "string") {
     // A network blip / Drive outage is missing evidence, not an unreadable resume.
@@ -351,7 +375,7 @@ export async function ingestNode(s: State): Promise<Update> {
     extraction,
     models,
     ...trace(
-      `${extraction.projects.length} project(s), ${extraction.experience.length} role(s), ${extraction.openSource.length} OSS claim(s), ${urls.length} URL(s)` +
+      `${extraction.projects.length} project(s), ${extraction.experience.length} role(s), ${extraction.openSource.length} OSS, ${extraction.achievements.length} achievement(s), ${urls.length} URL(s)` +
         (extraction.dropped.length ? `; ${extraction.dropped.length} dropped by grounding` : "") +
         (transcribed ? "; transcribed" : ""),
       res.model,
@@ -478,6 +502,27 @@ function groundExtraction(
     });
   }
 
+  // ── Achievements (good to have) ──
+  const KINDS: AchievementKind[] = ["win", "rank", "publication", "award", "participation", "certification", "other"];
+  const achievements: ExtractedAchievement[] = [];
+  for (const o of (Array.isArray(json.achievements) ? json.achievements : []).slice(0, 10) as Raw[]) {
+    const quote = str(o.quote, 300);
+    const where = place(quote, ctx);
+    // Achievements often sit under "Achievements" — any section but the skills list.
+    if (!quote || !inText(quote, ctx) || (ctx.confident && where.section === "skills")) {
+      dropped.push(`Achievement "${str(o.title, 60)}": quote not found in the resume — dropped`);
+      continue;
+    }
+    const kind = KINDS.includes(o.kind as AchievementKind) ? (o.kind as AchievementKind) : "other";
+    achievements.push({
+      id: `A${achievements.length + 1}`,
+      title: str(o.title, 160) || quote.slice(0, 80),
+      kind,
+      description: groundedText(str(o.description, 600), ctx, 300),
+      quote,
+    });
+  }
+
   // ── Profiles ──
   const p = (json.profiles && typeof json.profiles === "object" ? json.profiles : {}) as Raw;
   const lower = text.toLowerCase();
@@ -514,6 +559,7 @@ function groundExtraction(
     projects: projects.slice(0, 10).map(({ pos: _pos, ...rest }) => rest),
     experience: experience.slice(0, 8),
     openSource: openSource.slice(0, 5),
+    achievements: achievements.slice(0, 8),
     profiles: {
       github,
       leetcode: dsa("leetcode", toLeetCodeUrl, parseLeetCodeUser),

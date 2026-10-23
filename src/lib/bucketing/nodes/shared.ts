@@ -1,6 +1,6 @@
 import "server-only";
-import { BUCKET_RULE, BUCKETS, DOMAIN_LABEL, OTHER_DOMAINS } from "@/lib/bucketing/config";
-import type { Extraction, ProjectEvidence, TraceEntry } from "@/lib/bucketing/types";
+import { BUCKET_RULE, BUCKETS, DOMAIN_LABEL, OTHER_DOMAINS, TRACK_LABEL, VERDICT_LABEL } from "@/lib/bucketing/config";
+import type { BucketingCandidateInput, Extraction, ProjectEvidence, TraceEntry } from "@/lib/bucketing/types";
 
 /** The verified evidence items as the agents see them — no skills list, no summary, no name or contact. */
 export function evidenceItems(x: Extraction, evidence?: ProjectEvidence[]): string {
@@ -35,15 +35,33 @@ export function evidenceItems(x: Extraction, evidence?: ProjectEvidence[]): stri
     );
   }
   for (const o of x.openSource) lines.push(`${o.id} · OPEN SOURCE · "${o.title}" — ${o.description || o.quote}`);
-  return lines.join("\n") || "(no projects, experience or open-source items)";
+  for (const a of x.achievements ?? []) lines.push(`${a.id} · ACHIEVEMENT (${a.kind}) · "${a.title}" — ${a.description || a.quote}`);
+  return lines.join("\n") || "(no projects, experience, open-source or achievement items)";
+}
+
+/** The candidate's internal assessments in one block — the strongest signal, ahead of everything on the resume. */
+export function interviewLines(c: BucketingCandidateInput): string {
+  const iv = c.interview;
+  if (!iv) return c.stage === "TR2" && c.track ? `TR-2 cleared in the ${TRACK_LABEL[c.track]} track.` : `Highest stage: ${c.stage}.`;
+  const out: string[] = [];
+  if (iv.tr2.length) out.push(`TR-2 hire verdicts: ${iv.tr2.map((t) => `${TRACK_LABEL[t.track]} — ${VERDICT_LABEL[t.verdict]}`).join("; ")}`);
+  if (iv.combined) out.push(`Combined interview (no track): ${VERDICT_LABEL[iv.combined]}`);
+  if (iv.tr2Rejected.length) out.push(`TR-2 rejected in: ${iv.tr2Rejected.map((t) => TRACK_LABEL[t]).join(", ")}`);
+  if (iv.tr1.overallTechnical !== null || iv.tr1.status) {
+    out.push(`TR-1: ${iv.tr1.status || "taken"}${iv.tr1.overallTechnical !== null ? `, technical score ${iv.tr1.overallTechnical}/100` : ""}`);
+  }
+  const a = iv.assessment;
+  if (a.offlineOverall !== null) out.push(`Assessment: ${a.offlineOverall}/160 (DSA coding ${a.dsaCoding ?? "?"}/120, CS fundamentals ${a.csFundamentals ?? "?"}/40)`);
+  if (a.sqlMcq !== null || a.sqlCoding !== null) out.push(`SQL: MCQ ${a.sqlMcq ?? "?"}/15, coding ${a.sqlCoding ?? "?"}/15`);
+  return out.join("\n") || "No interview results.";
 }
 
 export const DOMAIN_GUIDE = [
-  "The five buckets — always score all five:",
+  "The six buckets — always score all six:",
   ...BUCKETS.map((b) => `  ${b} (${DOMAIN_LABEL[b]}): ${BUCKET_RULE[b]}`),
   "Other domains — score only the ones the evidence shows:",
   `  ${OTHER_DOMAINS.map((d) => `${d} (${DOMAIN_LABEL[d]})`).join(", ")}.`,
-  "  AIML = classic ML / deep learning / CV / NLP models; DATA_ANALYTICS = analysis, dashboards, SQL / Excel / Power BI / Tableau.",
+  "  DSML = classic ML / deep learning / CV / NLP models (notebook work counts); DATA_ANALYTICS = analysis, dashboards, SQL / Excel / Power BI / Tableau; FRONTEND = UI work with no backend of its own.",
 ].join("\n");
 
 export const RUBRIC = `RUBRIC (0-100)
@@ -53,7 +71,7 @@ export const RUBRIC = `RUBRIC (0-100)
 - 30-49: tutorial-level / toy work only (clones, CRUD demos, course exercises).
 - 1-29: the domain is only touched in passing.
 - 0: no evidence item shows it.
-An internship / job in the domain is the strongest single signal; a merged open-source contribution counts like a good project. Depth matters: auth, real data, deployment, integrations, scale or measurable outcomes lift a project; a static page or a to-do app does not.`;
+An internship / job in the domain is the strongest single signal; a merged open-source contribution counts like a good project; an achievement (hackathon win, rank, publication) in the domain is a small plus, never the main evidence. Depth matters: auth, real data, deployment, integrations, scale or measurable outcomes lift a project; a static page or a to-do app does not.`;
 
 export function traceEntry(node: string, t0: number, decision: string, model?: string): { trace: TraceEntry[] } {
   return { trace: [{ node, ms: Date.now() - t0, model, decision }] };

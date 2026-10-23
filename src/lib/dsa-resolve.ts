@@ -51,6 +51,7 @@ export async function resolvePlatform(platform: DsaPlatform, url: string, source
       found: stats.found,
       source,
       note: stats.note || "OK",
+      ...(stats.ownerName ? { ownerName: stats.ownerName } : {}),
     };
   } catch (err) {
     return { ...EMPTY_PLATFORM, url, handle, source, note: err instanceof Error ? err.message.slice(0, 120) : "Fetch failed" };

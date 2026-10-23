@@ -11,9 +11,11 @@ import {
   FileCode2,
   FileSpreadsheet,
   FolderKanban,
+  GraduationCap,
   Layers,
   LayoutDashboard,
   Menu,
+  Star,
   Target,
   X,
   type LucideIcon,
@@ -33,8 +35,10 @@ import { QaScreening } from "@/components/qa-screening/qa-screening";
 import { ProjectBenchmarks } from "@/components/project-benchmarks/project-benchmarks";
 import { CandidateBucketing } from "@/components/bucketing/bucketing";
 import { ZaggleScreening } from "@/components/zaggle/zaggle-screening";
+import { AcademyBucketing } from "@/components/academy/academy-bucketing";
+import { SampleProfiles } from "@/components/showcase/sample-profiles";
 
-type View = "home" | "wizard" | "analyze" | "dsa" | "projects" | "domain" | "assignment" | "experience" | "qa" | "benchmarks" | "bucketing" | "zaggle";
+type View = "home" | "wizard" | "analyze" | "showcase" | "dsa" | "projects" | "domain" | "assignment" | "experience" | "qa" | "benchmarks" | "bucketing" | "zaggle" | "academy";
 
 interface ViewMeta {
   label: string;
@@ -56,6 +60,11 @@ const VIEWS: Record<View, ViewMeta> = {
     description: "Where a company's candidates came from and how they moved through the interview rounds.",
     icon: BarChart3,
   },
+  showcase: {
+    label: "Sample profiles",
+    description: "The strongest candidates per tech role — proven by their resume, own GitHub code and DSA — to show a company's hiring manager.",
+    icon: Star,
+  },
   domain: {
     label: "Domain shortlisting",
     description: "Rank a sheet's candidates for one domain, backed by their resume, GitHub and DSA profiles.",
@@ -70,8 +79,13 @@ const VIEWS: Record<View, ViewMeta> = {
   qa: { label: "QA screening", description: "Check QA resumes for mandatory and good-to-have skills, section by section.", icon: ClipboardCheck },
   bucketing: {
     label: "Candidate bucketing",
-    description: "Sort candidates into buckets from verified projects, GitHub, DSA and interview stage.",
+    description: "Sort interview candidates into the six TR-2 track buckets: internal assessments first, then verified projects, experience and achievements.",
     icon: Layers,
+  },
+  academy: {
+    label: "Academy bucketing",
+    description: "Sort the academy-assessed pool into Frontend, Backend, AI-ML and Full Stack for mentor assignment.",
+    icon: GraduationCap,
   },
   assignment: {
     label: "Assignment evaluation",
@@ -99,8 +113,8 @@ const VIEWS: Record<View, ViewMeta> = {
 /** Tools grouped by the job they do in the placement pipeline. */
 const NAV: { group?: string; views: View[] }[] = [
   { views: ["home"] },
-  { group: "Company sheets", views: ["wizard", "analyze"] },
-  { group: "Screening", views: ["domain", "qa", "zaggle", "bucketing"] },
+  { group: "Company sheets", views: ["wizard", "analyze", "showcase"] },
+  { group: "Screening", views: ["domain", "qa", "zaggle", "bucketing", "academy"] },
   { group: "Evaluation", views: ["assignment", "experience", "dsa", "projects"] },
   { group: "Reference", views: ["benchmarks"] },
 ];
@@ -121,6 +135,10 @@ export function AppShell() {
   const [bucketingRunId, setBucketingRunId] = React.useState<string | null>(null);
   // Saved Zaggle SDE 1 screening run to reopen (null = start a new one).
   const [zaggleRunId, setZaggleRunId] = React.useState<string | null>(null);
+  // Saved Academy bucketing run to reopen (null = start a new one).
+  const [academyRunId, setAcademyRunId] = React.useState<string | null>(null);
+  // Saved Sample profiles run to reopen (null = start a new one).
+  const [showcaseRunId, setShowcaseRunId] = React.useState<string | null>(null);
   // A run just created for another domain starts screening as soon as it opens.
   const [benchmarkAutoStart, setBenchmarkAutoStart] = React.useState(false);
 
@@ -137,6 +155,8 @@ export function AppShell() {
     if (v === "qa") setQaRunId(null);
     if (v === "bucketing") setBucketingRunId(null);
     if (v === "zaggle") setZaggleRunId(null);
+    if (v === "academy") setAcademyRunId(null);
+    if (v === "showcase") setShowcaseRunId(null);
     if (v === "benchmarks") {
       setBenchmarkRunId(null);
       setBenchmarkAutoStart(false);
@@ -301,6 +321,14 @@ export function AppShell() {
                   setZaggleRunId(runId ?? null);
                   setView("zaggle");
                 }}
+                onAcademy={(runId) => {
+                  setAcademyRunId(runId ?? null);
+                  setView("academy");
+                }}
+                onShowcase={(runId) => {
+                  setShowcaseRunId(runId ?? null);
+                  setView("showcase");
+                }}
                 onBenchmarks={(runId) => {
                   setBenchmarkRunId(runId ?? null);
                   setBenchmarkAutoStart(false);
@@ -328,6 +356,10 @@ export function AppShell() {
               <CandidateBucketing key={bucketingRunId ?? "new"} runId={bucketingRunId} onDone={goHome} />
             ) : view === "zaggle" ? (
               <ZaggleScreening key={zaggleRunId ?? "new"} runId={zaggleRunId} onDone={goHome} />
+            ) : view === "academy" ? (
+              <AcademyBucketing key={academyRunId ?? "new"} runId={academyRunId} onDone={goHome} />
+            ) : view === "showcase" ? (
+              <SampleProfiles key={showcaseRunId ?? "new"} runId={showcaseRunId} onDone={goHome} />
             ) : view === "qa" ? (
               <QaScreening key={qaRunId ?? "new"} runId={qaRunId} onDone={goHome} />
             ) : view === "experience" ? (

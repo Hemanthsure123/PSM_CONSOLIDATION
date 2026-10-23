@@ -11,7 +11,7 @@ import {
 } from "@/lib/github-analysis";
 import { auditStrict, buildIdentity, traceFiles } from "@/lib/bucketing/commit-integrity";
 import { bucketsFor, hasBackend, provenTechSet, synthFromRepo } from "@/lib/bucketing/bucket-rules";
-import { LIMITS, TECH_CONF, TIMEOUTS, type ReasonCode } from "@/lib/bucketing/config";
+import { GITHUB_OPTIONAL, LIMITS, TECH_CONF, TIMEOUTS, type ReasonCode } from "@/lib/bucketing/config";
 import { traceEntry } from "@/lib/bucketing/nodes/shared";
 import { NOT_A_DEMO } from "@/lib/bucketing/nodes/ingest";
 import type {
@@ -384,6 +384,7 @@ export async function projectEvidenceNode(s: State): Promise<Update> {
       integrity: null,
       homepage: "",
       srcFiles: 0,
+      notebooks: 0,
     };
     if (!res) return { ...base, message: "not inspected" };
     if (!res.ok) {
@@ -424,6 +425,7 @@ export async function projectEvidenceNode(s: State): Promise<Update> {
       integrity,
       homepage: repo.homepage,
       srcFiles: repo.srcFiles,
+      notebooks: repo.notebooks,
     };
   };
 
@@ -459,6 +461,7 @@ export async function projectEvidenceNode(s: State): Promise<Update> {
       techKeys: [],
       buckets: [],
       backend: false,
+      notebooks: false,
       note: "",
     };
     const step = plan.get(p.id);
@@ -467,18 +470,43 @@ export async function projectEvidenceNode(s: State): Promise<Update> {
         projects.push({ ...base, status: "not_audited", note: `not audited — only the first ${LIMITS.MAX_PROJECTS_AUDITED} GitHub-linked projects are checked` });
         continue;
       }
-      if (p.live.length) {
-        const claimed = new Set(p.claimedTechKeys);
-        const ok = demo?.status === "reachable" && demo.matchesProject;
+      const claimed = new Set(p.claimedTechKeys);
+      const demoOk = p.live.length > 0 && demo?.status === "reachable" && demo.matchesProject;
+      if (demoOk) {
         projects.push({
           ...base,
           status: "demo_only",
-          valid: ok,
-          tier: ok ? "C" : "D",
+          valid: true,
+          tier: "C",
           techKeys: [...claimed],
-          buckets: ok ? bucketsFor(claimed) : [],
+          buckets: bucketsFor(claimed),
           backend: hasBackend(claimed),
-          note: ok ? "demo only — reachable and about this project (claimed tech, not code-verified)" : `demo only — ${demo ? `${demo.status}${demo.note ? ` (${demo.note})` : ""}${demo.status === "reachable" ? ", page doesn't name the project" : ""}` : "not checked"}`,
+          note: "demo only — reachable and about this project (claimed tech, not code-verified)",
+        });
+        continue;
+      }
+      // DS/ML and GenAI work mostly lives in Jupyter notebooks: GitHub is optional there,
+      // so a project the resume describes with ML / LLM tech counts (tier R).
+      const mlBuckets = bucketsFor(claimed).filter((b) => GITHUB_OPTIONAL.has(b));
+      if (mlBuckets.length && (p.description || p.quote)) {
+        projects.push({
+          ...base,
+          status: "resume_only",
+          valid: true,
+          tier: "R",
+          techKeys: [...claimed],
+          buckets: mlBuckets,
+          note: `${mlBuckets.map((b) => (b === "DSML" ? "DS/ML" : "GenAI")).join(" / ")} project described on the resume — GitHub is optional for this work (stated tech, not code-verified)`,
+        });
+        continue;
+      }
+      if (p.live.length) {
+        projects.push({
+          ...base,
+          status: "demo_only",
+          techKeys: [...claimed],
+          backend: hasBackend(claimed),
+          note: `demo only — ${demo ? `${demo.status}${demo.note ? ` (${demo.note})` : ""}${demo.status === "reachable" ? ", page doesn't name the project" : ""}` : "not checked"}`,
         });
         continue;
       }
@@ -526,6 +554,7 @@ export async function projectEvidenceNode(s: State): Promise<Update> {
       techKeys: [...set],
       buckets: valid ? bucketsFor(set) : [],
       backend: hasBackend(set),
+      notebooks: verified.some((r) => r.notebooks > 0),
       note,
     });
   }
@@ -556,7 +585,7 @@ export async function projectEvidenceNode(s: State): Promise<Update> {
     unavailable,
     notes: budget.stop && budget.reason ? [...notes, `GitHub: ${budget.reason}`] : notes,
   };
-  const counts = (["A", "B", "C"] as Tier[]).map((t) => `${t}:${projects.filter((p) => p.valid && p.tier === t).length}`).join(" ");
+  const counts = (["A", "B", "C", "R"] as Tier[]).map((t) => `${t}:${projects.filter((p) => p.valid && p.tier === t).length}`).join(" ");
   const bad = projects.filter((p) => p.status === "invalid").map((p) => `${p.projectId} ${p.invalidReason}`);
   return {
     projectEvidence: result,

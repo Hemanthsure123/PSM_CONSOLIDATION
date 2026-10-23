@@ -1,26 +1,31 @@
 import "server-only";
 import { SchemaType, type Schema } from "@google/generative-ai";
-import { BUCKET_LABEL, BUCKET_RULE, BUCKETS, DOMAIN_LABEL, TRACK_BUCKET, TRACK_LABEL, type Bucket } from "@/lib/bucketing/config";
+import { BUCKET_LABEL, BUCKET_RULE, BUCKETS, DOMAIN_LABEL, TRACK_BUCKET, type Bucket } from "@/lib/bucketing/config";
 import { bucketsFor } from "@/lib/bucketing/bucket-rules";
 import { callAgent, fence, num, producerChain, str, strList } from "@/lib/bucketing/llm";
-import { evidenceItems, traceEntry } from "@/lib/bucketing/nodes/shared";
+import { evidenceItems, interviewLines, traceEntry } from "@/lib/bucketing/nodes/shared";
 import type { BucketDecision, DomainScore, ExtractedExperience, ProjectEvidence } from "@/lib/bucketing/types";
 import type { State, Update } from "@/lib/bucketing/state";
 
 /**
  * Agent 3 — bucketing agent. Picks the candidate's flagship project and ONE
- * bucket. The choice is constrained by code: a bucket is eligible only when a
- * valid project's verified code meets its rule (bucket-rules.ts) — or, weaker, a
- * demo-only project plus an in-domain internship. The model chooses among the
- * eligible buckets and rates every valid project's strength.
+ * bucket among the buckets the verified evidence makes eligible (bucket-rules.ts):
+ *  - a valid project whose GitHub code meets the rule (tier A / B), or an ML / GenAI
+ *    project described on the resume (tier R — GitHub is optional there);
+ *  - a demo-only project plus an in-domain internship (tier C, weaker);
+ *  - an internship / job in that domain on its own (experience is the third signal).
+ * A TR-2 hire track is decided later by the stage arbiter (internal assessments
+ * come first); the agent still picks the flagship and rates every project.
  */
 
 export interface Eligibility {
   eligible: Bucket[];
-  /** Bucket → valid project ids whose evidence meets its rule. */
+  /** Bucket → valid project / role ids whose evidence meets its rule. */
   backers: Record<string, string[]>;
   /** Buckets backed only by a demo-only project + internship. */
   tierCOnly: Bucket[];
+  /** Buckets backed only by an internship / job (no project). */
+  roleOnly: Bucket[];
 }
 
 /** Internships / jobs whose own text names technologies that meet a bucket rule. */
@@ -33,10 +38,11 @@ export function eligibility(projects: ProjectEvidence[], experience: ExtractedEx
   const roleBacked = new Set(experience.flatMap(roleBuckets));
   const strong = new Set<Bucket>();
   const weak = new Set<Bucket>();
+  const roles = new Set<Bucket>();
   for (const p of projects) {
     if (!p.valid) continue;
     for (const b of p.buckets) {
-      if (p.tier === "A" || p.tier === "B") {
+      if (p.tier === "A" || p.tier === "B" || p.tier === "R") {
         strong.add(b);
         (backers[b] ??= []).push(p.projectId);
       } else if (p.tier === "C" && roleBacked.has(b)) {
@@ -45,20 +51,33 @@ export function eligibility(projects: ProjectEvidence[], experience: ExtractedEx
       }
     }
   }
-  const eligible = BUCKETS.filter((b) => strong.has(b) || weak.has(b));
-  return { eligible, backers, tierCOnly: eligible.filter((b) => !strong.has(b)) };
+  for (const e of experience) {
+    for (const b of roleBuckets(e)) {
+      roles.add(b);
+      (backers[b] ??= []).push(e.id);
+    }
+  }
+  const eligible = BUCKETS.filter((b) => strong.has(b) || weak.has(b) || roles.has(b));
+  return {
+    eligible,
+    backers,
+    tierCOnly: eligible.filter((b) => !strong.has(b) && weak.has(b)),
+    roleOnly: eligible.filter((b) => !strong.has(b) && !weak.has(b)),
+  };
 }
 
-const SYSTEM = `You place ONE candidate in exactly one placement bucket and pick their flagship project.
+const SYSTEM = `You place ONE candidate in exactly one of six placement buckets and pick their flagship project.
 
-Buckets and what each needs in ONE valid project's code:
+Buckets and what each needs:
 ${BUCKETS.map((b) => `- ${b} (${BUCKET_LABEL[b]}): ${BUCKET_RULE[b]}`).join("\n")}
 
+The signals, strongest first: 1) the company's own interviews (TR-2 verdict, TR-1 and assessment scores) · 2) projects with verifiable GitHub (a live demo is a bonus; for DS/ML and GenAI a well-described project counts without GitHub, a notebook on GitHub is a bonus) · 3) internships / jobs · 4) achievements.
+
 Rules:
-- Choose ONLY from the ELIGIBLE buckets listed (each is backed by a verified project whose code meets the rule). If none is eligible answer "NONE".
-- Choose the bucket the candidate's strongest verified work supports best — the flagship project and/or an internship in that domain. Use the verified domain scores as a guide.
-- A TR-2 interview track, when given, is a strong prior: prefer it when it is eligible, unless another eligible bucket is clearly better supported.
-- Flagship: the most substantial VALID project in the chosen bucket (tier A > B > C on equal merit) — depth, real features, integrations, deployment, recency. Never an INVALID project.
+- Choose ONLY from the ELIGIBLE buckets listed. If none is eligible answer "NONE".
+- A TR-2 hire track, when given and eligible, is the bucket unless the evidence clearly contradicts it.
+- Otherwise choose the bucket the strongest verified work supports best — the flagship project and/or an internship in that domain. Use the verified domain scores as a guide.
+- Flagship: the most substantial VALID project in the chosen bucket (tier A > B > R > C on equal merit) — depth, real features, integrations, deployment, recency. Never an INVALID project. "" when only an internship backs the bucket.
 - Rate EVERY valid project's strength 0-100: 90+ production-grade; 70-89 solid, complete feature set; 50-69 decent; 30-49 tutorial-level / clone; below 30 trivial.
 - basis: "flagship" (the project carries it), "internship" (an in-domain internship carries it), or "both".`;
 
@@ -87,18 +106,23 @@ const SCHEMA: Schema = {
 };
 
 export function domainLines(domains: DomainScore[]): string {
-  return domains
-    .filter((d) => d.score > 0)
-    .map((d) => `${d.domain} (${DOMAIN_LABEL[d.domain]}): ${d.score}${d.evidence.length ? ` — items ${d.evidence.map((e) => e.itemId).join(", ")}` : ""}`)
-    .join("\n") || "(no domain scored)";
+  return (
+    domains
+      .filter((d) => d.score > 0)
+      .map((d) => `${d.domain} (${DOMAIN_LABEL[d.domain]}): ${d.score}${d.evidence.length ? ` — items ${d.evidence.map((e) => e.itemId).join(", ")}` : ""}`)
+      .join("\n") || "(no domain scored)"
+  );
 }
 
 export function eligibilityLines(e: Eligibility): string {
   return e.eligible.length
     ? e.eligible
-        .map((b) => `${b}: backed by ${e.backers[b]?.join(", ")}${e.tierCOnly.includes(b) ? " (demo-only project + internship — weaker)" : ""}`)
+        .map(
+          (b) =>
+            `${b}: backed by ${e.backers[b]?.join(", ")}${e.tierCOnly.includes(b) ? " (demo-only project + internship — weaker)" : ""}${e.roleOnly.includes(b) ? " (internship / job only — no project)" : ""}`,
+        )
         .join("\n")
-    : "NONE — no valid project's code meets any bucket rule.";
+    : "NONE — no valid project or in-domain role meets any bucket rule.";
 }
 
 export async function bucketingAgentNode(s: State): Promise<Update> {
@@ -109,6 +133,7 @@ export async function bucketingAgentNode(s: State): Promise<Update> {
   const projects = pe?.projects ?? [];
   const elig = eligibility(projects, x.experience);
   const domains = s.domainReview?.adjusted?.length ? s.domainReview.adjusted : (s.domainAnalysis?.domains ?? []);
+  const trackBucket = s.input.stage === "TR2" && s.input.track ? TRACK_BUCKET[s.input.track] : undefined;
 
   const base: BucketDecision = {
     bucket: null,
@@ -121,29 +146,42 @@ export async function bucketingAgentNode(s: State): Promise<Update> {
     eligible: elig.eligible,
     noBucketReason: "",
     tierCBacked: false,
+    roleOnly: elig.roleOnly,
     model: "",
     attempt,
     error: "",
   };
-  const validCount = projects.filter((p) => p.valid).length;
-  if (!validCount) {
-    const decision = { ...base, noBucketReason: "No valid project — nothing to bucket on." };
-    return { bucketing: decision, attempts: { bucketing_agent: attempt }, ...traceEntry("bucketing_agent", t0, "no valid project — no bucket") };
+  const validProjects = projects.filter((p) => p.valid);
+  if (!elig.eligible.length && !validProjects.length) {
+    const decision = { ...base, noBucketReason: "No valid project or in-domain role — nothing to bucket on." };
+    return { bucketing: decision, attempts: { bucketing_agent: attempt }, ...traceEntry("bucketing_agent", t0, "no evidence — no bucket (no model call)") };
   }
-  // Nothing to choose: no bucket is eligible, and no TR-2 track could place the candidate through an internship.
-  const trackBucket = s.input.stage === "TR2" && s.input.track ? TRACK_BUCKET[s.input.track] : undefined;
   if (!elig.eligible.length && !trackBucket) {
-    const decision = { ...base, noBucketReason: "No valid project's code meets any bucket rule." };
+    const decision = { ...base, noBucketReason: "No valid project's code (or in-domain role) meets any bucket rule." };
     return { bucketing: decision, attempts: { bucketing_agent: attempt }, ...traceEntry("bucketing_agent", t0, "no eligible bucket — no bucket (no model call)") };
   }
+  // Only roles back the eligible buckets and there is no project to rate: decide without a model.
+  if (!validProjects.length) {
+    const ranked = [...elig.eligible].sort(
+      (a, b) => (b === trackBucket ? 1 : 0) - (a === trackBucket ? 1 : 0) || (domains.find((d) => d.domain === b)?.score ?? 0) - (domains.find((d) => d.domain === a)?.score ?? 0),
+    );
+    const bucket = ranked[0] ?? null;
+    const decision: BucketDecision = {
+      ...base,
+      bucket,
+      basis: bucket ? "internship" : "",
+      rationale: bucket ? `Backed by ${elig.backers[bucket]?.join(", ")} (internship / job in this domain).` : "",
+      noBucketReason: bucket ? "" : "No eligible bucket.",
+    };
+    return { bucketing: decision, attempts: { bucketing_agent: attempt }, ...traceEntry("bucketing_agent", t0, `${bucket ?? "NONE"} from experience only (no model call)`) };
+  }
 
-  const track = s.input.stage === "TR2" && s.input.track ? `The candidate cleared the TR-2 interview in the ${TRACK_LABEL[s.input.track]} track.` : "No TR-2 track (the candidate's highest stage is " + s.input.stage + ").";
   const prior = s.bucketReview && s.bucketReview.verdict === "revise" && s.bucketing ? s.bucketing : null;
   const feedback = prior
     ? `\n\nA reviewer rejected your previous answer (bucket ${prior.bucket ?? "NONE"}, flagship ${prior.flagshipId || "none"}):\n- ${s.bucketReview!.issues.join("\n- ")}\nFix it.`
     : "";
   const prompt =
-    `${track}\n\nELIGIBLE BUCKETS:\n${eligibilityLines(elig)}\n\nVERIFIED DOMAIN SCORES:\n${domainLines(domains)}\n\n` +
+    `INTERNAL ASSESSMENTS:\n${interviewLines(s.input)}\n\nELIGIBLE BUCKETS:\n${eligibilityLines(elig)}\n\nVERIFIED DOMAIN SCORES:\n${domainLines(domains)}\n\n` +
     `${fence("evidence items (with verification results)", evidenceItems(x, projects))}${feedback}`;
 
   const res = await callAgent<Record<string, unknown>>({
@@ -175,8 +213,10 @@ export async function bucketingAgentNode(s: State): Promise<Update> {
   const decision: BucketDecision = {
     ...base,
     bucket,
-    flagshipId: ids.has(flagshipId) ? flagshipId : "",
-    supportingIds: strList(j.supportingIds, 8, 8).map((v) => v.toUpperCase()).filter((v) => ids.has(v) && v !== flagshipId),
+    flagshipId: projects.some((p) => p.projectId === flagshipId) ? flagshipId : "",
+    supportingIds: strList(j.supportingIds, 8, 8)
+      .map((v) => v.toUpperCase())
+      .filter((v) => ids.has(v) && v !== flagshipId),
     basis: (["flagship", "internship", "both"] as const).find((b) => b === j.basis) ?? "flagship",
     flagshipStrength: strengths[flagshipId] ?? num(j.flagshipStrength),
     projectStrengths: strengths,

@@ -6,8 +6,8 @@ import { DEFAULT_PRODUCER_CHAIN, DEFAULT_VERIFIER_CHAIN, TIMEOUTS } from "@/lib/
 
 /**
  * Model calls for Candidate Bucketing. Every agent goes through runLlmChain
- * (Gemini first with key rotation; Mistral only on Gemini rate limits), at low
- * temperature, with candidate content fenced off as untrusted data.
+ * (Gemini first with key rotation; OpenAI, then Mistral, only on Gemini rate limits),
+ * at low temperature, with candidate content fenced off as untrusted data.
  */
 
 export const producerChain = () => env.bucketing.llmChain || DEFAULT_PRODUCER_CHAIN;
@@ -51,6 +51,8 @@ export async function callAgent<T>(opts: {
     fast: true,
     maxOutputTokens: opts.maxOutputTokens ?? 16_384,
     thinking: opts.thinking,
+    // Gemini's thinking setting must not switch OpenAI reasoning on (OPENAI_REASONING_EFFORT, "none" by default).
+    openaiReasoning: env.openai.reasoningEffort,
     accept: opts.accept,
     build: () => ({ geminiParts: opts.geminiParts ?? opts.prompt, text: opts.prompt }),
   });

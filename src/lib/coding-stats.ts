@@ -83,6 +83,10 @@ export interface PlatformStats {
   maxRating: number | null;
   /** "" when everything was read, else a short reason. */
   note: string;
+  /** The name the profile's owner set (LeetCode real name, CodeChef display name), when the page shows one. */
+  ownerName?: string;
+  /** The GitHub link the owner put on their profile (LeetCode), when set. */
+  ownerGithub?: string;
 }
 
 const UNKNOWN: PlatformStats = { found: null, solved: null, contests: null, rating: null, maxRating: null, note: "" };
@@ -125,7 +129,7 @@ const errText = (err: unknown) =>
 // ── LeetCode (public GraphQL) ───────────────────────────────────────────────
 
 const LC_QUERY = `query stats($username: String!) {
-  matchedUser(username: $username) { submitStatsGlobal { acSubmissionNum { difficulty count } } }
+  matchedUser(username: $username) { githubUrl profile { realName } submitStatsGlobal { acSubmissionNum { difficulty count } } }
   userContestRanking(username: $username) { attendedContestsCount rating }
 }`;
 
@@ -150,7 +154,7 @@ export async function getLeetCodeStats(profileUrl: string): Promise<PlatformStat
     if (!res.ok) return { ...UNKNOWN, note: `LeetCode HTTP ${res.status}` };
     const data = (await res.json()) as {
       data?: {
-        matchedUser?: { submitStatsGlobal?: { acSubmissionNum?: { difficulty: string; count: number }[] } } | null;
+        matchedUser?: { githubUrl?: string | null; profile?: { realName?: string | null } | null; submitStatsGlobal?: { acSubmissionNum?: { difficulty: string; count: number }[] } } | null;
         userContestRanking?: { attendedContestsCount?: number; rating?: number } | null;
       } | null;
       errors?: { message?: string }[];
@@ -169,7 +173,9 @@ export async function getLeetCodeStats(profileUrl: string): Promise<PlatformStat
     const ranking = data.data?.userContestRanking ?? null;
     const contests = ranking ? Number(ranking.attendedContestsCount) || 0 : 0;
     const rating = contests > 0 && Number(ranking?.rating) > 0 ? Math.round(Number(ranking?.rating)) : null;
-    return { found: true, solved, contests, rating, maxRating: null, note: "" };
+    const ownerName = (user.profile?.realName ?? "").trim();
+    const ownerGithub = (user.githubUrl ?? "").trim();
+    return { found: true, solved, contests, rating, maxRating: null, note: "", ...(ownerName ? { ownerName } : {}), ...(ownerGithub ? { ownerGithub } : {}) };
   } catch (err) {
     console.warn("[coding-stats] leetcode failed:", errText(err));
     return { ...UNKNOWN, note: `LeetCode ${errText(err)}` };
@@ -248,6 +254,79 @@ async function codeforcesSolvedCount(handle: string): Promise<{ solved: number |
     }
   }
   return { solved: solved.size, note: "", found: true };
+}
+
+export interface CodeforcesUser {
+  found: boolean;
+  rating: number | null;
+  maxRating: number | null;
+  /** First + last name the user set ("" when none). */
+  name: string;
+  /** The canonical handle (a renamed account's old handle resolves to the new one). */
+  handle: string;
+}
+
+/**
+ * Many Codeforces users in one paced call (user.info accepts a list): current and highest rating
+ * and the owner's name. A handle that doesn't exist makes Codeforces fail the whole call and name
+ * it — it is marked not found and the call is repeated without it. `null` for a handle = unknown
+ * (rate limit / network), never "not found".
+ */
+export async function getCodeforcesUsers(handles: string[]): Promise<Map<string, CodeforcesUser | null>> {
+  const out = new Map<string, CodeforcesUser | null>();
+  let pending = [...new Set(handles.map((h) => h.trim()).filter(Boolean))];
+  for (let round = 0; round < 25 && pending.length; round++) {
+    const res = await cfApi<{ handle?: string; rating?: number; maxRating?: number; firstName?: string; lastName?: string }[]>(
+      `user.info?handles=${pending.map(encodeURIComponent).join(";")}`,
+      20_000,
+    ).catch(() => null);
+    if (res && res.status === "OK" && "result" in res && Array.isArray(res.result)) {
+      res.result.forEach((u, i) => {
+        const asked = pending[i];
+        out.set(asked.toLowerCase(), {
+          found: true,
+          rating: Number(u.rating) > 0 ? Number(u.rating) : null,
+          maxRating: Number(u.maxRating) > 0 ? Number(u.maxRating) : null,
+          name: [u.firstName, u.lastName].filter(Boolean).join(" ").trim(),
+          handle: u.handle ?? asked,
+        });
+      });
+      return out;
+    }
+    const missing = res && res.status === "FAILED" ? (res.comment ?? "").match(/handles?:\s*User with handle\s+(\S+)\s+not found/i)?.[1] : undefined;
+    if (missing) {
+      out.set(missing.toLowerCase(), { found: false, rating: null, maxRating: null, name: "", handle: missing });
+      pending = pending.filter((h) => h.toLowerCase() !== missing.toLowerCase());
+      continue;
+    }
+    break; // rate limit / network: the rest stay unknown
+  }
+  for (const h of pending) if (!out.has(h.toLowerCase())) out.set(h.toLowerCase(), null);
+  return out;
+}
+
+/** Rated contests of one Codeforces handle (one paced call); null = unknown. */
+export async function getCodeforcesRatedContests(handle: string): Promise<number | null> {
+  try {
+    const res = await cfApi<unknown[]>(`user.rating?handle=${encodeURIComponent(handle)}`, 15_000);
+    return res.status === "OK" && "result" in res && Array.isArray(res.result) ? res.result.length : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The first / last name a Codeforces user set on their profile ("" when none or unreadable). One paced API call. */
+export async function getCodeforcesOwnerName(profileUrl: string): Promise<string> {
+  const handle = parseCodeforcesHandle(profileUrl);
+  if (!handle) return "";
+  try {
+    const res = await cfApi<{ firstName?: string; lastName?: string }[]>(`user.info?handles=${encodeURIComponent(handle)}`, 15_000);
+    if (res.status !== "OK" || !("result" in res) || !res.result?.[0]) return "";
+    const u = res.result[0];
+    return [u.firstName, u.lastName].filter(Boolean).join(" ").trim();
+  } catch {
+    return "";
+  }
 }
 
 export async function getCodeforcesStats(profileUrl: string): Promise<PlatformStats | null> {
@@ -394,7 +473,9 @@ export function parseCodeChefProfile(html: string): PlatformStats {
   const maxRating = num(html.match(/Highest Rating\s*(\d+)/i));
 
   const missing = [solved === null ? "solved" : "", contests === null ? "contests" : ""].filter(Boolean);
+  const owner = html.match(/<h1[^>]*class="[^"]*h2-style[^"]*"[^>]*>\s*([^<]{2,80}?)\s*<\/h1>/i)?.[1]?.trim() ?? "";
   return {
+    ...(owner ? { ownerName: owner } : {}),
     found: true,
     solved,
     contests,

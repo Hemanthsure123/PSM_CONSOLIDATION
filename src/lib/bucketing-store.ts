@@ -1,7 +1,7 @@
 "use client";
 
-import { BUCKETS, type Bucket } from "@/lib/bucketing/config";
-import type { BucketingResult, BucketingRunMeta, BucketingRunStats } from "@/lib/bucketing/types";
+import { BUCKETS, isBucket, type Bucket } from "@/lib/bucketing/config";
+import { upgradeResult, type BucketingResult, type BucketingRunMeta, type BucketingRunStats } from "@/lib/bucketing/types";
 
 /**
  * IndexedDB store for Candidate Bucketing runs (same design as qa-store.ts): the
@@ -61,10 +61,10 @@ export function runStats(results: BucketingResult[]): BucketingRunStats {
   let retry = 0;
   let needsReview = 0;
   for (const r of results) {
-    if (r.status === "bucketed" && r.bucket) {
+    if (r.status === "bucketed" && isBucket(r.bucket)) {
       bucketed += 1;
       byBucket[r.bucket] += 1;
-    } else if (r.status === "retry_needed") retry += 1;
+    } else if (r.status === "retry_needed" || r.status === "bucketed") retry += 1;
     else notBucketed += 1;
     if (r.trust.needsReview) needsReview += 1;
   }
@@ -89,7 +89,8 @@ export async function getBucketingRun(id: string): Promise<{ meta: BucketingRunM
   if (!meta) return null;
   const rows = await request(tx.objectStore(RESULTS).index("runId").getAll(id) as IDBRequest<StoredResult[]>);
   const results: Record<string, BucketingResult> = {};
-  for (const { runId: _runId, ...r } of rows) results[r.id] = r;
+  // Results saved by bucketing-v1 lack the v2 fields — fill them so the screens never break.
+  for (const { runId: _runId, ...r } of rows) results[r.id] = upgradeResult(r);
   return { meta, results };
 }
 

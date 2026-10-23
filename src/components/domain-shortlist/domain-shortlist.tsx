@@ -47,12 +47,25 @@ import { ActionBar } from "@/components/ui/action-bar";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { useReportBusy } from "@/components/busy-context";
 import { cn, toCsv, slugify, formatDay } from "@/lib/utils";
-import { MIN_DOMAIN_SCORE, GITHUB_INSPECT_CAP, DEFAULT_MIN_PRESENTATION } from "@/lib/domain-scoring";
+import {
+  MIN_DOMAIN_SCORE,
+  GITHUB_INSPECT_CAP,
+  DEFAULT_MIN_PRESENTATION,
+  GITHUB_BUDGET_FLOOR,
+  GITHUB_STRONG_SCORE,
+  githubHoursFor,
+  githubStrengthNotOnResume,
+  githubTechsNotOnResume,
+  planGithubInspection,
+  type GithubScope,
+} from "@/lib/domain-scoring";
 import { NO_DSA_GATES, bestRating, dsaGatesActive, ratingsLine, type DsaGates } from "@/lib/dsa-scoring";
 import { DSA_PLATFORMS, type DsaPlatform, type DsaPlatformResult } from "@/lib/dsa-types";
 import { listSubsheets, readSubsheet } from "@/actions/sheets";
 import { checkGithubForDomain, buildDomainReport } from "@/actions/domain";
 import { runQueue } from "@/lib/parallel-queue";
+import { BRIEF_MAX, MANDATORY_MAX } from "@/lib/domain-autofill-rules";
+import { JdAutofill } from "@/components/domain-shortlist/jd-autofill";
 import type { GithubInspectResult } from "@/lib/domain-screen";
 import type { DomainCandidate, DomainCandidateRow, DomainGithubGap, DomainGithubStatus, DomainReportResult } from "@/lib/types";
 
@@ -60,7 +73,7 @@ import type { DomainCandidate, DomainCandidateRow, DomainGithubGap, DomainGithub
 const GITHUB_STATUS_LABEL: Record<DomainGithubStatus, string> = {
   off: "Not run",
   "no-link": "No GitHub link in resume",
-  "not-inspected": "Not inspected (below domain-fit bar)",
+  "not-inspected": "Not inspected",
   checked: "Checked",
   "no-repos": "No public repos with code",
   "not-found": "GitHub user not found",
@@ -86,9 +99,11 @@ const GITHUB_STATUS_SHORT: Record<DomainGithubStatus, string> = {
 function GithubRunSummary({
   lookedFor,
   candidates,
+  scope,
 }: {
   lookedFor: { core: string[]; languages: string[] };
   candidates: DomainCandidate[];
+  scope: GithubScope;
 }) {
   const count = (s: DomainGithubStatus) => candidates.filter((c) => c.githubStatus === s).length;
   const failed = candidates.filter((c) => c.githubStatus === "failed");
@@ -99,6 +114,7 @@ function GithubRunSummary({
     count("no-repos") ? `${count("no-repos")} with no public code` : "",
     count("not-found") ? `${count("not-found")} with a GitHub user that doesn't exist` : "",
     failed.length ? `${failed.length} failed` : "",
+    count("not-inspected") ? `${count("not-inspected")} not inspected` : "",
   ].filter(Boolean);
   return (
     <div className="space-y-2.5 rounded-xl border bg-card px-4 py-3 shadow-surface">
@@ -108,7 +124,10 @@ function GithubRunSummary({
           GitHub looked for{" "}
           {lookedFor.core.length ? <strong className="font-semibold">{lookedFor.core.join(", ")}</strong> : <strong className="font-semibold">nothing domain-specific</strong>}
           {lookedFor.languages.length ? ` (+ ${lookedFor.languages.join(", ")} as supporting languages)` : ""}
-          <span className="text-muted-foreground"> — {parts.join(" · ")}.</span>
+          <span className="text-muted-foreground">
+            {" "}
+            in {scope === "all" ? "every candidate's GitHub" : "the domain-fit candidates' GitHub"} — {parts.join(" · ")}.
+          </span>
         </span>
       </p>
       {!lookedFor.core.length && !lookedFor.languages.length ? (
@@ -149,10 +168,22 @@ function stamp(iso: string | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/** "Not inspected (below domain-fit bar)" etc. — the status with the reason when GitHub wasn't read. */
+function githubCheckLabel(c: DomainCandidate): string {
+  if (c.githubStatus !== "not-inspected") return GITHUB_STATUS_LABEL[c.githubStatus];
+  if (c.githubNote.startsWith(BELOW_BAR_NOTE)) return "Not inspected (below domain-fit bar)";
+  if (c.githubNote.startsWith("Beyond")) return `Not inspected (beyond the top-${GITHUB_INSPECT_CAP} cap)`;
+  if (c.githubNote.startsWith(STOPPED_NOTE)) return "Not inspected (run stopped)";
+  return "Not inspected";
+}
+
 /** Hover detail for the GitHub cell: proven tech and its proof, gaps, claims, best repos, notes. */
 function githubTooltip(c: DomainCandidate): string {
-  const lines = [GITHUB_STATUS_LABEL[c.githubStatus]];
+  const lines = [githubCheckLabel(c)];
+  if (githubStrengthNotOnResume(c)) lines.push("Strong domain code on GitHub that the resume doesn't show (resume below the domain-fit bar).");
   if (c.githubTechs.length) lines.push(`Proven in code: ${c.githubTechs.join(", ")}`);
+  const unclaimed = githubTechsNotOnResume(c);
+  if (unclaimed.length) lines.push(`Proven on GitHub, not named on the resume: ${unclaimed.join(", ")}`);
   for (const line of evidenceLines(c)) lines.push(`  • ${line}`);
   const gaps = gapLines(c);
   if (gaps.length) lines.push(`Mandatory not proven: ${gaps.join("; ")}`);
@@ -256,6 +287,11 @@ const PROVIDER_LABEL: Record<string, string> = { gemini: "Gemini", openai: "Open
 const DEFAULT_CONCURRENCY = 8;
 /** GitHub profiles inspected at once (each reads up to 3 repos at a time — well inside GitHub's limits). */
 const GITHUB_PARALLEL = 6;
+/** How often the GitHub budget is re-checked during inspection. */
+const GITHUB_BUDGET_CHECK_MS = 60_000;
+const BELOW_BAR_NOTE = "Below the domain-fit bar";
+const STOPPED_NOTE = "Not reached";
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** A resume that failed for a passing reason (rate limit, overloaded model, network) is retried this often. */
 const SCREEN_RETRIES = 2;
 const RATE_RETRY_MS = 20_000;
@@ -297,6 +333,8 @@ interface RunConfig {
   minPresentation: number;
   /** Inspect GitHub afresh instead of reusing results from the last 24 h. */
   githubRefresh: boolean;
+  /** Whose GitHub is deep-inspected: domain-fit candidates only, or everyone with a link. */
+  githubScope: GithubScope;
 }
 
 /** Screen one row through /api/domain/analyze. Never throws. */
@@ -427,6 +465,11 @@ export function DomainShortlist(_props: DomainShortlistProps) {
   const [trackDomainCommit, setTrackDomainCommit] = React.useState(false);
   // Off (default): a GitHub inspection from the last 24 h is reused. On: inspect everyone afresh.
   const [githubRefresh, setGithubRefresh] = React.useState(false);
+  const [githubScope, setGithubScope] = React.useState<GithubScope>("fit");
+  /** GitHub's hourly budget ran low: inspection waits until this time (ISO), "" when not paused. */
+  const [ghPausedUntil, setGhPausedUntil] = React.useState("");
+  /** Results table: only the candidates whose GitHub shows strength their resume doesn't. */
+  const [onlyGithubStrong, setOnlyGithubStrong] = React.useState(false);
   const [showStats, setShowStats] = React.useState(true);
   // On: build + store the PDF shortlist report. Off: table and CSV downloads only.
   const [generateReport, setGenerateReport] = React.useState(true);
@@ -528,6 +571,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
       minCommits,
       githubRefresh,
       minPresentation,
+      githubScope,
     };
   };
 
@@ -563,32 +607,66 @@ export function DomainShortlist(_props: DomainShortlistProps) {
     });
   };
 
+  // GitHub's hourly budget: re-checked every minute while inspecting; when it runs low the
+  // inspection waits for GitHub's reset instead of turning the rest into "failed".
+  const ghBudgetRef = React.useRef({ checkedAt: 0, until: 0 });
+  const githubBudgetGate = async () => {
+    const g = ghBudgetRef.current;
+    if (!g.until && Date.now() - g.checkedAt > GITHUB_BUDGET_CHECK_MS) {
+      g.checkedAt = Date.now();
+      const res = await checkGithubForDomain("", "");
+      if (res.ok && res.data.remaining < GITHUB_BUDGET_FLOOR) {
+        const reset = Date.parse(res.data.resetAt);
+        g.until = Number.isFinite(reset) ? reset + 5_000 : Date.now() + 15 * 60_000;
+      }
+    }
+    while (g.until && Date.now() < g.until && !abortRef.current) {
+      setGhPausedUntil(new Date(g.until).toISOString());
+      await sleep(1_000);
+    }
+    if (g.until && Date.now() >= g.until) {
+      g.until = 0;
+      g.checkedAt = 0;
+      setGhPausedUntil("");
+    }
+  };
+
   /**
-   * Deep GitHub inspection — ONLY for domain-fit candidates not yet inspected, capped
-   * to protect the API budget, several candidates at a time. The 0-100 GitHub score
-   * folds into the final rank; commits feed the gate.
+   * Deep GitHub inspection, several candidates at a time. Scope "fit": the domain-fit
+   * candidates not yet inspected, best first, capped to protect the API budget. Scope
+   * "all": every candidate with a GitHub link, domain-fit first, no cap — paced by
+   * GitHub's hourly budget. The 0-100 GitHub score folds into the final rank of
+   * domain-fit candidates; for the rest it is a signal (strong code the resume doesn't show).
    */
   const inspectGithub = async (cfg: RunConfig) => {
     const all = collectedRef.current;
     const inspected = all.filter((c) => c.githubStatus !== "not-inspected" && c.githubStatus !== "off" && c.githubStatus !== "no-link").length;
-    const eligible = all
-      .filter((c) => c.githubStatus === "not-inspected" && c.domainScore >= MIN_DOMAIN_SCORE && (c.githubProfile || c.githubRepos.length))
-      .sort((a, b) => b.domainScore - a.domainScore);
-    const room = Math.max(0, GITHUB_INSPECT_CAP - inspected);
-    const pool = eligible.slice(0, room);
-    for (const c of eligible.slice(room)) c.githubNote = `Beyond the top-${GITHUB_INSPECT_CAP} GitHub inspection cap.`;
+    const { pool, overCap, belowBar } = planGithubInspection(all, cfg.githubScope, inspected);
+    for (const c of overCap) c.githubNote = `Beyond the top-${GITHUB_INSPECT_CAP} GitHub inspection cap.`;
+    for (const c of belowBar) c.githubNote = `${BELOW_BAR_NOTE} — choose "All candidates" under Evidence sources to inspect it.`;
     if (!pool.length) return;
     setPhase("github");
     let done = 0;
     let reused = 0;
     setGhProgress({ done, total: pool.length, reused });
+    ghBudgetRef.current = { checkedAt: 0, until: 0 };
     await runQueue<DomainCandidate, GithubInspectResult>({
       items: pool,
       concurrency: () => GITHUB_PARALLEL,
       stopped: () => abortRef.current,
-      run: (c) => postGithub(c, cfg),
-      // One more try for a passing failure (network); a rate limit / missing user is final.
-      retryAfter: (gh, attempt) => (gh.retryable && attempt <= 1 ? NETWORK_RETRY_MS : null),
+      run: async (c) => {
+        await githubBudgetGate();
+        return postGithub(c, cfg);
+      },
+      // A rate limit waits for GitHub's reset (a few times); a passing failure (network) gets
+      // one more try; a missing user / no code is final.
+      retryAfter: (gh, attempt) => {
+        if (gh.rateLimited && attempt <= 3) {
+          ghBudgetRef.current.checkedAt = 0; // re-check the budget before the next call
+          return 30_000;
+        }
+        return gh.retryable && attempt <= 1 ? NETWORK_RETRY_MS : null;
+      },
       onDone: (c, gh) => {
         c.githubStatus = gh.status;
         c.githubNote = gh.note;
@@ -611,6 +689,9 @@ export function DomainShortlist(_props: DomainShortlistProps) {
       },
       onActivity: (running, waiting) => setActivity({ running, waiting }),
     });
+    setGhPausedUntil("");
+    // A Stop leaves the rest of the queue uninspected — say so rather than "below the bar".
+    for (const c of pool) if (c.githubStatus === "not-inspected" && !c.githubNote) c.githubNote = `${STOPPED_NOTE} — the run was stopped before this GitHub was inspected.`;
   };
 
   /** Rank every screened candidate and build the report (and the CSV outcomes). */
@@ -782,7 +863,8 @@ export function DomainShortlist(_props: DomainShortlistProps) {
       "Total Solved", "Total Contests", "Codeforces Max Rating", "CodeChef Highest Rating",
       ...DSA_PLATFORMS.map(({ label }) => `${label} URL`), "DSA Notes",
       "GitHub Check", "GitHub Fit Score", "GitHub Domain Repos", "GitHub Proven Tech", "GitHub Evidence",
-      "Mandatory Not Proven on GitHub", "Claimed but Not Found on GitHub", "GitHub Top Repos", "GitHub Commits (2y)",
+      "Mandatory Not Proven on GitHub", "Claimed but Not Found on GitHub",
+      "GitHub Strength Not On Resume", "Proven on GitHub, Not on Resume", "GitHub Top Repos", "GitHub Commits (2y)",
       "Last Domain Commit", "Last Domain Commit Repo", "Commit Email Linked To Profile",
       "GitHub AI-Commit Signal", "GitHub AI-Commit Detail", "GitHub Notes", "GitHub Checked At",
       "GitHub Profile", "Meets Mandatory", "Has Domain Experience", "Domain Experience",
@@ -843,7 +925,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
         "Not Shortlisted Because": c.outcomeReason,
         "Domain": domain.trim(),
         "Domain Score": String(c.domainScore),
-        "GitHub Check": ghChecked ? GITHUB_STATUS_LABEL[c.githubStatus] : "",
+        "GitHub Check": ghChecked ? githubCheckLabel(c) : "",
         // Numbers only where they were actually measured — blank is "unknown", not 0.
         "GitHub Fit Score": ghOn && ghMeasured(c) ? String(c.githubScore) : "",
         "GitHub Domain Repos": ghOn && ghMeasured(c) ? String(c.githubMatches) : "",
@@ -851,6 +933,8 @@ export function DomainShortlist(_props: DomainShortlistProps) {
         "GitHub Evidence": ghChecked && c.githubStatus === "checked" ? evidenceLines(c).join(" ; ") : "",
         "Mandatory Not Proven on GitHub": ghChecked && c.githubStatus === "checked" ? gapLines(c).join(" ; ") : "",
         "Claimed but Not Found on GitHub": ghChecked && c.githubStatus === "checked" ? (c.githubClaimedNotFound ?? []).join(", ") : "",
+        "GitHub Strength Not On Resume": ghChecked && githubStrengthNotOnResume(c) ? "Yes" : "",
+        "Proven on GitHub, Not on Resume": ghChecked ? githubTechsNotOnResume(c).join(", ") : "",
         "GitHub Top Repos": ghChecked ? c.githubTopRepos.map((r) => `${r.url} (${r.matchPct}%)`).join(" ; ") : "",
         "GitHub Commits (2y)": ghOn && ghMeasured(c) ? String(c.githubCommits2y) : "",
         "Last Domain Commit": trackDomainCommit && commit ? formatDay(commit.date, "iso") : "",
@@ -929,8 +1013,16 @@ export function DomainShortlist(_props: DomainShortlistProps) {
   const completeCount = result ? scored + failedRows.length + unreached.length : 0;
   const accountedFor = scored + notResumes + unevaluated + unreached.length === sheetRows.length;
   // With a top-N limit the preview shows the shortlist unless "show all" is on.
-  const visible = result ? (result.limitedToTopN && !showAll ? result.candidates.filter((c) => c.shortlisted) : result.candidates) : [];
-  const outcomeColumn = Boolean(result && (!result.limitedToTopN || showAll));
+  // GitHub shows strong domain code the resume doesn't (only possible with "All candidates").
+  const githubStrong = result ? result.candidates.filter(githubStrengthNotOnResume) : [];
+  const visible = result
+    ? onlyGithubStrong && githubStrong.length
+      ? githubStrong
+      : result.limitedToTopN && !showAll
+        ? result.candidates.filter((c) => c.shortlisted)
+        : result.candidates
+    : [];
+  const outcomeColumn = Boolean(result && (!result.limitedToTopN || showAll || (onlyGithubStrong && githubStrong.length)));
 
   // Display only: what the action bar says while idle, how many DSA minimums are set, and how
   // many rows ended without a score.
@@ -1044,6 +1136,15 @@ export function DomainShortlist(_props: DomainShortlistProps) {
             {/* Requirements: the domain */}
             <Panel title="Domain" description="What to shortlist for." icon={<Target />}>
               <div className="space-y-4">
+                <JdAutofill
+                  current={{ domainName: domain, definesIt: domainDetails, mandatory }}
+                  disabled={running}
+                  onApply={(v) => {
+                    setDomain(v.domainName);
+                    setDomainDetails(v.definesIt);
+                    setMandatory(v.mandatory);
+                  }}
+                />
                 <Field label="Domain name" htmlFor="dom-name" hint="Shown as the report title.">
                   <Input id="dom-name" value={domain} onChange={(e) => setDomain(e.target.value)} placeholder="e.g. AI / ML" />
                 </Field>
@@ -1052,6 +1153,14 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                   htmlFor="dom-details"
                   optional
                   hint="Topics, tools and what makes a strong fit."
+                  aside={
+                    <span
+                      className={cn("tabular-nums", scoringBrief.length > BRIEF_MAX && "font-medium text-destructive")}
+                      title="The domain name and this text together; anything past the limit isn't read."
+                    >
+                      {scoringBrief.length}/{BRIEF_MAX}
+                    </span>
+                  }
                   info={
                     <>
                       This only guides scoring: candidates are judged on real evidence (projects, experience and
@@ -1073,9 +1182,20 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                   htmlFor="dom-mandatory"
                   optional
                   hint="Each needs real evidence. A candidate missing one is not shortlisted."
-                  info="A strict requirement, checked before ranking together with the ones under Strict requirements."
+                  info="A strict requirement, checked before ranking together with the ones under Strict requirements. Every technology named here must be on the resume and is checked on GitHub; write alternatives as “Java or Kotlin”."
+                  aside={
+                    <span className={cn("tabular-nums", mandatory.trim().length > MANDATORY_MAX && "font-medium text-destructive")} title="Anything past the limit isn't read.">
+                      {mandatory.trim().length}/{MANDATORY_MAX}
+                    </span>
+                  }
                 >
-                  <Input id="dom-mandatory" value={mandatory} onChange={(e) => setMandatory(e.target.value)} placeholder="e.g. React.js, Node.js, DSA" />
+                  <Textarea
+                    id="dom-mandatory"
+                    rows={2}
+                    value={mandatory}
+                    onChange={(e) => setMandatory(e.target.value)}
+                    placeholder="e.g. React.js, Node.js, DSA"
+                  />
                 </Field>
               </div>
             </Panel>
@@ -1291,10 +1411,10 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                   id="dom-github"
                   icon={<Github />}
                   title="Deep GitHub inspection"
-                  description="Reads the code in domain-fit candidates' public repos. Adds up to +20 to the rank."
+                  description="Reads the code in candidates' public repos. Adds up to +20 to a domain-fit candidate's rank."
                   info={
                     <>
-                      After the resume pass, each domain-fit candidate&apos;s public repos are opened and read: dependency
+                      After the resume pass, the public repos of the candidates chosen under &ldquo;Inspect GitHub for&rdquo; are opened and read: dependency
                       files, imports and calls in the code, Docker, CI and Terraform config, and tests. That shows which of
                       the domain&apos;s technologies they actually use, not what the repo is named. The result is a 0–100
                       GitHub score, the proven tech with the line that proves it, mandatory tech the code doesn&apos;t
@@ -1306,6 +1426,52 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                   checked={useGithub}
                   onCheckedChange={setUseGithub}
                 />
+                {ghShown || trackDomainCommit ? (
+                  <div className="space-y-2 py-3">
+                    <div className="flex flex-wrap items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1 basis-64">
+                        <p id="dom-gh-scope-label" className="flex items-center gap-1 text-[13px] font-medium">
+                          Inspect GitHub for
+                          <InfoHint align="start">
+                            Domain-fit candidates (default): only those who clear the domain-fit bar, best first, up to{" "}
+                            {GITHUB_INSPECT_CAP}. All candidates: everyone with a GitHub link, domain-fit first, with no cap.
+                            Their GitHub score still only lifts the rank of domain-fit candidates; for the rest it shows strong
+                            domain code their resume doesn&apos;t mention, flagged in the table and the CSV for a manual look. It
+                            never shortlists anyone on its own.
+                          </InfoHint>
+                        </p>
+                        <p className="text-xs leading-relaxed text-muted-foreground">
+                          {githubScope === "fit"
+                            ? "Only candidates who clear the domain-fit bar. Fastest."
+                            : "Every candidate with a GitHub link, so strong code that isn't on the resume shows up too."}
+                        </p>
+                      </div>
+                      <Segmented
+                        ariaLabel="Inspect GitHub for"
+                        size="sm"
+                        value={githubScope}
+                        onChange={setGithubScope}
+                        options={[
+                          { value: "fit", label: "Domain-fit candidates" },
+                          { value: "all", label: "All candidates" },
+                        ]}
+                      />
+                    </div>
+                    {githubScope === "all" && !selectedRows ? (
+                      <p className="rounded-md bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                        Map the name and resume columns of a tab to see how much GitHub budget this sheet needs. The run pauses itself
+                        whenever GitHub&apos;s hourly limit runs low.
+                      </p>
+                    ) : null}
+                    {githubScope === "all" && selectedRows ? (
+                      <p className="rounded-md bg-muted/60 px-3 py-2 text-xs leading-relaxed text-muted-foreground">
+                        Up to {selectedRows.toLocaleString("en-IN")} candidates at about 20 GitHub calls each. GitHub allows 5,000 calls an
+                        hour, so this sheet may need up to {Math.max(1, Math.ceil(githubHoursFor(selectedRows)))} h of budget. Inspections
+                        from the last 24 h are reused for free, and the run pauses itself whenever the hourly limit runs low.
+                      </p>
+                    ) : null}
+                  </div>
+                ) : null}
                 <SettingRow
                   id="dom-gh-refresh"
                   icon={<RefreshCw />}
@@ -1436,6 +1602,14 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                         <span className="tabular-nums">
                           {ghProgress.done} of {ghProgress.total}
                           {ghProgress.reused ? ` · ${ghProgress.reused} reused` : ""} · {activity.running} running
+                          {activity.waiting ? ` · ${activity.waiting} waiting to retry` : ""}
+                          {ghPausedUntil ? (
+                            <span className="font-medium text-warning">
+                              {" "}
+                              · paused: GitHub&apos;s hourly limit is nearly used, resumes at{" "}
+                              {new Date(ghPausedUntil).toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit" })}
+                            </span>
+                          ) : null}
                         </span>
                       ) : phase === "build" ? null : (
                         <span className="tabular-nums">
@@ -1555,11 +1729,32 @@ export function DomainShortlist(_props: DomainShortlistProps) {
             <Notice tone="warning">No candidate cleared every requirement. Try broadening the domain or relaxing the strict gates.</Notice>
           ) : null}
 
-          {githubLookedFor ? <GithubRunSummary lookedFor={githubLookedFor} candidates={result.candidates} /> : null}
+          {githubLookedFor ? <GithubRunSummary lookedFor={githubLookedFor} candidates={result.candidates} scope={cfgRef.current?.githubScope ?? "fit"} /> : null}
+
+          {githubStrong.length ? (
+            <Notice
+              tone="info"
+              title={`${githubStrong.length} candidate${githubStrong.length === 1 ? " has" : "s have"} strong domain code on GitHub that the resume doesn't show`}
+              action={
+                <Button size="sm" variant="outline" onClick={() => setOnlyGithubStrong((v) => !v)}>
+                  {onlyGithubStrong ? "Show the list again" : "Show them"}
+                </Button>
+              }
+            >
+              Their resume falls below the domain-fit bar, but their own repos prove the domain (GitHub score {GITHUB_STRONG_SCORE}+). They
+              aren&apos;t shortlisted automatically; look at them by hand. The CSV marks them under &ldquo;GitHub Strength Not On Resume&rdquo;.
+            </Notice>
+          ) : null}
 
           <Panel
             flush
-            title={result.limitedToTopN && !showAll ? "Shortlist" : "Every evaluated candidate"}
+            title={
+              onlyGithubStrong && githubStrong.length
+                ? "Strong on GitHub, not on the resume"
+                : result.limitedToTopN && !showAll
+                  ? "Shortlist"
+                  : "Every evaluated candidate"
+            }
             description={
               <>
                 Shortlisted {result.shortlisted} of {result.considered} domain match{result.considered === 1 ? "" : "es"} across{" "}
@@ -1668,6 +1863,13 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                                   {" "}
                                   · {c.githubMatches} repo{c.githubMatches === 1 ? "" : "s"}
                                 </span>
+                                {githubStrengthNotOnResume(c) ? (
+                                  <Badge variant="highlight" className="ml-1.5">
+                                    Not on resume
+                                  </Badge>
+                                ) : githubTechsNotOnResume(c).length ? (
+                                  <span className="block text-xs text-muted-foreground">+{githubTechsNotOnResume(c).length} not on resume</span>
+                                ) : null}
                               </span>
                             ) : (
                               <span
@@ -1676,7 +1878,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                                   c.githubStatus === "failed" || c.githubStatus === "not-found" ? "text-warning" : "text-muted-foreground",
                                 )}
                               >
-                                {GITHUB_STATUS_SHORT[c.githubStatus]}
+                                {c.githubStatus === "not-inspected" && c.githubNote.startsWith(BELOW_BAR_NOTE) ? "below bar" : GITHUB_STATUS_SHORT[c.githubStatus]}
                               </span>
                             )}
                           </TableCell>

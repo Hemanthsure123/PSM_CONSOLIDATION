@@ -15,11 +15,23 @@ import { Progress } from "@/components/ui/progress";
 import { NativeSelect } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { SERIES_NEUTRAL } from "@/components/charts";
-import { BucketingPaste, type ParsedInput } from "@/components/bucketing/bucketing-paste";
+import { BucketingPaste, EMPTY_INPUT, type ParsedInput } from "@/components/bucketing/bucketing-paste";
 import { BUCKET_COLOR, CandidateDetail, TierBadge } from "@/components/bucketing/candidate-detail";
-import { BUCKET_LABEL, BUCKET_RULE, BUCKETS, DOMAIN_LABEL, REASON_TEXT, STAGE_LABEL, STAGE_TIER, type Bucket, type Stage } from "@/lib/bucketing/config";
+import {
+  BUCKET_LABEL,
+  BUCKET_RULE,
+  BUCKETS,
+  DOMAIN_LABEL,
+  REASON_TEXT,
+  RERUN_CODES,
+  TIER_LABEL,
+  TIER_SHORT,
+  TIERS,
+  type Bucket,
+} from "@/lib/bucketing/config";
 import { buildBucketCsv, buildCompleteCsv, buildNotBucketedCsv, rankBuckets } from "@/lib/bucketing/csv";
-import type { BucketingBatch, BucketingCandidateInput, BucketingResult } from "@/lib/bucketing/types";
+import { planRefresh, type RefreshPlan } from "@/lib/bucketing/refresh";
+import { interviewNote, tierOf, type BucketingBatch, type BucketingCandidateInput, type BucketingResult } from "@/lib/bucketing/types";
 import { cn, slugify } from "@/lib/utils";
 
 export const CONCURRENCY_OPTIONS = [2, 3, 4, 6, 8];
@@ -31,7 +43,6 @@ interface Props {
   candidates: BucketingCandidateInput[];
   results: Record<string, BucketingResult>;
   batches: BucketingBatch[];
-  defaultStage: Stage;
   running: boolean;
   active: number;
   /** GitHub budget pause: resumes at this time. */
@@ -42,7 +53,8 @@ interface Props {
   onRun: (targets: BucketingCandidateInput[]) => void;
   onStop: () => void;
   onBack: () => void;
-  onAddBatch: (input: ParsedInput) => void;
+  /** Load a newer export (or more candidates): add, re-score and re-run as planned. */
+  onRefresh: (plan: RefreshPlan, source: string) => void;
   storageError: string;
 }
 
@@ -58,29 +70,49 @@ function download(name: string, csv: string) {
   URL.revokeObjectURL(url);
 }
 
-const STAGES: Stage[] = ["TR2", "TR1", "ASSESSMENT"];
 const PAGE = 100;
+const NO_EXISTING = new Map<string, number>();
+
+/** Short notes for a bucketed row's flags. */
+function flagNote(r: BucketingResult): string {
+  if (r.flags.includes("INTERVIEW_ONLY")) return "Interview only — resume not checked";
+  if (r.flags.includes("TRACK_MISMATCH")) return "Track not on the resume yet";
+  if (r.flags.some((f) => RERUN_CODES.has(f))) return "Evidence pending — re-run";
+  return "";
+}
 
 export function BucketingResults(p: Props) {
   const all = React.useMemo(() => Object.values(p.results), [p.results]);
   const ranked = React.useMemo(() => rankBuckets(all), [all]);
   const pending = React.useMemo(
-    () => p.candidates.filter((c) => c.resumeUrl && !p.results[c.id]).sort((a, b) => STAGE_TIER[a.stage] - STAGE_TIER[b.stage]),
+    // Not evaluated yet, or updated by a newer export / resume sheet and waiting to run again.
+    () => p.candidates.filter((c) => !p.results[c.id] || p.results[c.id].stale).sort((a, b) => tierOf(a) - tierOf(b)),
     [p.candidates, p.results],
   );
-  // "Re-run needed" rows whose resume link the run still knows (an imported file may not carry it).
-  const rerunnable = React.useMemo(
-    () => ranked.retry.map((r) => p.candidates.find((c) => c.id === r.id)).filter((c): c is BucketingCandidateInput => Boolean(c?.resumeUrl)),
-    [ranked.retry, p.candidates],
-  );
+  // Rows whose evidence was missing (re-run needed, or a TR-2 hire bucketed with evidence pending)
+  // and whose resume link the run still knows (an imported file may not carry it).
+  const rerunnable = React.useMemo(() => {
+    const byId = new Map(p.candidates.map((c) => [c.id, c]));
+    return all
+      .filter((r) => r.status === "retry_needed" || r.flags.some((f) => RERUN_CODES.has(f)))
+      .map((r) => byId.get(r.id))
+      .filter((c): c is BucketingCandidateInput => Boolean(c?.resumeUrl))
+      .sort((a, b) => tierOf(a) - tierOf(b));
+  }, [all, p.candidates]);
   const [tab, setTab] = React.useState<Tab>("MERN");
   const [query, setQuery] = React.useState("");
   const [reviewOnly, setReviewOnly] = React.useState(false);
   const [open, setOpen] = React.useState<string | null>(null);
   const [limit, setLimit] = React.useState(PAGE);
   const [adding, setAdding] = React.useState(false);
-  const [newRows, setNewRows] = React.useState<ParsedInput>({ candidates: [], noResume: [] });
-  const existing = React.useMemo(() => new Map(p.candidates.map((c) => [c.id, c.batch])), [p.candidates]);
+  const [newRows, setNewRows] = React.useState<ParsedInput>(EMPTY_INPUT);
+  // Every row of the newer file is read (none skipped) so changed records can be compared with the run's.
+  const plan = React.useMemo(
+    () => (newRows.check?.ok && newRows.candidates.length ? planRefresh(p.candidates, p.results, newRows.candidates) : null),
+    [newRows, p.candidates, p.results],
+  );
+  const planChanges = plan ? plan.added.length + plan.rerun.length + plan.rescored.length + plan.waiting.length : 0;
+  const byId = React.useMemo(() => new Map(p.candidates.map((c) => [c.id, c])), [p.candidates]);
 
   // Open on the first bucket that has someone in it.
   const picked = React.useRef(false);
@@ -103,17 +135,17 @@ export function BucketingResults(p: Props) {
   const bucketed = BUCKETS.reduce((s, b) => s + ranked.buckets[b].length, 0);
   const bucketTab = tab !== "NOT" && tab !== "RETRY";
 
-  const stageSplit = (rs: BucketingResult[]) => STAGES.map((s) => rs.filter((r) => r.stage === s).length);
+  const tierSplit = (rs: BucketingResult[]) => TIERS.map((t) => rs.filter((r) => r.priorityTier === t).length);
 
   const tabTitle = tab === "NOT" ? "Not bucketed" : tab === "RETRY" ? "Re-run needed" : BUCKET_LABEL[tab];
   const tabDescription =
     tab === "NOT" ? (
-      "Each with the reason, TR-2 first. Open a row to see every check behind the decision."
+      "Each with the reason, TR-2 hires first. Open a row to see every check behind the decision."
     ) : tab === "RETRY" ? (
       "Evidence was unavailable for these candidates. Open a row to see what failed."
     ) : (
       <>
-        Ranked TR-2, then TR-1, then Assessment, then by overall score.{" "}
+        Ranked TR-2 strong, medium and low hires, then TR-1, then Assessment; by overall score inside each.{" "}
         <InfoHint label="Bucket rule" align="start">
           <span className="font-medium">Rule:</span> {BUCKET_RULE[tab]}
         </InfoHint>
@@ -135,10 +167,10 @@ export function BucketingResults(p: Props) {
       {p.storageError ? <Notice tone="danger">{p.storageError}</Notice> : null}
 
       {/* Bucket counts — each tile opens its list */}
-      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4 xl:grid-cols-7" role="group" aria-label="Buckets">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4" role="group" aria-label="Buckets">
         {[...BUCKETS, "NOT" as const, "RETRY" as const].map((t) => {
           const rs = t === "NOT" ? ranked.notBucketed : t === "RETRY" ? ranked.retry : ranked.buckets[t];
-          const [a, b, c] = stageSplit(rs);
+          const [strong, medium, low, tr1, asmt] = tierSplit(rs);
           const label = t === "NOT" ? "Not bucketed" : t === "RETRY" ? "Re-run needed" : BUCKET_LABEL[t];
           const selected = tab === t;
           return (
@@ -170,8 +202,11 @@ export function BucketingResults(p: Props) {
                 <span className="truncate">{label}</span>
               </div>
               <div className="mt-1 font-display text-[26px] font-semibold leading-8 tracking-[-0.02em] tabular-nums">{rs.length}</div>
-              <div className="mt-0.5 truncate text-xs text-muted-foreground tabular-nums">
-                TR-2 {a} · TR-1 {b} · Asmt {c}
+              <div className="mt-0.5 truncate text-xs text-muted-foreground tabular-nums" title="TR-2 hires by verdict">
+                Strong {strong} · Medium {medium} · Low {low}
+              </div>
+              <div className="truncate text-xs text-muted-foreground tabular-nums">
+                TR-1 {tr1} · Asmt {asmt}
               </div>
             </button>
           );
@@ -261,17 +296,17 @@ export function BucketingResults(p: Props) {
                 </TableHead>
                 {bucketTab ? <TableHead className="w-10 text-right">#</TableHead> : null}
                 <TableHead>Candidate</TableHead>
-                <TableHead>Stage</TableHead>
-                {bucketTab ? (
-                  <>
-                    <TableHead className="text-right">Overall</TableHead>
-                    <TableHead>Flagship project</TableHead>
-                    <TableHead className="text-right">Domain</TableHead>
-                    <TableHead className="text-right">DSA</TableHead>
-                  </>
-                ) : (
-                  <TableHead>Why</TableHead>
-                )}
+                <TableHead>Tag</TableHead>
+                {bucketTab ? <TableHead className="text-right">Overall</TableHead> : null}
+                <TableHead className="text-right">
+                  <span className="inline-flex items-center gap-1">
+                    Interview
+                    <InfoHint label="Internal assessment score" align="end">
+                      0-100 from the TR-2 verdict, the TR-1 technical score and the assessment score — the strongest signal.
+                    </InfoHint>
+                  </span>
+                </TableHead>
+                {bucketTab ? <TableHead>Flagship project</TableHead> : <TableHead>Why</TableHead>}
                 <TableHead>Trust</TableHead>
               </TableRow>
             </TableHeader>
@@ -302,14 +337,24 @@ export function BucketingResults(p: Props) {
                           {r.name || "—"}
                         </div>
                         <div className="text-xs text-muted-foreground tabular-nums">{r.mobile}</div>
+                        {byId.get(r.id)?.college ? (
+                          <div className="max-w-[220px] truncate text-xs text-muted-foreground" title={byId.get(r.id)?.college}>
+                            {byId.get(r.id)?.college}
+                          </div>
+                        ) : null}
                       </TableCell>
                       <TableCell>
-                        <Badge variant={r.stage === "TR2" ? "default" : r.stage === "TR1" ? "secondary" : "outline"}>{r.stageLabel}</Badge>
-                        {r.flags.includes("TRACK_MISMATCH") ? <div className="mt-1 text-xs text-warning">Track not backed</div> : null}
+                        <Badge variant={r.priorityTier <= 3 ? "default" : r.priorityTier === 4 ? "secondary" : "outline"} title={TIER_LABEL[r.priorityTier]}>
+                          {r.stageLabel}
+                        </Badge>
+                        {interviewNote(r.interview) ? <div className="mt-1 max-w-[240px] text-xs text-muted-foreground">{interviewNote(r.interview)}</div> : null}
+                        {r.stale ? <div className="mt-1 text-xs font-medium text-primary">Updated — waiting to run again</div> : null}
+                        {bucketTab && flagNote(r) ? <div className="mt-1 text-xs text-warning">{flagNote(r)}</div> : null}
                       </TableCell>
+                      {bucketTab ? <TableCell className="text-right text-[14px] font-semibold tabular-nums">{r.scores.overall}</TableCell> : null}
+                      <TableCell className="text-right tabular-nums">{r.interview || r.verdict ? r.scores.internal : <span className="text-muted-foreground">—</span>}</TableCell>
                       {bucketTab ? (
                         <>
-                          <TableCell className="text-right text-[14px] font-semibold tabular-nums">{r.scores.overall}</TableCell>
                           <TableCell>
                             {r.flagship ? (
                               <>
@@ -324,11 +369,15 @@ export function BucketingResults(p: Props) {
                                 </div>
                               </>
                             ) : (
-                              <span className="text-xs text-muted-foreground">Internship-backed</span>
+                              <span className="text-xs text-muted-foreground">
+                                {r.flags.includes("INTERVIEW_ONLY")
+                                  ? "Resume not checked"
+                                  : r.flags.includes("TRACK_MISMATCH")
+                                    ? "No verified project yet"
+                                    : "Experience-backed"}
+                              </span>
                             )}
                           </TableCell>
-                          <TableCell className="text-right tabular-nums">{r.scores.domain}</TableCell>
-                          <TableCell className="text-right tabular-nums">{r.scores.dsa}</TableCell>
                         </>
                       ) : (
                         <TableCell>
@@ -362,8 +411,8 @@ export function BucketingResults(p: Props) {
                     </TableRow>
                     {isOpen ? (
                       <TableRow className="hover:bg-transparent">
-                        <TableCell colSpan={bucketTab ? 9 : 5} className="bg-muted/20 px-3 py-3 sm:px-4">
-                          <CandidateDetail r={r} />
+                        <TableCell colSpan={bucketTab ? 8 : 6} className="bg-muted/20 px-3 py-3 sm:px-4">
+                          <CandidateDetail r={r} candidate={byId.get(r.id)} />
                         </TableCell>
                       </TableRow>
                     ) : null}
@@ -375,35 +424,47 @@ export function BucketingResults(p: Props) {
         )}
       </Panel>
 
-      {/* Add more candidates to this run */}
+      {/* A newer export, or more candidates */}
       <section className="rounded-xl border bg-card shadow-surface">
         <button
           type="button"
           aria-expanded={adding}
-          aria-controls="bk-add-batch"
+          aria-controls="bk-refresh"
           onClick={() => setAdding((v) => !v)}
           className="flex w-full items-center justify-between gap-3 rounded-xl px-5 py-3.5 text-left transition-colors hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/25"
         >
           <span className="min-w-0">
-            <span className="block font-display text-[15px] font-semibold tracking-[-0.01em]">Add batch {p.batches.length + 1}</span>
+            <span className="block font-display text-[15px] font-semibold tracking-[-0.01em]">Load a newer export</span>
             <span className="mt-0.5 block text-[13px] leading-relaxed text-muted-foreground">
-              More rows join this run. Mobiles already in it are skipped, and TR-2 rows go to the front of the queue.
+              New candidates join the run. Changed interview results update in place: a new TR-2 hire track or resume runs again, a new verdict or
+              score is re-scored from the saved evidence (no model calls).
             </span>
           </span>
           <ChevronDown className={cn("h-4 w-4 shrink-0 text-muted-foreground transition-transform duration-150", adding && "rotate-180")} />
         </button>
         {adding ? (
-          <div id="bk-add-batch" className="animate-fade-in space-y-4 border-t px-5 py-4">
-            <BucketingPaste batch={p.batches.length + 1} existing={existing} defaultStage={p.defaultStage} onParsed={setNewRows} />
+          <div id="bk-refresh" className="animate-fade-in space-y-4 border-t px-5 py-4">
+            <BucketingPaste batch={p.batches.length + 1} existing={NO_EXISTING} onParsed={setNewRows} />
+            {plan ? (
+              <p className="text-[13px] tabular-nums text-muted-foreground">
+                <span className="font-medium text-foreground">{plan.added.length}</span> new ·{" "}
+                <span className="font-medium text-foreground">{plan.rerun.length}</span> to run again (TR-2 hire track, journey or resume changed) ·{" "}
+                <span className="font-medium text-foreground">{plan.rescored.length}</span> re-scored ·{" "}
+                <span className="font-medium text-foreground">{plan.waiting.length}</span> updated, not run yet ·{" "}
+                <span className="font-medium text-foreground">{plan.unchanged}</span> unchanged
+              </p>
+            ) : null}
             <div className="flex justify-end">
               <Button
-                disabled={!newRows.candidates.length && !newRows.noResume.length}
+                disabled={!plan || !planChanges}
                 onClick={() => {
-                  p.onAddBatch(newRows);
+                  if (!plan) return;
+                  p.onRefresh(plan, newRows.source);
                   setAdding(false);
+                  setNewRows(EMPTY_INPUT);
                 }}
               >
-                <Play className="h-4 w-4" /> Add {newRows.candidates.length + newRows.noResume.length} and run
+                <Play className="h-4 w-4" /> {plan && !planChanges ? "Nothing changed" : "Apply and run"}
               </Button>
             </div>
           </div>
@@ -418,7 +479,7 @@ export function BucketingResults(p: Props) {
               <span className="inline-flex items-center gap-1.5 font-medium text-foreground">
                 {p.running ? (
                   <>
-                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" /> {p.active} in progress · TR-2 first, then TR-1, then Assessment
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" /> {p.active} in progress · TR-2 strong hires first
                   </>
                 ) : pending.length ? (
                   `${pending.length} waiting to run`
@@ -434,12 +495,13 @@ export function BucketingResults(p: Props) {
             </div>
             {p.running || pending.length ? <Progress value={done} max={total} label="Candidates evaluated" /> : null}
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
-              {STAGES.map((s) => {
-                const of = p.candidates.filter((c) => c.stage === s);
+              {TIERS.map((t) => {
+                const of = p.candidates.filter((c) => tierOf(c) === t);
+                if (!of.length) return null;
                 const ok = of.filter((c) => p.results[c.id]).length;
                 return (
-                  <span key={s} className="tabular-nums">
-                    {STAGE_LABEL[s]}: <span className="font-medium text-foreground">{ok}</span>/{of.length}
+                  <span key={t} className="tabular-nums" title={TIER_LABEL[t]}>
+                    {TIER_SHORT[t]}: <span className="font-medium text-foreground">{ok}</span>/{of.length}
                   </span>
                 );
               })}

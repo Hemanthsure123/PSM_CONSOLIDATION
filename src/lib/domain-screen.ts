@@ -340,6 +340,8 @@ export interface GithubInspectResult {
   fromCache: boolean;
   /** Failed for a passing reason (network) — worth one more try. */
   retryable?: boolean;
+  /** Stopped by GitHub's rate limit — worth retrying after the hourly reset. */
+  rateLimited?: boolean;
 }
 
 /** The part of an inspection that depends only on the GitHub account + domain (what the cache stores). */
@@ -435,7 +437,14 @@ async function inspectFresh(input: GithubInspectInput, spec: JdTechSpec): Promis
     if (!deep.ok) {
       const status = FAILURE_STATUS[deep.reason];
       return {
-        outcome: { ...empty, status, note: deep.message, commits2y: commits ?? 0, retryable: deep.reason === "error" },
+        outcome: {
+          ...empty,
+          status,
+          note: deep.message,
+          commits2y: commits ?? 0,
+          retryable: deep.reason === "error",
+          rateLimited: deep.reason === "rate-limited",
+        },
         // A user that doesn't exist / has no public code is a definite answer; anything else may pass.
         cacheable: (status === "not-found" || status === "no-repos") && commits !== null,
       };
@@ -473,6 +482,9 @@ async function inspectFresh(input: GithubInspectInput, spec: JdTechSpec): Promis
   } catch (err) {
     const message = err instanceof Error ? err.message : "GitHub inspection failed.";
     console.warn("[domain] github inspection failed:", message);
-    return { outcome: { ...empty, note: message.slice(0, 160), retryable: true }, cacheable: false };
+    return {
+      outcome: { ...empty, note: message.slice(0, 160), retryable: true, rateLimited: /rate limit|secondary rate|abuse detection/i.test(message) },
+      cacheable: false,
+    };
   }
 }

@@ -46,6 +46,8 @@ export interface DsaPlatformResult {
   source: DsaLinkSource;
   /** Short human-readable status. */
   note: string;
+  /** The name the profile's owner set, when the platform shows one (LeetCode, CodeChef; Codeforces on request). */
+  ownerName?: string;
 }
 
 /** Full result for one candidate. */

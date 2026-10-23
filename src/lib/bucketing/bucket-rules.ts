@@ -7,8 +7,11 @@ import { BUCKETS, TECH_CONF, type Bucket } from "@/lib/bucketing/config";
  *
  * Catalogue keys used here (github-analysis.ts TECHS): react, angular, vue,
  * nodejs, mongodb, sql, django, fastapi-or-flask, spring-boot, java, llm,
- * llm-finetuning, llm-inference, html-css, javascript, dotnet. The synthetic
- * keys below cover what the catalogue has no entry for and the tree shows.
+ * llm-finetuning, llm-inference, html-css, javascript, dotnet, and for the data
+ * buckets scikit-learn, pytorch, tensorflow, machine-learning, image-analysis,
+ * nlp, transformers, time-series, model-evaluation, pandas, data-viz, powerbi,
+ * tableau, spark. The synthetic keys below cover what the catalogue has no entry
+ * for and the tree shows.
  */
 
 export const SYNTH = {
@@ -75,8 +78,13 @@ export function hasBackend(s: Set<string>): boolean {
 }
 
 const jsFrontend = (s: Set<string>) => has(s, "react", "angular", "vue");
-const plainWebUi = (s: Set<string>) => s.has("html-css") && s.has("javascript");
 const database = (s: Set<string>) => has(s, "sql", "mongodb", SYNTH.DB_FILE);
+/** Classical ML / deep learning actually used (LLM work alone is GenAI, not DS/ML). */
+const mlWork = (s: Set<string>) =>
+  has(s, "scikit-learn", "pytorch", "tensorflow", "machine-learning", "image-analysis", "nlp", "transformers", "time-series", "model-evaluation");
+/** Analysis that produces insight: data wrangling with charts, SQL analysis, or a BI dashboard. */
+const analyticsWork = (s: Set<string>) =>
+  has(s, "powerbi", "tableau") || (s.has("pandas") && s.has("data-viz")) || (s.has("sql") && has(s, "pandas", "data-viz")) || (s.has("spark") && s.has("pandas"));
 
 /** Every bucket rule (config.BUCKET_RULE) this technology set satisfies. */
 export function bucketsFor(s: Set<string>): Bucket[] {
@@ -97,7 +105,8 @@ export function bucketsFor(s: Set<string>): Bucket[] {
     out.push("JAVA_FS");
   }
   if (has(s, "llm", "llm-finetuning", "llm-inference")) out.push("GENAI");
-  if ((jsFrontend(s) || plainWebUi(s)) && !hasBackend(s)) out.push("FRONTEND");
+  if (mlWork(s)) out.push("DSML");
+  if (analyticsWork(s)) out.push("DATA_ANALYTICS");
   return out.filter((b) => (BUCKETS as readonly string[]).includes(b));
 }
 
@@ -123,9 +132,11 @@ export function missingFor(bucket: Bucket, s: Set<string>): string[] {
     case "GENAI":
       if (!has(s, "llm", "llm-finetuning", "llm-inference")) miss.push("an LLM SDK / framework called in code");
       break;
-    case "FRONTEND":
-      if (!(jsFrontend(s) || plainWebUi(s))) miss.push("a UI framework or HTML+JS UI");
-      if (hasBackend(s)) miss.push("no backend of its own (it has one)");
+    case "DSML":
+      if (!mlWork(s)) miss.push("ML / deep-learning work (scikit-learn, PyTorch, TensorFlow, CV / NLP models)");
+      break;
+    case "DATA_ANALYTICS":
+      if (!analyticsWork(s)) miss.push("analysis with charts, SQL analysis or a Power BI / Tableau dashboard");
       break;
   }
   return miss;

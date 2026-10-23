@@ -12,13 +12,15 @@ import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
 import { Panel } from "@/components/ui/panel";
 import { NativeSelect } from "@/components/ui/select";
-import { BucketingPaste, type ParsedInput } from "@/components/bucketing/bucketing-paste";
+import { BucketingPaste, EMPTY_INPUT, type ParsedInput } from "@/components/bucketing/bucketing-paste";
 import { BucketingResults, CONCURRENCY_OPTIONS } from "@/components/bucketing/bucketing-results";
 import { BUCKET_COLOR } from "@/components/bucketing/candidate-detail";
-import { BUCKET_LABEL, BUCKET_RULE, BUCKETS, STAGE_LABEL, STAGE_TIER, STAGES, type Stage } from "@/lib/bucketing/config";
+import { BUCKET_LABEL, BUCKET_RULE, BUCKETS, RERUN_CODES, type Stage } from "@/lib/bucketing/config";
+import type { RefreshPlan } from "@/lib/bucketing/refresh";
 import {
   failedBucketingResult,
-  noResumeResult,
+  tierOf,
+  upgradeResult,
   type BucketingBatch,
   type BucketingCandidateInput,
   type BucketingImportFile,
@@ -51,12 +53,18 @@ const NETWORK_PREFIX = "Network error";
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const NO_EXISTING = new Map<string, number>();
+/** The interview export always gives the stage; this only fills rows of older sheets. */
+const DEFAULT_STAGE: Stage = "ASSESSMENT";
+const byTier = (a: { c: BucketingCandidateInput }, b: { c: BucketingCandidateInput }) => tierOf(a.c) - tierOf(b.c);
+/** Evidence was missing: a re-run row, or a bucketed TR-2 hire whose evidence check failed part-way. */
+const wantsRerun = (r: BucketingResult) => r.status === "retry_needed" || r.flags.some((f) => RERUN_CODES.has(f));
 
 /**
- * Candidate Bucketing — paste the pool (or upload the sheet CSV), and every
- * resume runs through the LangGraph workflow: projects and GitHub verified,
- * domains scored, DSA consolidated, stage applied. Results land in five
- * buckets (ranked TR-2 → TR-1 → Assessment) or "not bucketed" with the reason.
+ * Candidate Bucketing — upload the interview export (plus the resume sheet), and
+ * every candidate runs through the LangGraph workflow: internal assessments
+ * first, then projects and GitHub verified, experience and achievements. Results
+ * land in six buckets (ranked TR-2 strong → medium → low hire → TR-1 →
+ * Assessment) or "not bucketed" with the reason.
  */
 export function CandidateBucketing({ runId, onDone }: Props) {
   const [id, setId] = React.useState(() => runId || newBucketingRunId());
@@ -65,7 +73,6 @@ export function CandidateBucketing({ runId, onDone }: Props) {
   const [name, setName] = React.useState("");
   const [createdAt, setCreatedAt] = React.useState(() => new Date().toISOString());
   const [concurrency, setConcurrency] = React.useState(4);
-  const [defaultStage, setDefaultStage] = React.useState<Stage>("ASSESSMENT");
   const [batches, setBatches] = React.useState<BucketingBatch[]>([]);
   const [candidates, setCandidates] = React.useState<BucketingCandidateInput[]>([]);
   const [results, setResults] = React.useState<Record<string, BucketingResult>>({});
@@ -75,7 +82,7 @@ export function CandidateBucketing({ runId, onDone }: Props) {
   const [githubLeft, setGithubLeft] = React.useState<number | null>(null);
   const [githubError, setGithubError] = React.useState("");
   const [storageError, setStorageError] = React.useState("");
-  const [first, setFirst] = React.useState<ParsedInput>({ candidates: [], noResume: [] });
+  const [first, setFirst] = React.useState<ParsedInput>(EMPTY_INPUT);
   const [error, setError] = React.useState("");
   const importRef = React.useRef<HTMLInputElement>(null);
   useReportBusy(running);
@@ -86,8 +93,8 @@ export function CandidateBucketing({ runId, onDone }: Props) {
   const runningRef = React.useRef(false);
   const activeRef = React.useRef(0);
   const gateRef = React.useRef({ until: 0, checkedAt: 0 });
-  const meta = React.useRef({ id, name, createdAt, concurrency, defaultStage, batches, candidates });
-  meta.current = { id, name, createdAt, concurrency, defaultStage, batches, candidates };
+  const meta = React.useRef({ id, name, createdAt, concurrency, defaultStage: DEFAULT_STAGE, batches, candidates });
+  meta.current = { id, name, createdAt, concurrency, defaultStage: DEFAULT_STAGE, batches, candidates };
 
   // Reopen a saved run.
   React.useEffect(() => {
@@ -100,7 +107,6 @@ export function CandidateBucketing({ runId, onDone }: Props) {
         setName(m.name);
         setCreatedAt(m.createdAt);
         setConcurrency(m.concurrency || 4);
-        setDefaultStage(m.defaultStage);
         setBatches(m.batches);
         setCandidates(m.candidates);
         resultsRef.current = saved.results;
@@ -216,17 +222,18 @@ export function CandidateBucketing({ runId, onDone }: Props) {
   };
 
   /**
-   * Rolling window of `concurrency` candidates, TR-2 first. Every result is saved
+   * Rolling window of `concurrency` candidates, TR-2 strong hires first. Every result is saved
    * the moment it arrives. A candidate whose evidence was unavailable (GitHub
    * budget, model rate limits, network) is retried before it is recorded as
    * "re-run needed".
    */
   const analyze = React.useCallback(
     async (targets: BucketingCandidateInput[]) => {
-      const fresh = targets.filter((c) => c.resumeUrl && !queueRef.current.some((j) => j.c.id === c.id));
+      // Rows without a resume go too: a TR-2 hire is placed by the interview alone (the server skips the models).
+      const fresh = targets.filter((c) => !queueRef.current.some((j) => j.c.id === c.id));
       if (!fresh.length) return;
       queueRef.current.push(...fresh.map((c) => ({ c, attempt: 0, notBefore: 0 })));
-      queueRef.current.sort((a, b) => STAGE_TIER[a.c.stage] - STAGE_TIER[b.c.stage]);
+      queueRef.current.sort(byTier);
       if (runningRef.current) return;
       runningRef.current = true;
       abortRef.current = false;
@@ -257,11 +264,11 @@ export function CandidateBucketing({ runId, onDone }: Props) {
           scheduleFlush();
           const r = await evaluateOne(job.c);
           activeRef.current -= 1;
-          if (r.status === "retry_needed" && job.attempt < MAX_ATTEMPTS && !abortRef.current) {
+          if (wantsRerun(r) && job.attempt < MAX_ATTEMPTS && !abortRef.current) {
             const network = r.remarks.some((m) => m.startsWith(NETWORK_PREFIX));
-            if (r.reasonCodes.includes("GITHUB_UNAVAILABLE")) gateRef.current.checkedAt = 0; // re-check the budget now
+            if ([...r.reasonCodes, ...r.flags].includes("GITHUB_UNAVAILABLE")) gateRef.current.checkedAt = 0; // re-check the budget now
             q.push({ c: job.c, attempt: job.attempt + 1, notBefore: Date.now() + (network ? NETWORK_RETRY_MS : MODEL_RETRY_MS * (job.attempt + 1)) });
-            q.sort((a, b) => STAGE_TIER[a.c.stage] - STAGE_TIER[b.c.stage]);
+            q.sort(byTier);
             scheduleFlush();
             continue;
           }
@@ -292,34 +299,42 @@ export function CandidateBucketing({ runId, onDone }: Props) {
 
   const start = async () => {
     setError("");
-    const all = [...first.candidates, ...first.noResume];
-    if (!first.candidates.length) return;
+    const all = first.candidates;
+    if (!all.length || !first.check?.ok) return;
     const now = new Date().toISOString();
-    const b: BucketingBatch[] = [{ n: 1, addedAt: now, count: all.length }];
+    const b: BucketingBatch[] = [{ n: 1, addedAt: now, count: all.length, source: first.source }];
     meta.current = { ...meta.current, batches: b, candidates: all, createdAt: now };
     setCreatedAt(now);
     setBatches(b);
     setCandidates(all);
     resultsRef.current = {};
-    record(first.noResume.map(noResumeResult));
     await saveMeta();
     setView("results");
-    void analyze(first.candidates);
+    void analyze(all);
   };
 
-  const addBatch = async (input: ParsedInput) => {
+  /**
+   * A newer export (or more candidates): new phones join as the next batch, changed
+   * records replace the old ones — re-scored ones are saved at once, the ones whose
+   * bucket may move run again.
+   */
+  const applyRefresh = async (plan: RefreshPlan, source: string) => {
     const m = meta.current;
     const n = (m.batches.length ? m.batches[m.batches.length - 1].n : 0) + 1;
-    const rows = [...input.candidates, ...input.noResume].filter((r) => !m.candidates.some((c) => c.id === r.id)).map((r) => ({ ...r, batch: n }));
-    if (!rows.length) return;
-    const nextBatches = [...m.batches, { n, addedAt: new Date().toISOString(), count: rows.length }];
-    const nextCandidates = [...m.candidates, ...rows];
+    const added = plan.added.map((r) => ({ ...r, batch: n }));
+    const replaced = new Map([...plan.rerun, ...plan.waiting, ...plan.rescored.map((x) => x.candidate)].map((c) => [c.id, c]));
+    if (!added.length && !replaced.size) return;
+    const nextBatches = added.length ? [...m.batches, { n, addedAt: new Date().toISOString(), count: added.length, source }] : m.batches;
+    const nextCandidates = [...m.candidates.map((c) => replaced.get(c.id) ?? c), ...added];
     meta.current = { ...m, batches: nextBatches, candidates: nextCandidates };
     setBatches(nextBatches);
     setCandidates(nextCandidates);
-    record(rows.filter((r) => !r.resumeUrl).map(noResumeResult));
+    // Results that must be redone are marked stale (kept on screen until the new one lands), so a
+    // stopped or interrupted run still lists them under "Resume".
+    const stale = plan.rerun.flatMap((c) => (resultsRef.current[c.id] ? [{ ...resultsRef.current[c.id], stale: true }] : []));
+    if (plan.rescored.length || stale.length) record([...plan.rescored.map((x) => x.result), ...stale]);
     await saveMeta();
-    void analyze(rows.filter((r) => r.resumeUrl));
+    if (added.length || plan.rerun.length) void analyze([...added, ...plan.rerun]);
   };
 
   /** Load the batch runner's output (scripts/bucketing-run.ts) as a new saved run. */
@@ -331,20 +346,39 @@ export function CandidateBucketing({ runId, onDone }: Props) {
       if (!Array.isArray(data.results) || !data.results.every((r) => r && typeof r.id === "string" && "status" in r)) {
         throw new Error("This file is not a bucketing results file.");
       }
+      const results = data.results.map(upgradeResult);
       const cands: BucketingCandidateInput[] =
         data.candidates ??
-        data.results.map((r) => ({ id: r.id, mobile: r.mobile, name: r.name, resumeUrl: "", stage: r.stage, track: r.track, batch: 1 }));
+        results.map((r) => ({
+          id: r.id,
+          mobile: r.mobile,
+          name: r.name,
+          resumeUrl: "",
+          stage: r.stage,
+          track: r.track,
+          verdict: r.verdict,
+          interview: r.interview ?? undefined,
+          batch: 1,
+        }));
       const now = new Date().toISOString();
       const newId = newBucketingRunId();
       const runName = name.trim() || data.name || file.name.replace(/\.json$/i, "");
-      meta.current = { id: newId, name: runName, createdAt: now, concurrency, defaultStage, batches: [{ n: 1, addedAt: now, count: cands.length }], candidates: cands };
+      meta.current = {
+        id: newId,
+        name: runName,
+        createdAt: now,
+        concurrency,
+        defaultStage: DEFAULT_STAGE,
+        batches: [{ n: 1, addedAt: now, count: cands.length, source: file.name }],
+        candidates: cands,
+      };
       setId(newId);
       setName(runName);
       setCreatedAt(now);
       setBatches(meta.current.batches);
       setCandidates(cands);
       resultsRef.current = {};
-      record(data.results);
+      record(results);
       await saveMeta();
       setView("results");
     } catch (err) {
@@ -367,7 +401,6 @@ export function CandidateBucketing({ runId, onDone }: Props) {
         candidates={candidates}
         results={results}
         batches={batches}
-        defaultStage={defaultStage}
         running={running}
         active={active}
         pausedUntil={pausedUntil}
@@ -383,18 +416,18 @@ export function CandidateBucketing({ runId, onDone }: Props) {
           abortRef.current = true;
         }}
         onBack={onDone}
-        onAddBatch={(input) => void addBatch(input)}
+        onRefresh={(plan, source) => void applyRefresh(plan, source)}
         storageError={storageError}
       />
     );
   }
 
-  const ready = first.candidates.length;
+  const ready = first.check?.ok ? first.candidates.length : 0;
   return (
     <div className="max-w-3xl space-y-6">
       <Panel title="Run" description="A run is saved as it goes and can be resumed from the dashboard.">
-        <Field label="Run name" htmlFor="bk-name" info="TR-2 cleared candidates run first, then TR-1, then Assessment.">
-          <Input id="bk-name" placeholder="e.g. Assessed pool 8+ LPA — Oct 2026" value={name} onChange={(e) => setName(e.target.value)} />
+        <Field label="Run name" htmlFor="bk-name" info="TR-2 strong hires run first, then medium and low hires, then TR-1, then Assessment.">
+          <Input id="bk-name" placeholder="e.g. EDGE 2.0 drive — 21 Oct export" value={name} onChange={(e) => setName(e.target.value)} />
         </Field>
       </Panel>
 
@@ -402,38 +435,32 @@ export function CandidateBucketing({ runId, onDone }: Props) {
         title="Candidates"
         description={
           <>
-            Upload the sheet&apos;s CSV export, or paste its rows with the header row.{" "}
+            The drive&apos;s interview export, read by its column names, and the resume sheet.{" "}
             <InfoHint label="About resume links" align="start">
-              Resume links must be public or shared with the service account.
+              The export has no resume column: resume links come from the resume sheet, matched by phone number. They must be public or shared with the
+              service account. Without a resume, TR-2 hires are still placed by their track; everyone else is listed as &quot;No resume link&quot;.
             </InfoHint>
           </>
         }
       >
-        <div className="space-y-4">
-          <Field label="Rows with no stage are" htmlFor="bk-stage" className="sm:max-w-xs">
-            <NativeSelect id="bk-stage" value={defaultStage} onChange={(e) => setDefaultStage(e.target.value as Stage)}>
-              {STAGES.map((s) => (
-                <option key={s} value={s}>
-                  {STAGE_LABEL[s]}
-                </option>
-              ))}
-            </NativeSelect>
-          </Field>
-          <BucketingPaste batch={1} existing={NO_EXISTING} defaultStage={defaultStage} onParsed={setFirst} />
-        </div>
+        <BucketingPaste batch={1} existing={NO_EXISTING} onParsed={setFirst} />
       </Panel>
 
       <Disclosure title="How bucketing works" summary={`${BUCKETS.length} buckets`}>
         <div className="space-y-4 text-[13px]">
           <p className="leading-relaxed text-muted-foreground">
-            Every resume goes through an agent workflow. Projects and their GitHub repos are verified commit by commit: any commit by someone else or
-            by an AI coding tool invalidates the project. Domains are scored from projects and internships only, DSA is consolidated (Codeforces first,
-            then CodeChef, then LeetCode), and the interview stage is applied. Each candidate lands in one bucket, or gets the reason why not, with a
-            trust score.
+            Signals count in this order: our internal assessments (TR-2 verdicts, TR-1 scores, the assessment), then projects verified end to end on
+            GitHub, then experience, then achievements. A TR-2 hire goes to the bucket of the track they were hired in, even when the resume
+            doesn&apos;t show it yet (flagged for review). Everyone else needs a verified project or an in-domain internship / job. GitHub repos are
+            checked commit by commit: any commit by someone else or by an AI coding tool invalidates the project. Ranking: TR-2 strong, medium and low
+            hires first, then TR-1, then Assessment; inside a tier, by the overall score.
           </p>
           <div>
-            <p className="font-medium">The five buckets</p>
-            <p className="text-muted-foreground">A bucket needs one verified project whose code (not the resume&apos;s wording) meets its rule.</p>
+            <p className="font-medium">The six buckets (the TR-2 tracks)</p>
+            <p className="text-muted-foreground">
+              Outside a TR-2 hire, a bucket needs one verified project whose code (not the resume&apos;s wording) meets its rule, or an in-domain role.
+              GitHub is optional for DS / ML and Generative AI (notebook work), and a live demo is a bonus, never required.
+            </p>
             <dl className="mt-2 divide-y rounded-lg border">
               {BUCKETS.map((b) => (
                 <div key={b} className="grid gap-1 px-3 py-2 sm:grid-cols-[160px_minmax(0,1fr)] sm:gap-3">
@@ -453,7 +480,7 @@ export function CandidateBucketing({ runId, onDone }: Props) {
         <Field
           label="Candidates in parallel"
           htmlFor="bk-conc"
-          hint="Each candidate uses about 10 GitHub calls."
+          hint="Each candidate with a resume uses about 10 GitHub calls."
           className="sm:max-w-xs"
         >
           <NativeSelect id="bk-conc" value={concurrency} onChange={(e) => setConcurrency(Number(e.target.value))}>
@@ -477,7 +504,7 @@ export function CandidateBucketing({ runId, onDone }: Props) {
         status={
           <div className="space-y-0.5">
             <p className="font-medium text-foreground">
-              {!name.trim() ? "Name the run to start." : ready ? `${ready} candidates ready.` : "Add at least one candidate."}
+              {!name.trim() ? "Name the run to start." : ready ? `${ready} candidates ready.` : "Load the interview export to start."}
             </p>
             {!githubError ? (
               <p className="text-xs tabular-nums">

@@ -10,11 +10,13 @@ import {
   Code2,
   FileCode2,
   FileSpreadsheet,
+  GraduationCap,
   Layers,
   LayoutDashboard,
   Plus,
   Send,
   Sparkles,
+  Star,
   Target,
   Trash2,
 } from "lucide-react";
@@ -43,6 +45,10 @@ import { listBenchmarkRuns, deleteBenchmarkRun } from "@/lib/benchmark-store";
 import { listBucketingRuns, deleteBucketingRun } from "@/lib/bucketing-store";
 import { BUCKET_LABEL, BUCKETS } from "@/lib/bucketing/config";
 import type { BucketingRunMeta } from "@/lib/bucketing/types";
+import { listAcRuns, deleteAcRun } from "@/lib/academy/store";
+import { AC_BUCKETS, AC_BUCKET_LABEL, type AcRunMeta } from "@/lib/academy/types";
+import { listSpRuns, deleteSpRun } from "@/lib/showcase/store";
+import type { SpRunMeta } from "@/lib/showcase/types";
 import type { BenchmarkRunMeta } from "@/lib/benchmark-types";
 import { bandLabel } from "@/lib/assignment-scoring";
 import type { AssignmentRun } from "@/lib/assignment-types";
@@ -68,6 +74,10 @@ interface HomeDashboardProps {
   onBenchmarks: (runId?: string) => void;
   /** Open Candidate Bucketing — a saved run by id, or a new one. */
   onBucketing: (runId?: string) => void;
+  /** Open Academy bucketing — a saved run by id, or a new one. */
+  onAcademy: (runId?: string) => void;
+  /** Open Sample profiles — a saved run by id, or a new one. */
+  onShowcase: (runId?: string) => void;
 }
 
 /**
@@ -118,6 +128,8 @@ export function HomeDashboard({
   onZaggle,
   onBenchmarks,
   onBucketing,
+  onAcademy,
+  onShowcase,
 }: HomeDashboardProps) {
   const [companies, setCompanies] = React.useState<CompanySummary[]>([]);
   const [analyses, setAnalyses] = React.useState<SheetAnalysis[]>([]);
@@ -132,6 +144,10 @@ export function HomeDashboard({
   const [benchmarkRuns, setBenchmarkRuns] = React.useState<BenchmarkRunMeta[]>([]);
   // Candidate-bucketing runs also live in IndexedDB.
   const [bucketingRuns, setBucketingRuns] = React.useState<BucketingRunMeta[]>([]);
+  // Academy bucketing runs also live in IndexedDB.
+  const [academyRuns, setAcademyRuns] = React.useState<AcRunMeta[]>([]);
+  // Sample profiles runs also live in IndexedDB.
+  const [showcaseRuns, setShowcaseRuns] = React.useState<SpRunMeta[]>([]);
   const [selectedId, setSelectedId] = React.useState<string | null>(null);
   const [openAnalysisId, setOpenAnalysisId] = React.useState<string | null>(null);
   const [openDsaId, setOpenDsaId] = React.useState<string | null>(null);
@@ -149,6 +165,8 @@ export function HomeDashboard({
     void listZgRuns().then(setZgRuns);
     void listBenchmarkRuns().then(setBenchmarkRuns);
     void listBucketingRuns().then(setBucketingRuns);
+    void listAcRuns().then(setAcademyRuns);
+    void listSpRuns().then(setShowcaseRuns);
   }, []);
 
   const remove = (id: string) => {
@@ -195,6 +213,20 @@ export function HomeDashboard({
       .catch((err) => console.warn("[dashboard] could not delete bucketing run:", err))
       .then(() => listBucketingRuns())
       .then(setBucketingRuns);
+  };
+
+  const removeAcademy = (id: string) => {
+    void deleteAcRun(id)
+      .catch((err) => console.warn("[dashboard] could not delete Academy bucketing run:", err))
+      .then(() => listAcRuns())
+      .then(setAcademyRuns);
+  };
+
+  const removeShowcase = (id: string) => {
+    void deleteSpRun(id)
+      .catch((err) => console.warn("[dashboard] could not delete Sample profiles run:", err))
+      .then(() => listSpRuns())
+      .then(setShowcaseRuns);
   };
 
   const removeExperience = (id: string) => {
@@ -261,7 +293,9 @@ export function HomeDashboard({
     qaRuns.length === 0 &&
     zgRuns.length === 0 &&
     benchmarkRuns.length === 0 &&
-    bucketingRuns.length === 0
+    bucketingRuns.length === 0 &&
+    academyRuns.length === 0 &&
+    showcaseRuns.length === 0
   ) {
     return (
       <EmptyState
@@ -286,8 +320,8 @@ export function HomeDashboard({
   }
 
   const counts: Record<DashTab, number> = {
-    companies: companies.length,
-    screenings: qaRuns.length + zgRuns.length + bucketingRuns.length,
+    companies: companies.length + showcaseRuns.length,
+    screenings: qaRuns.length + zgRuns.length + bucketingRuns.length + academyRuns.length,
     evaluations: assignmentRuns.length + experienceRuns.length + dsaRuns.length,
     analyses: analyses.length + benchmarkRuns.length,
   };
@@ -341,6 +375,20 @@ export function HomeDashboard({
                 <CompanyCard key={c.id} company={c} onDelete={() => remove(c.id)} onOpen={() => setSelectedId(c.id)} />
               ))}
             </RunGroup>
+
+            {/* Saved Sample profiles runs — click to reopen / continue / reload the sheet / download. */}
+            <RunGroup
+              icon={<Star />}
+              title="Sample profiles"
+              count={showcaseRuns.length}
+              newLabel="New sample profiles"
+              onNew={() => onShowcase()}
+              emptyText="No sample-profile runs saved yet."
+            >
+              {showcaseRuns.map((r) => (
+                <ShowcaseCard key={r.id} run={r} onDelete={() => removeShowcase(r.id)} onOpen={() => onShowcase(r.id)} />
+              ))}
+            </RunGroup>
           </>
         ) : null}
 
@@ -385,6 +433,20 @@ export function HomeDashboard({
             >
               {bucketingRuns.map((r) => (
                 <BucketingCard key={r.id} run={r} onDelete={() => removeBucketing(r.id)} onOpen={() => onBucketing(r.id)} />
+              ))}
+            </RunGroup>
+
+            {/* Saved Academy bucketing runs — click to reopen / resume / reload the sheets / export. */}
+            <RunGroup
+              icon={<GraduationCap />}
+              title="Academy bucketing"
+              count={academyRuns.length}
+              newLabel="New academy bucketing"
+              onNew={() => onAcademy()}
+              emptyText="No academy bucketing runs saved yet."
+            >
+              {academyRuns.map((r) => (
+                <AcademyCard key={r.id} run={r} onDelete={() => removeAcademy(r.id)} onOpen={() => onAcademy(r.id)} />
               ))}
             </RunGroup>
           </>
@@ -791,6 +853,70 @@ function BucketingCard({ run, onDelete, onOpen }: { run: BucketingRunMeta; onDel
             {inProgress ? <Badge>In progress</Badge> : null}
           </>
         ) : null
+      }
+    />
+  );
+}
+
+function AcademyCard({ run, onDelete, onOpen }: { run: AcRunMeta; onDelete: () => void; onOpen: () => void }) {
+  const s = run.stats;
+  const inProgress = s.toRead > 0;
+  const filled = AC_BUCKETS.filter((b) => s.byPlacement[b]);
+  return (
+    <RunCard
+      title={run.name}
+      meta={`${formatDate(run.updatedAt)} · ${run.sheetTitle || "sheet 1"} · sheets read ${formatDate(run.loadedAt)}`}
+      openHint={inProgress ? "Open to resume the run" : "Open the buckets"}
+      onOpen={onOpen}
+      deleteLabel="Delete Academy bucketing run"
+      onDelete={onDelete}
+      metrics={[
+        { label: "In scope", value: s.inScope },
+        { label: "Mixed", value: s.byPlacement.mixed, highlight: true },
+        { label: "Needs evidence", value: s.needsEvidence },
+      ]}
+      badges={
+        filled.length || s.errors || s.unreadable || inProgress ? (
+          <>
+            {filled.map((b) => (
+              <Badge key={b} variant="outline">
+                {AC_BUCKET_LABEL[b]} <span className="tabular-nums">{s.byPlacement[b]}</span>
+              </Badge>
+            ))}
+            {s.errors ? <Badge variant="destructive">{s.errors} re-run</Badge> : null}
+            {s.unreadable ? <Badge variant="warning">{s.unreadable} resumes unreadable</Badge> : null}
+            {inProgress ? <Badge>In progress</Badge> : null}
+          </>
+        ) : null
+      }
+    />
+  );
+}
+
+function ShowcaseCard({ run, onDelete, onOpen }: { run: SpRunMeta; onDelete: () => void; onOpen: () => void }) {
+  const s = run.stats;
+  const inProgress = (s.pending ?? 0) > 0;
+  return (
+    <RunCard
+      title={run.name}
+      meta={`${formatDate(run.updatedAt)} · ${run.sheetTitle || "sheet"} · ${plural(s.rows, "row", "rows")} · sheet read ${formatDate(run.loadedAt)}`}
+      openHint={inProgress ? "Open to continue the run" : "Open the sample profiles"}
+      onOpen={onOpen}
+      deleteLabel="Delete Sample profiles run"
+      onDelete={onDelete}
+      metrics={[
+        { label: "Showcase", value: s.showcase, highlight: true },
+        { label: "Strong", value: s.strong },
+        { label: "Roles", value: s.roles },
+      ]}
+      badges={
+        <>
+          <Badge variant="outline">
+            DSA bar cleared <span className="tabular-nums">{s.dsaPassed}</span>
+          </Badge>
+          {s.nearMiss ? <Badge variant="warning">{s.nearMiss} near misses</Badge> : null}
+          {inProgress ? <Badge>In progress · {s.pending} pending</Badge> : null}
+        </>
       }
     />
   );

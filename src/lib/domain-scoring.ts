@@ -27,6 +27,83 @@ export const GITHUB_INSPECT_CAP = 80;
 /** Candidates deep-inspected at once (each already reads 3 repos in parallel). */
 export const GITHUB_BATCH_SIZE = 3;
 
+// ── Which candidates' GitHub is deep-inspected ──────────────────────────────
+
+/**
+ * "fit": only candidates who clear the domain-fit bar (best first, capped at
+ * GITHUB_INSPECT_CAP) — the fast default. "all": every candidate with a GitHub
+ * link, domain-fit ones first, no cap — slower, and it finds candidates whose code
+ * proves the domain although their resume doesn't show it.
+ */
+export type GithubScope = "fit" | "all";
+
+/** About how many REST calls one deep inspection costs, and GitHub's hourly allowance per token. */
+export const GITHUB_CALLS_PER_CANDIDATE = 20;
+export const GITHUB_HOURLY_LIMIT = 5_000;
+/** Below this many calls left in the hour, inspection pauses until GitHub's reset instead of failing candidates. */
+export const GITHUB_BUDGET_FLOOR = 300;
+
+interface InspectionCandidate {
+  githubStatus: string;
+  domainScore: number;
+  githubProfile: string;
+  githubRepos: string[];
+}
+
+/**
+ * The inspection queue for a run: candidates with a GitHub link that haven't been
+ * inspected, domain-fit first (highest fit first), then — only with scope "all" —
+ * everyone else, highest fit first. With scope "fit" the queue is capped; the rest
+ * come back as `overCap`, and the below-bar candidates as `belowBar` (left out).
+ */
+export function planGithubInspection<T extends InspectionCandidate>(
+  candidates: T[],
+  scope: GithubScope,
+  alreadyInspected: number,
+): { pool: T[]; overCap: T[]; belowBar: T[] } {
+  const waiting = candidates.filter((c) => c.githubStatus === "not-inspected" && (c.githubProfile || c.githubRepos.length));
+  const byFit = (a: T, b: T) => b.domainScore - a.domainScore;
+  const fit = waiting.filter((c) => c.domainScore >= MIN_DOMAIN_SCORE).sort(byFit);
+  const below = waiting.filter((c) => c.domainScore < MIN_DOMAIN_SCORE).sort(byFit);
+  if (scope === "all") return { pool: [...fit, ...below], overCap: [], belowBar: [] };
+  const room = Math.max(0, GITHUB_INSPECT_CAP - alreadyInspected);
+  return { pool: fit.slice(0, room), overCap: fit.slice(room), belowBar: below };
+}
+
+/** Rough hours of GitHub budget an "all candidates" run needs (cache hits cost nothing). */
+export const githubHoursFor = (candidates: number) => (candidates * GITHUB_CALLS_PER_CANDIDATE) / GITHUB_HOURLY_LIMIT;
+
+// ── GitHub strength the resume doesn't show ─────────────────────────────────
+
+/** From this GitHub score a candidate's own code clearly proves the domain. */
+export const GITHUB_STRONG_SCORE = 60;
+
+interface GithubSignalCandidate {
+  githubStatus: string;
+  githubScore: number;
+  githubMatches: number;
+  githubTechs: string[];
+  domainScore: number;
+  /** The domain technologies the resume names (set on GitHub runs). */
+  resumeTechs?: string[];
+}
+
+/** Domain technologies the candidate's code proves but the resume never names. */
+export function githubTechsNotOnResume(c: GithubSignalCandidate): string[] {
+  if (c.githubStatus !== "checked" || !Array.isArray(c.resumeTechs)) return [];
+  const named = new Set(c.resumeTechs.map((t) => t.toLowerCase()));
+  return c.githubTechs.filter((t) => !named.has(t.toLowerCase()));
+}
+
+/**
+ * Strong domain code on GitHub while the resume stays below the domain-fit bar — the
+ * candidate did the work but didn't put it on the resume. A signal for a human look;
+ * it never changes the shortlist on its own.
+ */
+export function githubStrengthNotOnResume(c: GithubSignalCandidate): boolean {
+  return c.githubStatus === "checked" && c.githubScore >= GITHUB_STRONG_SCORE && c.githubMatches > 0 && c.domainScore < MIN_DOMAIN_SCORE;
+}
+
 /** The deep GitHub score (0-100) is worth at most this many points on the 0-100 merit score. */
 const GH_MAX_BONUS = 20;
 

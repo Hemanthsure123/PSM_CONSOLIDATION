@@ -1,14 +1,23 @@
 import {
+  ACHIEVEMENT_POINTS,
   DSA,
+  EXPERIENCE,
+  GITHUB_OPTIONAL,
+  INTERNAL,
   OVERALL_WEIGHTS,
+  PROJECTS,
   TRUST,
-  VALIDATION,
+  VERDICT_POINTS,
   type Bucket,
+  type Tr2Verdict,
 } from "@/lib/bucketing/config";
 import type {
   DsaPlatform,
   DsaPlatformKey,
+  ExtractedAchievement,
   ExtractedExperience,
+  InterviewRecord,
+  InternalParts,
   OssEvidence,
   ProjectEvidence,
   Scores,
@@ -16,13 +25,130 @@ import type {
 } from "@/lib/bucketing/types";
 
 /**
- * Candidate Bucketing — every number, computed deterministically from verified
- * evidence. Constants live in config.ts. Pure: safe on client and server.
+ * Candidate Bucketing — every number, computed deterministically from the
+ * internal assessments and verified evidence. Constants live in config.ts.
+ * Pure: safe on client and server.
+ *
+ * Priority (the user's order): internal assessments 40% · projects 30% ·
+ * experience 20% · achievements 10%. Ranking puts the TR-2 tier first anyway.
  */
 
 const clip01 = (n: number) => (n < 0 ? 0 : n > 1 ? 1 : n);
 export const clamp100 = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 const ratio = (v: number | null, cap: number) => (v === null || v <= 0 ? 0 : clip01(v / cap));
+
+// ── Internal assessments ─────────────────────────────────────────────────────
+
+/**
+ * 0-100 from the interview export: the best TR-2 verdict, the TR-1 technical
+ * score and the assessment score, weighted 50 / 30 / 20 and renormalised over the
+ * parts the candidate has. For the Data Analytics bucket, SQL scores join the
+ * assessment part.
+ */
+export function internalScore(
+  iv: InterviewRecord | null | undefined,
+  verdict: Tr2Verdict | null | undefined,
+  bucket: Bucket | null,
+): { score: number; parts: InternalParts } {
+  const parts: InternalParts = { tr2: null, tr1: null, assessment: null, sql: null };
+  if (verdict) parts.tr2 = VERDICT_POINTS[verdict];
+  if (iv) {
+    const t = iv.tr1;
+    if (t.overallTechnical !== null) parts.tr1 = clamp100((100 * t.overallTechnical) / INTERNAL.tr1Max);
+    else {
+      const ratings = [t.dsaOverall, t.problemSolving, t.coding, t.debugging].filter((v): v is number => v !== null);
+      if (ratings.length) parts.tr1 = clamp100((100 * ratings.reduce((a, b) => a + b, 0)) / ratings.length / INTERNAL.tr1RatingMax);
+      else if (iv.dsaInterview && (iv.dsaInterview.dsaScore !== null || iv.dsaInterview.csScore !== null)) {
+        // No AI-interview scores: the DSA interview's own scores stand for TR-1.
+        const d = iv.dsaInterview;
+        parts.tr1 = clamp100(100 * (0.75 * ratio(d.dsaScore, INTERNAL.dsaInterviewDsaMax) + 0.25 * ratio(d.csScore, INTERNAL.dsaInterviewCsMax)));
+      }
+    }
+    const a = iv.assessment;
+    if (a.offlineOverall !== null) parts.assessment = clamp100((100 * a.offlineOverall) / INTERNAL.assessmentMax);
+    else if (a.dsaCoding !== null || a.csFundamentals !== null) {
+      parts.assessment = clamp100(100 * (0.75 * ratio(a.dsaCoding, INTERNAL.dsaCodingMax) + 0.25 * ratio(a.csFundamentals, INTERNAL.csMax)));
+    }
+    if (a.sqlMcq !== null || a.sqlCoding !== null) {
+      const got = [a.sqlMcq, a.sqlCoding].filter((v): v is number => v !== null);
+      parts.sql = clamp100((100 * got.reduce((x, y) => x + y, 0)) / (got.length * INTERNAL.sqlMax));
+    }
+  }
+  let assessment = parts.assessment;
+  if (bucket === "DATA_ANALYTICS" && parts.sql !== null) {
+    assessment = assessment === null ? parts.sql : (1 - INTERNAL.sqlShareForAnalytics) * assessment + INTERNAL.sqlShareForAnalytics * parts.sql;
+  }
+  const w = INTERNAL.weights;
+  const live: [number, number][] = (
+    [
+      [parts.tr2, w.tr2],
+      [parts.tr1, w.tr1],
+      [assessment, w.assessment],
+    ] as [number | null, number][]
+  ).filter((x): x is [number, number] => x[0] !== null);
+  const total = live.reduce((s, [, wt]) => s + wt, 0);
+  return { score: total ? clamp100(live.reduce((s, [v, wt]) => s + v * wt, 0) / total) : 0, parts };
+}
+
+// ── Projects ─────────────────────────────────────────────────────────────────
+
+/**
+ * 0-100 for the projects behind the bucket: flagship strength 50%, verified
+ * evidence 30% (first verified project, further ones, live demos, a notebook on
+ * GitHub for ML / AI work), domain fit 20%. 0 when no project backs the bucket.
+ */
+export function projectsScore(
+  bucket: Bucket | null,
+  projects: ProjectEvidence[],
+  flagshipStrength: number,
+  domainScore: number,
+): number {
+  if (!bucket) return 0;
+  const backing = projects.filter((p) => p.valid && p.buckets.includes(bucket));
+  if (!backing.length) return 0;
+  const verified = backing.some((p) => p.tier === "A" || p.tier === "B");
+  let evidence = verified ? PROJECTS.firstVerified : PROJECTS.firstUnverified;
+  evidence += Math.min(PROJECTS.extraProjectMax, (backing.length - 1) * PROJECTS.extraProject);
+  evidence += Math.min(PROJECTS.demoMax, backing.filter((p) => p.demo?.status === "reachable").length * PROJECTS.demo);
+  if (GITHUB_OPTIONAL.has(bucket) && backing.some((p) => p.notebooks && (p.tier === "A" || p.tier === "B"))) evidence += PROJECTS.notebookOnGithub;
+  const w = PROJECTS.weights;
+  return clamp100(w.flagship * flagshipStrength + w.evidence * Math.min(100, evidence) + w.domain * domainScore);
+}
+
+// ── Experience ───────────────────────────────────────────────────────────────
+
+/**
+ * 0-100: an in-domain internship / job is worth most (plus its months and a
+ * second in-domain role); roles in other domains still show work experience.
+ */
+export function experienceScore(experience: ExtractedExperience[], inDomain: Set<string>): number {
+  const roles = experience.filter((e) => e.kind !== "other");
+  const own = roles.filter((e) => inDomain.has(e.id));
+  const E = EXPERIENCE;
+  if (own.length) {
+    const months = own.reduce((s, e) => s + (e.months ?? 0), 0);
+    return clamp100(E.inDomainFirst + Math.min(E.monthsMax, months * E.perMonth) + (own.length >= 2 ? E.secondInDomain : 0));
+  }
+  return clamp100(Math.min(E.otherRoleMax, roles.length * E.otherRole));
+}
+
+// ── Achievements ─────────────────────────────────────────────────────────────
+
+/** 0-100: hackathon wins, ranks, publications, awards, merged open-source PRs, and competitive-programming activity. */
+export function achievementsScore(achievements: ExtractedAchievement[], oss: OssEvidence[], dsa: number): number {
+  const P = ACHIEVEMENT_POINTS;
+  let pts = achievements.reduce((s, a) => s + (P[a.kind] ?? P.other), 0);
+  if (oss.some((o) => o.status === "verified")) pts += P.ossMerged;
+  pts += P.dsaShare * dsa;
+  return clamp100(pts);
+}
+
+// ── Overall ──────────────────────────────────────────────────────────────────
+
+export function overallScore(s: Pick<Scores, "internal" | "projects" | "experience" | "achievements">): number {
+  const w = OVERALL_WEIGHTS;
+  return clamp100(w.internal * s.internal + w.projects * s.projects + w.experience * s.experience + w.achievements * s.achievements);
+}
 
 // ── DSA ──────────────────────────────────────────────────────────────────────
 
@@ -57,41 +183,6 @@ export function dsaScore(platforms: Record<DsaPlatformKey, Pick<DsaPlatform, "sc
   const others = weighted.filter((w) => w.k !== best.k && w.active).length;
   if (best.v <= 0) return 0;
   return clamp100(100 * Math.min(1, best.v + DSA.breadthBonus * others));
-}
-
-// ── Validation ───────────────────────────────────────────────────────────────
-
-/**
- * How well verifiable evidence backs the resume (0-100). 0 unless the resume is
- * validated (≥ 1 Tier A/B project). `domainItems` = experience ids that count
- * as in-domain for the final bucket.
- */
-export function validationScore(
-  projects: ProjectEvidence[],
-  experience: ExtractedExperience[],
-  oss: OssEvidence[],
-  domainItems: Set<string>,
-): number {
-  const ab = projects.filter((p) => p.valid && (p.tier === "A" || p.tier === "B"));
-  if (ab.length === 0) return 0;
-  const demos = projects.filter((p) => p.valid && p.demo?.status === "reachable").length;
-  let score = VALIDATION.firstProject;
-  score += Math.min(VALIDATION.extraProjectMax, (ab.length - 1) * VALIDATION.extraProject);
-  score += Math.min(VALIDATION.demoMax, demos * VALIDATION.demo);
-
-  const roles = experience.filter((e) => e.kind !== "other");
-  if (roles.some((e) => domainItems.has(e.id))) score += VALIDATION.internship;
-  const months = roles.reduce((s, e) => s + (e.months ?? 0), 0);
-  if (roles.length >= 2 || months >= VALIDATION.internshipBonusMonths) score += VALIDATION.internshipBonus;
-  if (oss.some((o) => o.status === "verified")) score += VALIDATION.oss;
-  return clamp100(score);
-}
-
-// ── Overall ──────────────────────────────────────────────────────────────────
-
-export function overallScore(s: Omit<Scores, "overall">): number {
-  const w = OVERALL_WEIGHTS;
-  return clamp100(w.domain * s.domain + w.validation * s.validation + w.flagship * s.flagship + w.dsa * s.dsa);
 }
 
 // ── Trust ────────────────────────────────────────────────────────────────────
@@ -134,7 +225,10 @@ export function overallTrust(
   return { trust: clamp100(trust), applied };
 }
 
-/** Rank inside a bucket: stage tier first (TR-2 → TR-1 → Assessment), then overall score, then trust. */
+/**
+ * Rank inside a bucket: tier first (TR-2 strong → medium → low hire → TR-1 →
+ * Assessment), then overall score, then trust.
+ */
 export function compareForRanking(
   a: { priorityTier: number; scores: { overall: number }; trust: { trust: number | null } },
   b: { priorityTier: number; scores: { overall: number }; trust: { trust: number | null } },

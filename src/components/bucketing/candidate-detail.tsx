@@ -5,8 +5,8 @@ import { ExternalLink } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { InfoHint } from "@/components/ui/info-hint";
 import { SERIES } from "@/components/charts";
-import { BUCKET_LABEL, DOMAIN_LABEL, REASON_TEXT, type Bucket } from "@/lib/bucketing/config";
-import type { BucketingResult, DsaPlatform, Review } from "@/lib/bucketing/types";
+import { BUCKET_LABEL, DOMAIN_LABEL, OVERALL_WEIGHTS, REASON_TEXT, TRACK_LABEL, VERDICT_LABEL, isBucket, type Bucket, type Tr2Verdict } from "@/lib/bucketing/config";
+import type { BucketingCandidateInput, BucketingResult, DsaPlatform, InterviewRecord, Review } from "@/lib/bucketing/types";
 import { cn } from "@/lib/utils";
 
 /** Identity colour per bucket — a fixed slot each, never re-assigned by rank. */
@@ -15,21 +15,26 @@ export const BUCKET_COLOR: Record<Bucket, string> = {
   PYTHON_FS: SERIES[1],
   JAVA_FS: SERIES[2],
   GENAI: SERIES[3],
-  FRONTEND: SERIES[4],
+  DSML: SERIES[4],
+  DATA_ANALYTICS: SERIES[6],
 };
 
 /** A bucket's name with its colour mark (the mark carries identity, the text stays in ink). */
 export function BucketBadge({ bucket, className }: { bucket: Bucket; className?: string }) {
+  // A saved v1 result can still name a retired bucket (Frontend): show it plainly.
+  const known = isBucket(bucket);
   return (
     <Badge variant="outline" className={className}>
-      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: BUCKET_COLOR[bucket] }} aria-hidden />
-      {BUCKET_LABEL[bucket]}
+      <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: known ? BUCKET_COLOR[bucket] : "currentColor" }} aria-hidden />
+      {known ? BUCKET_LABEL[bucket] : String(bucket)}
     </Badge>
   );
 }
 
+const pct = (w: number) => `${Math.round(w * 100)}%`;
+
 /** Everything behind one candidate's decision — evidence, audits, reviews and the agent trace. */
-export function CandidateDetail({ r }: { r: BucketingResult }) {
+export function CandidateDetail({ r, candidate }: { r: BucketingResult; candidate?: BucketingCandidateInput }) {
   const t = r.trust;
   const scored = r.domains.filter((d) => d.score > 0);
   return (
@@ -41,6 +46,11 @@ export function CandidateDetail({ r }: { r: BucketingResult }) {
           <p className="text-xs text-muted-foreground tabular-nums">
             {r.mobile} · {r.stageLabel}
           </p>
+          {candidate?.college || candidate?.email || candidate?.externalId ? (
+            <p className="truncate text-xs text-muted-foreground" title={candidate.college}>
+              {[candidate.college, candidate.email, candidate.externalId ? `ID ${candidate.externalId}` : ""].filter(Boolean).join(" · ")}
+            </p>
+          ) : null}
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {r.bucket ? (
@@ -59,7 +69,22 @@ export function CandidateDetail({ r }: { r: BucketingResult }) {
           )}
           {t.needsReview ? <Badge variant="warning">Needs review</Badge> : null}
         </div>
+        {r.bucket ? (
+          <p className="w-full text-xs text-muted-foreground">
+            {/* TRACK_MISMATCH / INTERVIEW_ONLY already say how the bucket was set. */}
+            {r.flags.some((c) => c === "TRACK_MISMATCH" || c === "INTERVIEW_ONLY")
+              ? null
+              : r.placedBy === "tr2-track"
+                ? "Placed by the TR-2 interview track, and the resume backs it. "
+                : r.placedBy === "evidence"
+                  ? "Placed by verified resume evidence (projects / in-domain experience). "
+                  : null}
+            {r.flags.length ? <span className="text-warning">{r.flags.map((c) => REASON_TEXT[c]).join(" · ")}</span> : null}
+          </p>
+        ) : null}
       </div>
+
+      <InterviewSection r={r} />
 
       {r.remarks.length ? (
         <Section title="Remarks">
@@ -93,15 +118,25 @@ export function CandidateDetail({ r }: { r: BucketingResult }) {
         </Section>
         <Section
           title="Scores"
-          info="Overall = 40% bucket domain + 25% validation + 20% flagship + 15% DSA."
+          info={
+            <>
+              Overall = {pct(OVERALL_WEIGHTS.internal)} internal assessments + {pct(OVERALL_WEIGHTS.projects)} projects + {pct(OVERALL_WEIGHTS.experience)}{" "}
+              experience + {pct(OVERALL_WEIGHTS.achievements)} achievements. Ranking puts the TR-2 strong, medium and low hire tiers first, then TR-1,
+              then Assessment, and uses the overall score inside a tier.
+            </>
+          }
         >
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-5">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-1 sm:grid-cols-3">
             <Def label="Overall" value={String(r.scores.overall)} strong />
-            <Def label="Domain (40%)" value={String(r.scores.domain)} />
-            <Def label="Validation (25%)" value={String(r.scores.validation)} />
-            <Def label="Flagship (20%)" value={String(r.scores.flagship)} />
-            <Def label="DSA (15%)" value={String(r.scores.dsa)} />
+            <Def label={`Internal (${pct(OVERALL_WEIGHTS.internal)})`} value={String(r.scores.internal)} />
+            <Def label={`Projects (${pct(OVERALL_WEIGHTS.projects)})`} value={String(r.scores.projects)} />
+            <Def label={`Experience (${pct(OVERALL_WEIGHTS.experience)})`} value={String(r.scores.experience)} />
+            <Def label={`Achievements (${pct(OVERALL_WEIGHTS.achievements)})`} value={String(r.scores.achievements)} />
           </dl>
+          <p className="mt-2 text-xs text-muted-foreground tabular-nums">
+            Internal parts: TR-2 {fmt(r.internalParts.tr2)} · TR-1 {fmt(r.internalParts.tr1)} · Assessment {fmt(r.internalParts.assessment)} · SQL{" "}
+            {fmt(r.internalParts.sql)} — flagship strength {r.scores.flagship} · bucket domain {r.scores.domain} · DSA {r.scores.dsa}
+          </p>
           {r.reasonCodes.length ? (
             <p className="mt-2 text-xs text-destructive">{r.reasonCodes.map((c) => REASON_TEXT[c]).join(" · ")}</p>
           ) : null}
@@ -235,6 +270,20 @@ export function CandidateDetail({ r }: { r: BucketingResult }) {
               ))}
             </div>
           ) : null}
+          <div className="mt-3">
+            <p className="font-medium">Achievements</p>
+            {r.achievements?.length ? (
+              <ul className="space-y-0.5 text-xs">
+                {r.achievements.map((a) => (
+                  <li key={a.id}>
+                    {a.title} <span className="text-muted-foreground">({a.kind})</span>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <span className="text-xs text-muted-foreground">None on the resume.</span>
+            )}
+          </div>
         </Section>
         <Section title={`DSA · score ${r.dsa.score}`} info="Platforms weigh in this order: Codeforces, then CodeChef, then LeetCode.">
           <table className="w-full text-xs">
@@ -324,12 +373,138 @@ function Ext({ href, label }: { href: string; label?: string }) {
   );
 }
 
+const TIER_TITLE: Record<string, string> = {
+  A: "Verified GitHub + live demo",
+  B: "Verified GitHub",
+  C: "Demo only — counts with an in-domain internship / job",
+  R: "ML / AI project described on the resume — GitHub optional for DS / ML and GenAI",
+  D: "No link — not evidence",
+};
+
 export function TierBadge({ tier, valid }: { tier: string; valid: boolean }) {
-  if (!valid) return <Badge variant="outline" className="whitespace-nowrap">Tier {tier}</Badge>;
+  if (!valid) {
+    return (
+      <Badge variant="outline" className="whitespace-nowrap" title={TIER_TITLE[tier]}>
+        Tier {tier}
+      </Badge>
+    );
+  }
   return (
-    <Badge variant={tier === "A" || tier === "B" ? "success" : "secondary"} className="whitespace-nowrap">
+    <Badge variant={tier === "A" || tier === "B" ? "success" : "secondary"} className="whitespace-nowrap" title={TIER_TITLE[tier]}>
       Tier {tier}
     </Badge>
+  );
+}
+
+const VERDICT_VARIANT: Record<Tr2Verdict, "success" | "default" | "secondary"> = { STRONG_HIRE: "success", MEDIUM_HIRE: "default", LOW_HIRE: "secondary" };
+
+/** The internal assessments — the strongest signal, shown first. */
+function InterviewSection({ r }: { r: BucketingResult }) {
+  const iv: InterviewRecord | null = r.interview;
+  if (!iv) {
+    return (
+      <Section title="Internal assessments">
+        <span className="text-muted-foreground">No interview scores in the sheet — stage only: {r.stageLabel}.</span>
+      </Section>
+    );
+  }
+  const t = iv.tr1;
+  const a = iv.assessment;
+  const d = iv.dsaInterview;
+  const anyTr1 = Boolean(t.status) || [t.selfIntro, t.dsaOverall, t.problemSolving, t.coding, t.communication, t.debugging, t.overallTechnical].some((v) => v !== null);
+  const pending = iv.tr2Pending ?? [];
+  const drive = [
+    iv.currentStage ? `Current stage: ${iv.currentStage.replace(/_/g, " ")}` : "",
+    iv.interviewPath ? `${iv.interviewPath} interview path` : "",
+  ].filter(Boolean);
+  return (
+    <Section
+      title="Internal assessments"
+      info="From the interview export. TR-2 hire verdicts set the priority tier, and a hire in a track places the candidate in that track's bucket."
+    >
+      {iv.journey?.status === "closed" ? (
+        <p className="mb-3 rounded-md bg-warning-soft px-3 py-2 text-xs text-warning">
+          Journey closed{iv.journey.reason ? ` — ${iv.journey.reason.replace(/_/g, " ")}` : ""}
+          {iv.journey.notes ? `: ${iv.journey.notes}` : ""}
+        </p>
+      ) : null}
+      {drive.length ? <p className="mb-2 text-xs text-muted-foreground">{drive.join(" · ")}</p> : null}
+      <div className="grid gap-4 lg:grid-cols-3">
+        <div className="min-w-0">
+          <p className="text-xs font-medium text-muted-foreground">TR-2</p>
+          <div className="mt-1 flex flex-wrap gap-1.5">
+            {iv.tr2.map((x) => (
+              <Badge key={x.track} variant={VERDICT_VARIANT[x.verdict]}>
+                {TRACK_LABEL[x.track]} · {VERDICT_LABEL[x.verdict]}
+              </Badge>
+            ))}
+            {iv.combined ? <Badge variant={VERDICT_VARIANT[iv.combined]}>Combined interview · {VERDICT_LABEL[iv.combined]}</Badge> : null}
+            {iv.combinedRejected ? (
+              <Badge variant="outline" className="font-normal">
+                Combined interview · Rejected
+              </Badge>
+            ) : null}
+            {iv.combinedState === "pending" ? (
+              <Badge variant="outline" className="font-normal text-muted-foreground">
+                Combined interview · Pending
+              </Badge>
+            ) : null}
+            {iv.tr2Rejected.map((x) => (
+              <Badge key={x} variant="outline" className="font-normal">
+                {TRACK_LABEL[x]} · Rejected
+              </Badge>
+            ))}
+            {pending.map((x) => (
+              <Badge key={x} variant="outline" className="font-normal text-muted-foreground">
+                {TRACK_LABEL[x]} · Assigned
+              </Badge>
+            ))}
+            {!iv.tr2.length && !iv.combined && !iv.combinedRejected && iv.combinedState !== "pending" && !iv.tr2Rejected.length && !pending.length ? (
+              <span className="text-muted-foreground">Not taken</span>
+            ) : null}
+          </div>
+        </div>
+        <div className="min-w-0">
+          <p className="text-xs font-medium text-muted-foreground">
+            TR-1{t.status ? ` · ${t.status}` : d?.qualifying ? ` · ${d.qualifying === "shortlisted" ? "cleared" : "not cleared"}` : ""}
+          </p>
+          {d && (d.qualifying || d.dsaScore !== null || d.csScore !== null) ? (
+            <p className="mt-0.5 text-xs text-muted-foreground tabular-nums">
+              {[
+                `DSA interview: ${d.qualifying || "taken"}`,
+                d.dsaScore !== null ? `DSA ${d.dsaScore}/120` : "",
+                d.csScore !== null ? `CS ${d.csScore}/40` : "",
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            </p>
+          ) : null}
+          {anyTr1 ? (
+            <dl className="mt-1 grid grid-cols-3 gap-x-3 gap-y-1">
+              <Def label="Technical /100" value={fmt(t.overallTechnical)} strong />
+              <Def label="DSA /10" value={fmt(t.dsaOverall)} />
+              <Def label="Problem solving" value={fmt(t.problemSolving)} />
+              <Def label="Coding" value={fmt(t.coding)} />
+              <Def label="Debugging" value={fmt(t.debugging)} />
+              <Def label="Communication" value={fmt(t.communication)} />
+              <Def label="Self intro" value={fmt(t.selfIntro)} />
+            </dl>
+          ) : d?.qualifying ? null : (
+            <span className="text-muted-foreground">Not taken</span>
+          )}
+        </div>
+        <div className="min-w-0">
+          <p className="text-xs font-medium text-muted-foreground">Assessment</p>
+          <dl className="mt-1 grid grid-cols-3 gap-x-3 gap-y-1">
+            <Def label="Overall /160" value={fmt(a.offlineOverall)} strong />
+            <Def label="DSA coding /120" value={fmt(a.dsaCoding)} />
+            <Def label="CS /40" value={fmt(a.csFundamentals)} />
+            <Def label="SQL MCQ /15" value={fmt(a.sqlMcq)} />
+            <Def label="SQL coding /15" value={fmt(a.sqlCoding)} />
+          </dl>
+        </div>
+      </div>
+    </Section>
   );
 }
 

@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import { END, START, StateGraph } from "@langchain/langgraph";
-import { BUCKETING_PROMPT_VERSION, TIMEOUTS } from "@/lib/bucketing/config";
+import { BUCKETING_PROMPT_VERSION, TIMEOUTS, stageLabel } from "@/lib/bucketing/config";
 import { BucketingState, type State, type Update } from "@/lib/bucketing/state";
 import { ingestNode } from "@/lib/bucketing/nodes/ingest";
 import { domainAnalystNode } from "@/lib/bucketing/nodes/domain-analyst";
@@ -12,7 +12,7 @@ import { bucketVerifierNode, routeAfterBucketReview } from "@/lib/bucketing/node
 import { dsaCollectorNode, dsaVerifierNode } from "@/lib/bucketing/nodes/dsa";
 import { stageArbiterNode } from "@/lib/bucketing/nodes/stage-arbiter";
 import { finalVerifierNode, routeAfterFinalReview } from "@/lib/bucketing/nodes/final-verifier";
-import { emptyDsa, type BucketingCandidateInput, type BucketingResult } from "@/lib/bucketing/types";
+import { EMPTY_INTERNAL, EMPTY_SCORES, emptyDsa, journeyClosed, tierOf, type BucketingCandidateInput, type BucketingResult } from "@/lib/bucketing/types";
 
 /**
  * Candidate Bucketing — the LangGraph.js workflow for ONE candidate.
@@ -106,6 +106,7 @@ const bucketReview = new StateGraph(BucketingState)
         eligible: [],
         noBucketReason: "",
         tierCBacked: false,
+        roleOnly: [],
         model: "",
         attempt: (s.attempts.bucketing_agent ?? 0) + 1,
         error: e,
@@ -176,6 +177,7 @@ export const bucketingGraph = new StateGraph(BucketingState)
       eligible: [],
       noBucketReason: "",
       tierCBacked: false,
+      roleOnly: [],
       model: "",
       attempt: 1,
       error: e,
@@ -185,13 +187,15 @@ export const bucketingGraph = new StateGraph(BucketingState)
     final: {
       status: "retry_needed",
       bucket: null,
-      stageLabel: "",
-      priorityTier: 3,
+      stageLabel: stageLabel(s.input.stage, s.input.track, s.input.verdict ?? null),
+      priorityTier: tierOf(s.input),
       validated: false,
+      placedBy: "",
+      internalParts: EMPTY_INTERNAL,
       reasonCodes: ["PIPELINE_ERROR"],
       flags: [],
       flagshipId: "",
-      scores: { overall: 0, validation: 0, domain: 0, flagship: 0, dsa: 0 },
+      scores: EMPTY_SCORES,
       remarks: [`Stage arbiter failed: ${e}`],
       trackBacked: null,
       attempt: (s.attempts.stage_arbiter ?? 0) + 1,
@@ -210,7 +214,8 @@ export const bucketingGraph = new StateGraph(BucketingState)
       model: "",
     },
   })))
-  .addEdge(START, "ingest")
+  // A closed journey skips every evidence step (nothing to read, no model or GitHub calls).
+  .addConditionalEdges(START, (s: State) => (journeyClosed(s.input) ? "stage_arbiter" : "ingest"), ["ingest", "stage_arbiter"])
   .addConditionalEdges("ingest", (s: State) => (s.resume?.status === "ok" ? [...PARALLEL] : "stage_arbiter"), [...PARALLEL, "stage_arbiter"])
   .addEdge(["domain_review", "project_evidence"], "bucket_review")
   .addEdge(["bucket_review", "dsa_review"], "stage_arbiter")
@@ -222,7 +227,19 @@ export const bucketingGraph = new StateGraph(BucketingState)
 
 /** Everything a result depends on — same hash, same inputs, same prompts. */
 export function inputHash(c: BucketingCandidateInput): string {
-  const parts = [c.resumeUrl, c.resumeText ?? "", c.stage, c.track ?? "", c.githubUrl ?? "", c.leetcodeUrl ?? "", c.codechefUrl ?? "", c.codeforcesUrl ?? "", BUCKETING_PROMPT_VERSION];
+  const parts = [
+    c.resumeUrl,
+    c.resumeText ?? "",
+    c.stage,
+    c.track ?? "",
+    c.verdict ?? "",
+    c.interview ? JSON.stringify(c.interview) : "",
+    c.githubUrl ?? "",
+    c.leetcodeUrl ?? "",
+    c.codechefUrl ?? "",
+    c.codeforcesUrl ?? "",
+    BUCKETING_PROMPT_VERSION,
+  ];
   return createHash("sha1").update(parts.join("\u0000")).digest("hex").slice(0, 16);
 }
 
@@ -261,15 +278,19 @@ export function toResult(s: State, durationMs: number): BucketingResult {
     batch: c.batch,
     stage: c.stage,
     track: c.track,
-    stageLabel: f?.stageLabel ?? "",
-    priorityTier: f?.priorityTier ?? 3,
+    verdict: c.verdict ?? null,
+    stageLabel: f?.stageLabel || stageLabel(c.stage, c.track, c.verdict ?? null),
+    priorityTier: f?.priorityTier ?? tierOf(c),
     status: f?.status ?? "retry_needed",
+    placedBy: f?.placedBy ?? "",
+    interview: c.interview ?? null,
+    internalParts: f?.internalParts ?? EMPTY_INTERNAL,
     bucket: f?.bucket ?? null,
     validated: f?.validated ?? false,
     reasonCodes: f?.reasonCodes ?? ["PIPELINE_ERROR"],
     flags: f?.flags ?? [],
     remarks: f?.remarks ?? [],
-    scores: f?.scores ?? { overall: 0, validation: 0, domain: 0, flagship: 0, dsa: 0 },
+    scores: f?.scores ?? EMPTY_SCORES,
     trust: review,
     primaryDomain: primary ? { domain: primary.domain, score: primary.score } : null,
     domains,
@@ -281,16 +302,27 @@ export function toResult(s: State, durationMs: number): BucketingResult {
             tier: flagshipE.tier,
             github: flagshipE.repos.map((r) => r.url),
             demo: flagshipE.demo?.status === "reachable" ? flagshipE.demo.url : "",
-            techs: flagshipE.repos.flatMap((r) => r.techs.map((t) => t.label)).filter((v, i, a) => a.indexOf(v) === i),
+            // Code-proven techs; a demo-only or resume-described project has only its claimed tech.
+            techs: flagshipE.repos.length
+              ? flagshipE.repos.flatMap((r) => r.techs.map((t) => t.label)).filter((v, i, a) => a.indexOf(v) === i)
+              : flagshipP.claimedTech,
             strength: f?.scores.flagship ?? 0,
           }
         : null,
     projects: (x?.projects ?? []).map((p) => ({ ...p, evidence: evidence.get(p.id) ?? null })),
     experience: x?.experience ?? [],
     openSource: (x?.openSource ?? []).map((o) => ({ ...o, evidence: (pe?.oss ?? []).filter((e) => e.claimId === o.id) })),
+    achievements: x?.achievements ?? [],
     dsa: s.dsa ?? emptyDsa(),
     reviews: { domain: s.domainReview, bucket: s.bucketReview, dsa: s.dsaReview },
-    resume: s.resume ?? { status: "error", source: "", transcribed: false, chars: 0, note: "not read", model: "" },
+    resume: s.resume ?? {
+      status: journeyClosed(c) ? "unreadable" : "error",
+      source: "",
+      transcribed: false,
+      chars: 0,
+      note: journeyClosed(c) ? "Not read — the candidate's journey is closed" : "not read",
+      model: "",
+    },
     githubUser: pe?.githubUser ?? "",
     documentUrls: x?.urls ?? [],
     extractionDropped: x?.dropped ?? [],

@@ -18,10 +18,12 @@ Each tool sits in the sidebar, grouped by the job it does in a placement drive.
 | — | **Dashboard** | — | Companies, saved runs of every tool, source analytics | — |
 | Company sheets | **Build company sheet** | Internal Google Sheet (+ optional BigQuery columns) | `<Company> \|\| Nxtwave` CSV with AI screening-report PDF links, skill set and remarks | localStorage |
 | | **Analyze company sheet** | A company's Google Sheet | Source split (Edge / Academy / External) and interview-round funnels | localStorage |
+| | **Sample profiles** | One Google Sheet of resumes (thousands of rows) | The strongest candidates per tech role, from the resume, the candidate's own GitHub code and DSA profiles only, to show a company's hiring manager; a company workbook (Candidate IDs, no contact details) and an internal workbook | IndexedDB |
 | Screening | **Domain shortlisting** | Google Sheet of candidates + a domain brief | Ranked shortlist backed by resume, GitHub code and DSA profiles; PDF report + CSVs | — (report on Drive) |
 | | **QA screening** | Pasted rows (mobile + resume) | Ranked QA shortlist with per-section skill evidence; CSVs | IndexedDB |
 | | **Zaggle SDE 1** | Pasted rows | JD-based screening for one client role (Zaggle SDE 1 Backend); CSVs | IndexedDB |
 | | **Candidate bucketing** | Pasted rows / sheet CSV with stage | Candidates sorted into 5 buckets with tags and a trust score; CSVs | IndexedDB |
+| | **Academy bucketing** | Three Google Sheets (assessed pool, competency interviews, old process) | Eligible Active Pool candidates bucketed into Frontend / Backend / AI-ML / Full Stack / Mixed for mentor assignment, with a trust agent and a temporary Full Stack → Backend rebalance; Excel workbook + CSVs | IndexedDB |
 | Evaluation | **Assignment evaluation** | Assignment document + candidates' repo links | Rubric built from the assignment, every repo reviewed, ranked; CSV | localStorage |
 | | **Experience analysis** | Google Sheet | Internships / jobs per candidate: company, role, months, stack; CSV | localStorage |
 | | **DSA consolidation** | Google Sheet | LeetCode / Codeforces / CodeChef solved, contests, rating; CSV | localStorage |
@@ -33,6 +35,8 @@ Feature deep-dives live in [`docs/`](./docs):
 - [`github-inspection.md`](./docs/github-inspection.md)
 - [`zaggle-sde1-screening.md`](./docs/zaggle-sde1-screening.md)
 - [`candidate-bucketing.md`](./docs/candidate-bucketing.md)
+- [`academy-bucketing.md`](./docs/academy-bucketing.md)
+- [`sample-profiles.md`](./docs/sample-profiles.md)
 - [`design-system.md`](./docs/design-system.md)
 
 ---
@@ -44,7 +48,7 @@ flowchart LR
   subgraph Browser["Browser (React client components)"]
     UI["App shell + tool screens<br/>src/components"]
     Q["Parallel job queue<br/>lib/parallel-queue.ts"]
-    SC["Deterministic scoring, ranking, CSV<br/>qa-scoring · zaggle/scoring · assignment-scoring<br/>bucketing/scoring · dsa-scoring · domain-scoring"]
+    SC["Deterministic scoring, ranking, CSV<br/>qa-scoring · zaggle/scoring · assignment-scoring<br/>bucketing/scoring · academy/scoring · dsa-scoring · domain-scoring"]
     ST[("localStorage + IndexedDB<br/>*-store.ts")]
     UI --> Q
     UI --> SC
@@ -56,7 +60,7 @@ flowchart LR
     SA["Server actions — sheets, BigQuery, reports, batches<br/>src/actions"]
     subgraph Core["Server libraries — src/lib"]
       RI["Resume ingestion<br/>resume · resume-content · pdf-text · docx-text · OCR"]
-      EV["Evaluators<br/>domain-screen · qa · zaggle · experience · benchmark · bucketing graph · assignment"]
+      EV["Evaluators<br/>domain-screen · qa · zaggle · academy · experience · benchmark · bucketing graph · assignment"]
       LLM["LLM layer<br/>gemini-keys · key-pool · llm-router · llm-escalation"]
       EVD["Evidence collectors<br/>github-analysis · github-repo · repo-dossier · ai-detection<br/>coding-stats · dsa-resolve · resume-links"]
       RP["Reports<br/>*-template.ts → pdf.ts (Puppeteer) → report-storage"]
@@ -114,8 +118,11 @@ are kept for single calls: reading sheets, BigQuery, building PDF reports and ge
 |---|---|
 | `POST /api/domain/analyze` | Domain shortlisting: screen one resume (model judgement + mandatory guard + DSA read + GitHub links) |
 | `POST /api/domain/github` | Domain shortlisting: deep-inspect one candidate's GitHub (24 h cache) |
+| `POST /api/domain/autofill` | Domain shortlisting: draft "What defines it" + "Mandatory skills" from a JD (text, PDF, .docx, HTML or image) for review |
 | `POST /api/qa/evaluate` | QA screening: evidence per QA item and resume section |
 | `POST /api/zaggle/evaluate` | Zaggle SDE 1: work history, dates and evidence per JD item |
+| `POST /api/academy/evaluate` | Academy bucketing: one candidate's resume items by stack, GitHub code (24 h cache), coding profiles, identity check and trust review |
+| `POST /api/showcase/{screen,dsa,probe,read,verify,trust}` | Sample profiles, one stage per call: resume links (no model) · DSA for the bar (Codeforces batched) · GitHub account probe · resume read · GitHub proof of flagship projects · trust review |
 | `POST /api/experience/analyze` | Experience analysis: every internship / job in one resume |
 | `POST /api/assignment/evaluate` | Assignment evaluation: download a repo, build its dossier, review it against the rubric |
 | `POST /api/benchmarks/profile` | Benchmark projects: turn the typed domain into a domain profile (once per run) |
@@ -181,6 +188,8 @@ Default chains (each can be overridden with the env variable shown):
 |---|---|---|
 | Domain shortlisting | Gemini flash models → OpenAI (`OPENAI_MODEL`, reasoning off) → Mistral | `DOMAIN_LLM_CHAIN` |
 | Zaggle SDE 1 | Gemini → OpenAI → Mistral | `ZAGGLE_LLM_CHAIN` |
+| Academy bucketing | Gemini → OpenAI → Mistral; the trust agent leads with a different model | `ACADEMY_LLM_CHAIN`, `ACADEMY_TRUST_CHAIN` |
+| Sample profiles | Gemini → OpenAI → Mistral; the trust agent leads with a different model | `SHOWCASE_LLM_CHAIN`, `SHOWCASE_TRUST_CHAIN` |
 | QA screening | Gemini → Mistral | `QA_LLM_CHAIN` |
 | Experience analysis | Gemini → Mistral | `EXPERIENCE_LLM_CHAIN` |
 | Benchmark projects | Gemini → Mistral | `BENCHMARK_LLM_CHAIN` |
@@ -241,9 +250,9 @@ The CSV's "Scored By" column records which model judged each candidate.
 | Where | What | Why |
 |---|---|---|
 | localStorage | Companies, sheet analyses, DSA runs, assignment runs, experience runs (`company-store`, `analysis-store`, `dsa-store`, `assignment-store`, `experience-store`) | Small runs; dependency-free |
-| IndexedDB | QA, Zaggle, Candidate bucketing and Benchmark runs (`qa-store`, `zaggle/store`, `bucketing-store`, `benchmark-store`) | Thousands of candidates; one record per candidate, written on arrival |
+| IndexedDB | QA, Zaggle, Candidate bucketing, Academy bucketing, Sample profiles and Benchmark runs (`qa-store`, `zaggle/store`, `bucketing-store`, `academy/store`, `showcase/store`, `benchmark-store`) | Thousands of candidates; one record per candidate, written on arrival |
 | Google Drive | PDF reports | Shareable links for companies |
-| `.cache/github-inspect/` | GitHub inspection results (24 h) | Re-runs cost no GitHub quota |
+| `.cache/github-inspect/` | GitHub inspection results, Academy bucketing's and Sample profiles' resume readings and trust reviews, DSA profiles, GitHub probes and repo proofs (24 h) | Re-runs cost no GitHub or model quota |
 
 Saved runs live in the browser profile that created them. Clearing site data or using another browser
 starts empty.
@@ -270,15 +279,16 @@ src/
   app/
     layout.tsx, page.tsx, globals.css    # shell entry, fonts, design tokens
     api/                                 # route handlers — one candidate per request
-      domain/{analyze,github}  qa/evaluate  zaggle/evaluate  experience/analyze
+      domain/{analyze,github}  qa/evaluate  zaggle/evaluate  academy/evaluate  experience/analyze
+      showcase/{screen,dsa,probe,read,verify,trust}
       assignment/evaluate  benchmarks/{profile,extract}  bucketing/{evaluate,github}
   actions/                               # server actions (single calls)
-    sheets.ts bigquery.ts report.ts domain.ts projects.ts dsa.ts assignment.ts llm.ts
+    sheets.ts bigquery.ts report.ts domain.ts projects.ts dsa.ts assignment.ts llm.ts academy.ts
   components/
     app-shell.tsx  busy-context.tsx  home-dashboard.tsx  company-detail.tsx  charts.tsx
     ui/                                  # design-system primitives
     wizard/                              # Build company sheet (5 steps)
-    sheet-analyzer/  domain-shortlist/  qa-screening/  zaggle/  bucketing/
+    sheet-analyzer/  domain-shortlist/  qa-screening/  zaggle/  bucketing/  academy/  showcase/
     assignment-eval/  experience-analysis/  dsa-consolidation/
     projects-consolidation/  project-benchmarks/
   lib/
@@ -292,6 +302,9 @@ src/
     domain-screen.ts domain-scoring.ts domain-report-template.ts
     qa-*.ts  experience-*.ts  assignment-*.ts  benchmark-*.ts   # per-feature types / parse / evaluate / score / csv / store
     zaggle/  bucketing/ (+ bucketing/nodes/)  bucketing-store.ts
+    academy/                             # Academy bucketing: parse · scoring · evaluator · trust-agent · export · xlsx · store
+    showcase/                            # Sample profiles: parse · roles · dsa-rules · screen · dsa · github-probe · reader · verify · trust · scoring · pipeline · export · store
+    trust-review.ts dsa-cache.ts resume-folder.ts                # shared: trust agent core, 24 h DSA cache, Drive folder links
     company-sheet.ts company-store.ts analysis-store.ts columns.ts source-track.ts
     report-template.ts projects-template.ts pdf.ts report-storage.ts
     types.ts utils.ts
@@ -337,8 +350,12 @@ Offline checks (no network, no model calls) for the deterministic parts:
 ```bash
 npx tsx scripts/github-inspection-selftest.ts   # tech catalogue, evidence, gaps, claims, 24 h cache (mock GitHub)
 npx tsx scripts/dsa-domain-selftest.ts          # DSA score, gates, ranking, report card
+npx tsx scripts/domain-autofill-selftest.ts     # JD autofill: limits, grounding of must-haves, injection filter, file reading
+npx tsx scripts/domain-github-scope-selftest.ts # GitHub for domain-fit vs all candidates: queue order, cap, "strong on GitHub, not on resume"
 npx tsx scripts/zaggle-selftest.ts              # dates, overlap counting, IT-services list, scoring
 npx tsx scripts/bucketing-selftest.ts           # bucket rules, commit integrity, scoring, stage arbiter
+npx tsx scripts/academy-selftest.ts             # sheet reading / joins, eligibility, stack rules, Mixed rule, ranking, .xlsx
+npx tsx scripts/showcase-selftest.ts            # DSA bar and owners, roles, course caps, GitHub proof, gates, tiers, plan, both workbooks
 ```
 
 `scripts/bucketing-run.ts` runs the bucketing workflow for real candidates from the command line.

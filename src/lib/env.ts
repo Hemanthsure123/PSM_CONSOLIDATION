@@ -220,6 +220,33 @@ export const env = {
       return optional("ZAGGLE_LLM_CHAIN", "");
     },
   },
+  academy: {
+    /**
+     * Chain for Academy bucketing's resume reading, "provider:model,…".
+     * Empty = the built-in default in academy/evaluator.ts (Gemini → OpenAI → Mistral).
+     */
+    get llmChain() {
+      return optional("ACADEMY_LLM_CHAIN", "");
+    },
+    /** Chain for Academy bucketing's trust agent — should lead with a different model than the reader. */
+    get trustChain() {
+      return optional("ACADEMY_TRUST_CHAIN", "");
+    },
+  },
+  showcase: {
+    /** Chain for Sample profiles' resume reading, "provider:model,…". Empty = the default in showcase/reader.ts. */
+    get llmChain() {
+      return optional("SHOWCASE_LLM_CHAIN", "");
+    },
+    /** Chain for Sample profiles' trust agent — should lead with a different model than the reader. */
+    get trustChain() {
+      return optional("SHOWCASE_TRUST_CHAIN", "");
+    },
+    /** Salt for the Candidate IDs shown to companies (keep it private; changing it changes every ID). */
+    get idSalt() {
+      return optional("SHOWCASE_ID_SALT", "");
+    },
+  },
   benchmarks: {
     /**
      * Chain for Benchmark Projects, "provider:model,…".
