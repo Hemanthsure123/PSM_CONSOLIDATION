@@ -325,6 +325,9 @@ The other routes are listed in the README.
 
 ### 7.1 Where to run it
 
+**Today:** a Docker web service on Render (free plan, Singapore), built from `main` with the repository's
+`Dockerfile`. The operating guide is [`deployment.md`](./deployment.md).
+
 The app needs a **long-running Node.js server**:
 
 - Puppeteer starts Chromium for PDF reports.

@@ -34,6 +34,7 @@ Each tool sits in the sidebar, grouped by the job it does in a placement drive.
 
 Feature deep-dives live in [`docs/`](./docs):
 - [`architecture.md`](./docs/architecture.md) — system architecture, the eligible-pool database, sync, security and deployment
+- [`deployment.md`](./docs/deployment.md) — the production deployment on Render: sign-in, health / readiness, calling it from agents, keep-alive
 - [`standing-lookup.md`](./docs/standing-lookup.md) — internal standing for pasted UUIDs / phone numbers, and the Requirements column
 - [`domain-shortlisting-results.md`](./docs/domain-shortlisting-results.md) — the results CSVs, Signals, and the evidence / GitHub-identity trust rules
 - [`domain-shortlisting-dsa.md`](./docs/domain-shortlisting-dsa.md)
@@ -422,6 +423,10 @@ are read lazily (`src/lib/env.ts`), so a missing optional key only matters when 
 ---
 
 ## Deployment notes
+
+**Production:** https://psm-placements.onrender.com (Render, Docker, sign-in required). How it is
+deployed, the health and readiness endpoints, how scripts and agents should call it, and what keeps
+it working long-term are in [`docs/deployment.md`](./docs/deployment.md).
 
 The full picture — database design, sync, security, sign-in, migrations, backups and scaling — is in
 [`docs/architecture.md`](./docs/architecture.md).
