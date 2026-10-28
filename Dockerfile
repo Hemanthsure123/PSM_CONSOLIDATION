@@ -19,7 +19,9 @@ RUN npm ci --no-audit --no-fund
 FROM base AS build
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN npm run build \
+# public/ may not exist in git (it only holds runtime PDFs locally), so make sure it's there.
+RUN mkdir -p public \
+ && npm run build \
  && npm prune --omit=dev --no-audit --no-fund \
  && rm -rf .next/cache
 
