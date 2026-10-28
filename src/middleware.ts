@@ -10,12 +10,14 @@ import { NextResponse, type NextRequest } from "next/server";
  * Deployment Protection, Cloudflare Access, an SSO proxy) is the stronger option and
  * can replace this; see docs/architecture.md.
  *
- * One route is always open: /api/health (liveness — "is the app up, which build"), so the
- * host's health check and an agent waiting for a sleeping instance can poll it. It returns
- * no candidate data. Everything else, /api/status included, needs the sign-in.
+ * Open without this sign-in: /api/health (liveness — "is the app up, which build"), so the
+ * host's health check and an agent waiting for a sleeping instance can poll it; it returns no
+ * candidate data. And /api/automation/*, which checks its own Bearer token (AUTOMATION_TOKEN —
+ * the sheet's Apps Script uses it). Everything else, /api/status included, needs the sign-in.
  */
 
 const PUBLIC_PATHS = new Set(["/api/health"]);
+const OWN_AUTH_PREFIX = "/api/automation/";
 
 function safeEqual(a: string, b: string): boolean {
   let diff = a.length ^ b.length;
@@ -25,7 +27,8 @@ function safeEqual(a: string, b: string): boolean {
 
 export function middleware(req: NextRequest) {
   const expected = process.env.APP_BASIC_AUTH?.trim();
-  if (!expected || PUBLIC_PATHS.has(req.nextUrl.pathname)) return NextResponse.next();
+  const path = req.nextUrl.pathname;
+  if (!expected || PUBLIC_PATHS.has(path) || path.startsWith(OWN_AUTH_PREFIX)) return NextResponse.next();
   const header = req.headers.get("authorization") ?? "";
   if (header.startsWith("Basic ")) {
     let given = "";

@@ -17,6 +17,7 @@ Each tool sits in the sidebar, grouped by the job it does in a placement drive.
 |---|---|---|---|---|
 | — | **Dashboard** | — | Companies, saved runs of every tool, source analytics; the eligible pool's numbers and a "Refetch eligible pool" button | — |
 | — | **Eligible pool** | The Edge 2.0, Edge 1.0 and Academy pool sheets (or CSV exports) | Who is internally assessed and eligible at each stage, per product, and how that ranks them in Domain shortlisting; refetch and CSV upload | Postgres |
+| — | **Sheet automation** | `start` in a row of the coordination sheet (Screening Instructions + Trigger columns) | The whole Domain shortlisting run with no one opening the app: planned from the instructions, screened, GitHub / DSA / internal assessments, validated, delivered to `psm_final_shortlisted_<date>` in the row's Internal Sheets spreadsheet; status written back to the row | Postgres |
 | — | **Standing lookup** | Pasted UUIDs / phone numbers | Internal Standing, Stage and Product per candidate from the internal assessments (no resume), plus one Requirements column with the assessment results you pick; copy for Sheets in the pasted order, or CSV | — |
 | Company sheets | **Build company sheet** | Internal Google Sheet (+ optional BigQuery columns) | `<Company> \|\| Nxtwave` CSV with AI screening-report PDF links, skill set and remarks | localStorage |
 | | **Analyze company sheet** | A company's Google Sheet | Source split (Edge / Academy / External) and interview-round funnels | localStorage |
@@ -35,6 +36,7 @@ Each tool sits in the sidebar, grouped by the job it does in a placement drive.
 Feature deep-dives live in [`docs/`](./docs):
 - [`architecture.md`](./docs/architecture.md) — system architecture, the eligible-pool database, sync, security and deployment
 - [`deployment.md`](./docs/deployment.md) — the production deployment on Render: sign-in, health / readiness, calling it from agents, keep-alive
+- [`automation.md`](./docs/automation.md) — the sheet-triggered shortlisting: what to put in the sheet, setup, statuses, how it stays reliable
 - [`standing-lookup.md`](./docs/standing-lookup.md) — internal standing for pasted UUIDs / phone numbers, and the Requirements column
 - [`domain-shortlisting-results.md`](./docs/domain-shortlisting-results.md) — the results CSVs, Signals, and the evidence / GitHub-identity trust rules
 - [`domain-shortlisting-dsa.md`](./docs/domain-shortlisting-dsa.md)
@@ -130,6 +132,8 @@ are kept for single calls: reading sheets, BigQuery, building PDF reports and ge
 | `POST /api/pool/sync` | Eligible pool: refetch one product from its Google Sheet |
 | `POST /api/pool/upload` | Eligible pool: upsert a CSV export of a product's sheet |
 | `POST /api/pool/lookup` | Eligible pool: internal standings for a batch of people (phone first, then user id); `include` adds each product's assessment records (Standing lookup) |
+| `POST /api/automation/jobs` | Sheet automation: queue the shortlisting for one control row (Bearer `AUTOMATION_TOKEN`; idempotent per request id) |
+| `GET /api/automation/jobs[/<id>]` | Sheet automation: recent jobs, or one job's status, progress, result and event log |
 | `GET /api/health` | Liveness, open without sign-in: `{status, version, uptimeSec}`; `?db=1` adds a cached database ping |
 | `GET /api/status` | Readiness (signed in): database and pool freshness, which integrations are configured (counts only), `?pdf=1` renders a test PDF |
 | `POST /api/qa/evaluate` | QA screening: evidence per QA item and resume section |
@@ -382,6 +386,8 @@ npx tsx scripts/academy-selftest.ts             # sheet reading / joins, eligibi
 npx tsx scripts/showcase-selftest.ts            # DSA bar and owners, roles, course caps, GitHub proof, gates, tiers, plan, both workbooks
 npx tsx scripts/pool-selftest.ts                # eligible pool: sheets → records, standing rules, CSV detection, matching, shortlist priority, gates, review grounding
 npx tsx scripts/standing-lookup-selftest.ts     # standing lookup: reading the paste, requirements, rows / columns, clipboard formats
+npx tsx scripts/automation-selftest.ts          # sheet automation: instructions, tab matching, columns, review flags / verdict, delivery rules, status text
+npx tsx scripts/apps-script-selftest.ts         # the sheet's Apps Script against a simulated sheet: setup, start detection, duplicates, wake / retry, sweep
 npx tsx scripts/resume-sections-selftest.ts     # domain evidence: Skills / Summary sections removed, mandatory checked on evidence only
 npx tsx scripts/domain-csv-selftest.ts          # domain score grounding + caps, GitHub identity, rank order / tie-breaks, Signals, CSV columns
 ```
@@ -408,6 +414,7 @@ are read lazily (`src/lib/env.ts`), so a missing optional key only matters when 
 | Database | `DATABASE_URL` (transaction pooler, 6543), `DIRECT_URL` (session pooler, 5432) | The eligible pool. Without them the app works and every candidate counts as external |
 | Eligible pool sources | `POOL_EDGE2_SHEET` / `_TAB`, `POOL_EDGE1_…`, `POOL_ACADEMY_…` | Optional; only if a pool sheet moves |
 | Sign-in | `APP_BASIC_AUTH` (`user:password`) | Set it on any deployment that has no host-level sign-in |
+| Sheet automation | `AUTOMATION_TOKEN`, `AUTOMATION_WORKER=on`, `AUTOMATION_SPREADSHEET_IDS`, `AUTOMATION_CONTROL_TABS`, `AUTOMATION_CONCURRENCY` | On the deployment only; see [`docs/automation.md`](./docs/automation.md) |
 
 ### Google setup
 

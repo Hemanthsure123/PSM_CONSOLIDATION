@@ -146,6 +146,7 @@ erDiagram
 | `sync_runs` | sync | Product, sheet or CSV, status, counts (read / new / updated / unchanged / skipped), the first 200 row issues, error, who triggered it |
 | `schema_migrations` | applied migration | Version, checksum, time |
 | `candidate_standing` (materialized view) | person | Best standing across products, plus every product's standing as JSON |
+| `automation.jobs` / `job_requests` / `job_events` / `job_candidates` | sheet-automation run / trigger / event / candidate | Durable jobs with a lease and a step checkpoint, idempotent triggers, the event log, per-candidate checkpoints (migration 003; [`automation.md`](./automation.md)) |
 
 **Derived standing** is computed by the tested rules in `src/lib/pool/standing.ts` when a record is
 written. It has four columns: `tier` (1 = TR-2 cleared or top level, 2 = TR-1 cleared, 3 = assessment
@@ -315,6 +316,8 @@ so.
 | `/api/pool/sync` | POST `{product}` | Refetch one product from its sheet |
 | `/api/pool/upload` | POST multipart `file`, `product` | Upsert a CSV export (`auto` detects the product) |
 | `/api/pool/lookup` | POST `{people:[{phone,userId}], include?}` | Standings for up to 20,000 people (phone first, then user id); `include: ["edge2","edge1","academy"]` adds those products' records per candidate id (Standing lookup) |
+| `/api/automation/jobs` | POST / GET | Sheet automation: queue a control row's run (Bearer `AUTOMATION_TOKEN`), list recent jobs |
+| `/api/automation/jobs/<id>` | GET | One job: status, step, progress, result, `?events=1` for its log |
 | `/api/health` | GET | Liveness, the only route open without sign-in; `?db=1` adds a `select 1` shared for 30 s |
 | `/api/status` | GET | Readiness behind sign-in: database, pool refetch times, configured integrations (counts / yes-no), `?pdf=1` test render |
 | `/api/domain/review` | POST | Deep review of one candidate's top domain repos |
@@ -368,6 +371,7 @@ These matter for deployment:
 | `DATABASE_URL` | Transaction pooler (6543) for the app |
 | `DIRECT_URL` | Session pooler (5432) for migrations |
 | `APP_BASIC_AUTH` | Built-in sign-in, if no host-level sign-in is used |
+| `AUTOMATION_TOKEN`, `AUTOMATION_WORKER=on`, `AUTOMATION_SPREADSHEET_IDS` | The sheet automation's API secret, its background worker, and the sheets allowed to start jobs |
 | `POOL_EDGE2_SHEET` / `_TAB` (and `EDGE1`, `ACADEMY`) | Only if a pool sheet moves |
 | `GITHUB_CACHE_DIR` | A persistent volume path if the host's disk is ephemeral (otherwise the cache just starts empty after a deploy) |
 | Google service account, model keys, `GITHUB_TOKEN` | As for local runs |

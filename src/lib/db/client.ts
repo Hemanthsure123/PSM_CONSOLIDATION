@@ -12,7 +12,8 @@ import { env } from "@/lib/env";
  *  - queries are never named (pg then never prepares them);
  *  - multi-statement work goes through `transaction()` (BEGIN … COMMIT on one connection);
  *  - no session-level SET / advisory locks / LISTEN here — migrations use DIRECT_URL.
- * TLS is required by Supabase; the certificate isn't pinned to Supabase's CA.
+ * TLS is required by Supabase; the certificate isn't pinned to Supabase's CA. A URL with
+ * sslmode=disable (a local test database) connects without TLS.
  */
 
 const g = globalThis as unknown as { __placementPool?: Pool };
@@ -31,7 +32,7 @@ function pool(): Pool {
   if (!g.__placementPool) {
     const p = new Pool({
       connectionString: env.database.url,
-      ssl: { rejectUnauthorized: false },
+      ssl: /[?&]sslmode=disable/.test(env.database.url) ? false : { rejectUnauthorized: false },
       max: 5,
       idleTimeoutMillis: 20_000,
       connectionTimeoutMillis: 15_000,

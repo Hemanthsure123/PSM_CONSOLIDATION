@@ -32,7 +32,7 @@ async function main() {
   const files = readdirSync(DIR)
     .filter((f) => /^\d{3}_[a-z0-9_]+\.sql$/.test(f))
     .sort();
-  const client = new Client({ connectionString: url, ssl: { rejectUnauthorized: false }, connectionTimeoutMillis: 15_000 });
+  const client = new Client({ connectionString: url, ssl: /[?&]sslmode=disable/.test(url) ? false : { rejectUnauthorized: false }, connectionTimeoutMillis: 15_000 });
   await client.connect();
   try {
     await client.query("select pg_advisory_lock($1)", [LOCK_KEY]);

@@ -4,6 +4,8 @@ const nextConfig = {
   // packages. Keeping them external prevents Next from trying to bundle them
   // into the server build (which breaks Chromium resolution and bloats output).
   experimental: {
+    // instrumentation.ts: starts the sheet automation's background worker when the server boots.
+    instrumentationHook: true,
     serverComponentsExternalPackages: [
       "puppeteer",
       "puppeteer-core",

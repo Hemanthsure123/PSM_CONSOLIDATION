@@ -63,6 +63,7 @@ Long screenings are driven from the browser in small parallel requests, and each
 The values are set in Render → the service → Environment, copied from `.env.local`. Render doesn't receive `DIRECT_URL` (migrations only) or the Render API key.
 
 - **Changing a key.** Edit it in Render, then redeploy (or use "Save, rebuild and deploy").
+- **Sheet automation.** `AUTOMATION_TOKEN`, `AUTOMATION_WORKER=on` and `AUTOMATION_SPREADSHEET_IDS` turn it on. The token is also in the coordination sheet's Apps Script properties ([`automation.md`](./automation.md)).
 - **Changing the sign-in.** Edit `APP_BASIC_AUTH` (`user:password`, a long random password) in Render, then update `RENDER_APP_BASIC_AUTH` in `.env.local`.
 
 ## Keeping it working for a year or more

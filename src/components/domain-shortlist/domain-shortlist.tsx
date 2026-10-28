@@ -87,6 +87,7 @@ import { checkGithubForDomain, buildDomainReport } from "@/actions/domain";
 import { runQueue } from "@/lib/parallel-queue";
 import { BRIEF_MAX, MANDATORY_MAX } from "@/lib/domain-autofill-rules";
 import { JdAutofill } from "@/components/domain-shortlist/jd-autofill";
+import { detectDomainColumns, type DomainColumnKey } from "@/lib/domain-columns";
 import type { GithubInspectResult } from "@/lib/domain-screen";
 import type {
   DomainCandidate,
@@ -247,20 +248,7 @@ interface DomainShortlistProps {
 }
 
 /** The mappable sheet columns. Only name + resume are required. */
-type ColKey =
-  | "idColumn"
-  | "phoneColumn"
-  | "nameColumn"
-  | "resumeColumn"
-  | "assessmentColumn"
-  | "tr1PanelColumn"
-  | "tr1LinkedinColumn"
-  | "tr1RecordingColumn"
-  | "tr2PanelColumn"
-  | "tr2LinkedinColumn"
-  | "tr2RecordingColumn"
-  | "placedColumn"
-  | "ctcColumn";
+type ColKey = DomainColumnKey;
 
 interface SubConfig {
   name: string;
@@ -492,31 +480,9 @@ const reviewLine = (c: DomainCandidate): string => {
   return best ? `${best.repo}: ${best.summary}` : "";
 };
 
-const rx = (headers: string[], re: RegExp, not?: RegExp): string =>
-  headers.find((h) => re.test(h) && !(not?.test(h) ?? false)) ?? "";
-
+/** A tab's columns, pre-filled from its headers (domain-columns.ts — the sheet automation uses the same guesses). */
 function detectSub(name: string, headers: string[], rowCount: number): SubConfig {
-  return {
-    name,
-    headers,
-    rowCount,
-    selected: false,
-    cols: {
-      idColumn: rx(headers, /uuid|user\s*id|\bid\b/i),
-      phoneColumn: rx(headers, /phone|mobile|contact\s*(no|num)|whatsapp|^\s*number\s*$/i, /alternate|\balt\b|parent|father|mother|guardian|emergency|secondary/i),
-      nameColumn: rx(headers, /name/i, /company|panel|college|project|user|panelist/i),
-      resumeColumn: rx(headers, /resume|cv|biodata/i),
-      assessmentColumn: rx(headers, /assess?ment/i),
-      tr1PanelColumn: rx(headers, /(tr[\s._-]*1|round[\s._-]*1).*(panel|interviewer)/i, /linked|recording|link|video/i),
-      tr1LinkedinColumn: rx(headers, /(tr[\s._-]*1|round[\s._-]*1).*linked/i),
-      tr1RecordingColumn: rx(headers, /(tr[\s._-]*1|round[\s._-]*1).*(record|video|link)/i, /linked|panel/i),
-      tr2PanelColumn: rx(headers, /(tr[\s._-]*2|round[\s._-]*2).*(panel|interviewer)/i, /linked|recording|link|video/i),
-      tr2LinkedinColumn: rx(headers, /(tr[\s._-]*2|round[\s._-]*2).*linked/i),
-      tr2RecordingColumn: rx(headers, /(tr[\s._-]*2|round[\s._-]*2).*(record|video|link)/i, /linked|panel/i),
-      placedColumn: rx(headers, /placed|placement|offer|company/i, /ctc|package|panel/i),
-      ctcColumn: rx(headers, /ctc|package|salary|lpa|\bpay\b|stipend/i),
-    },
-  };
+  return { name, headers, rowCount, selected: false, cols: detectDomainColumns(headers) };
 }
 
 /**

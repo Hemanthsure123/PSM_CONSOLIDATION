@@ -9,7 +9,7 @@ import { env } from "@/lib/env";
  *
  * Lazy + cached on `globalThis` (see bigquery.ts for the rationale).
  */
-const globalForSheets = globalThis as unknown as { sheets?: sheets_v4.Sheets };
+const globalForSheets = globalThis as unknown as { sheets?: sheets_v4.Sheets; sheetsWriter?: sheets_v4.Sheets };
 
 export function getSheets(): sheets_v4.Sheets {
   if (!globalForSheets.sheets) {
@@ -24,6 +24,23 @@ export function getSheets(): sheets_v4.Sheets {
     globalForSheets.sheets = google.sheets({ version: "v4", auth });
   }
   return globalForSheets.sheets;
+}
+
+/**
+ * A Sheets client that can WRITE — only the sheet automation uses it (status cells on the
+ * control row, the psm_final_shortlisted_<date> tab). Everything else reads through the
+ * read-only client above. The spreadsheet must give the service account edit access.
+ */
+export function getSheetsWriter(): sheets_v4.Sheets {
+  if (!globalForSheets.sheetsWriter) {
+    const auth = new google.auth.JWT({
+      email: env.gcp.clientEmail,
+      key: env.gcp.privateKey,
+      scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+    });
+    globalForSheets.sheetsWriter = google.sheets({ version: "v4", auth });
+  }
+  return globalForSheets.sheetsWriter;
 }
 
 /**
