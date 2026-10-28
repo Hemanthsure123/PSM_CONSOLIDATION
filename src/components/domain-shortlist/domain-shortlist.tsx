@@ -4,6 +4,7 @@ import * as React from "react";
 import {
   BarChart3,
   Briefcase,
+  FileSearch,
   CalendarClock,
   CheckCircle2,
   ChevronDown,
@@ -49,6 +50,7 @@ import { useReportBusy } from "@/components/busy-context";
 import { cn, toCsv, slugify, formatDay } from "@/lib/utils";
 import {
   MIN_DOMAIN_SCORE,
+  ASSESSED_MIN_DOMAIN_SCORE,
   GITHUB_INSPECT_CAP,
   DEFAULT_MIN_PRESENTATION,
   GITHUB_BUDGET_FLOOR,
@@ -57,28 +59,42 @@ import {
   githubStrengthNotOnResume,
   githubTechsNotOnResume,
   planGithubInspection,
+  priorityGroup,
+  shortlistBar,
+  combinedScore,
+  comparePriority,
+  gateFailure,
+  PROJECT_REVIEW_CAP,
+  PROJECT_REVIEW_PARALLEL,
   type GithubScope,
 } from "@/lib/domain-scoring";
+import { lookupPoolStandings } from "@/lib/pool/client";
+import { isAssessed, standingFor } from "@/lib/pool/match";
+import { PRODUCT_LABEL, STAGE_SHORT, type InternalStanding } from "@/lib/pool/types";
 import { NO_DSA_GATES, bestRating, dsaGatesActive, ratingsLine, type DsaGates } from "@/lib/dsa-scoring";
-import { DSA_PLATFORMS, type DsaPlatform, type DsaPlatformResult } from "@/lib/dsa-types";
+import { DSA_PLATFORMS, type DsaPlatform } from "@/lib/dsa-types";
+import {
+  BELOW_BAR_NOTE,
+  STOPPED_NOTE,
+  domainCsv,
+  evidenceLines,
+  gapLines,
+  githubCheckLabel,
+  stamp,
+} from "@/lib/domain-csv";
 import { listSubsheets, readSubsheet } from "@/actions/sheets";
 import { checkGithubForDomain, buildDomainReport } from "@/actions/domain";
 import { runQueue } from "@/lib/parallel-queue";
 import { BRIEF_MAX, MANDATORY_MAX } from "@/lib/domain-autofill-rules";
 import { JdAutofill } from "@/components/domain-shortlist/jd-autofill";
 import type { GithubInspectResult } from "@/lib/domain-screen";
-import type { DomainCandidate, DomainCandidateRow, DomainGithubGap, DomainGithubStatus, DomainReportResult } from "@/lib/types";
-
-/** CSV / tooltip wording for each GitHub inspection outcome. */
-const GITHUB_STATUS_LABEL: Record<DomainGithubStatus, string> = {
-  off: "Not run",
-  "no-link": "No GitHub link in resume",
-  "not-inspected": "Not inspected",
-  checked: "Checked",
-  "no-repos": "No public repos with code",
-  "not-found": "GitHub user not found",
-  failed: "Check failed",
-};
+import type {
+  DomainCandidate,
+  DomainCandidateRow,
+  DomainGithubStatus,
+  DomainProjectReviewResult,
+  DomainReportResult,
+} from "@/lib/types";
 
 /** Table-cell wording for a candidate whose GitHub wasn't scored. */
 const GITHUB_STATUS_SHORT: Record<DomainGithubStatus, string> = {
@@ -145,41 +161,44 @@ function GithubRunSummary({
   );
 }
 
-/** Why a mandatory technology isn't proven, in words. */
-const GAP_REASON: Record<DomainGithubGap["reason"], string> = {
-  none: "no evidence in the inspected repos",
-  "readme-only": "only named in a README / topics",
-  weak: "weak evidence",
-};
-
-/** "PyTorch: import torch in src/train.py (chest-xray)" — one per proven technology. */
-const evidenceLines = (c: DomainCandidate): string[] =>
-  (c.githubEvidence ?? []).map((e) => `${e.tech}: ${e.detail}${e.repo ? ` (${e.repo})` : ""}`);
-
-/** "Kafka — no evidence in the inspected repos" — one per mandatory technology the code doesn't prove. */
-const gapLines = (c: DomainCandidate): string[] =>
-  (c.githubMandatoryGaps ?? []).map((g) => `${g.tech} — ${GAP_REASON[g.reason]}${g.reason === "weak" && g.detail ? `: ${g.detail}` : ""}`);
-
-/** "2026-10-18 14:05" (local time) of an ISO stamp, "" when there is none. */
-function stamp(iso: string | undefined): string {
-  const d = iso ? new Date(iso) : null;
-  if (!d || Number.isNaN(d.getTime())) return "";
-  const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
-/** "Not inspected (below domain-fit bar)" etc. — the status with the reason when GitHub wasn't read. */
-function githubCheckLabel(c: DomainCandidate): string {
-  if (c.githubStatus !== "not-inspected") return GITHUB_STATUS_LABEL[c.githubStatus];
-  if (c.githubNote.startsWith(BELOW_BAR_NOTE)) return "Not inspected (below domain-fit bar)";
-  if (c.githubNote.startsWith("Beyond")) return `Not inspected (beyond the top-${GITHUB_INSPECT_CAP} cap)`;
-  if (c.githubNote.startsWith(STOPPED_NOTE)) return "Not inspected (run stopped)";
-  return "Not inspected";
+/** How the run matched candidates to the eligible pool — or why it couldn't. */
+function PoolMatchNotice({ info }: { info: PoolInfo }) {
+  if (info.state === "unmapped") {
+    return (
+      <Notice tone="warning" title="Internal assessments weren't used">
+        Map the phone number (or user id) column to rank internally assessed candidates first. Everyone was ranked as external.
+      </Notice>
+    );
+  }
+  if (info.state === "off") {
+    return <Notice tone="info">The eligible pool isn&apos;t set up (no database), so everyone was ranked as external.</Notice>;
+  }
+  if (info.state === "unavailable") {
+    return (
+      <Notice tone="warning" title="The eligible pool couldn't be reached">
+        {info.error ? `${info.error} ` : ""}Everyone was ranked as external — run again once the database is back.
+      </Notice>
+    );
+  }
+  return (
+    <Notice tone="info" title={`${info.assessed} of ${info.rows} candidates are internally assessed`}>
+      {info.assessed ? (
+        <>
+          {info.byTier[1]} TR-2 / top level · {info.byTier[2]} TR-1 · {info.byTier[3]} assessment cleared. They&apos;re ranked first: a domain fit of{" "}
+          {MIN_DOMAIN_SCORE}+ is priority 1, {ASSESSED_MIN_DOMAIN_SCORE}–{MIN_DOMAIN_SCORE - 1} priority 2; external candidates with {MIN_DOMAIN_SCORE}+ follow
+          as priority 3. Matched by phone {info.byPhone}, by user id {info.byUserId}.
+        </>
+      ) : (
+        "None of this sheet's candidates is in the eligible pool, so everyone was ranked on the resume alone."
+      )}
+    </Notice>
+  );
 }
 
 /** Hover detail for the GitHub cell: proven tech and its proof, gaps, claims, best repos, notes. */
 function githubTooltip(c: DomainCandidate): string {
   const lines = [githubCheckLabel(c)];
+  if (c.githubIdentity === "mismatch") lines.push(`The account belongs to “${c.githubAccountName}” — not this candidate's name, so it isn't counted in the rank.`);
   if (githubStrengthNotOnResume(c)) lines.push("Strong domain code on GitHub that the resume doesn't show (resume below the domain-fit bar).");
   if (c.githubTechs.length) lines.push(`Proven in code: ${c.githubTechs.join(", ")}`);
   const unclaimed = githubTechsNotOnResume(c);
@@ -195,16 +214,6 @@ function githubTooltip(c: DomainCandidate): string {
   if (c.githubNote) lines.push(c.githubNote);
   if (c.githubCheckedAt) lines.push(`Checked ${stamp(c.githubCheckedAt)}${c.githubFromCache ? " (reused from the 24 h cache)" : ""}`);
   return lines.join("\n");
-}
-
-/** A DSA stat for the CSV, worded like the DSA consolidation export ("" = no profile linked). */
-function dsaStatText(p: DsaPlatformResult, field: "solved" | "contests" | "rating"): string {
-  if (!p.url) return "";
-  if (p.found === false) return "Profile not found";
-  const value = p[field];
-  if (typeof value === "number") return String(value);
-  if (field === "rating" && p.found === true && p.contests !== null && p.contests !== undefined) return "Unrated";
-  return "N/A";
 }
 
 /** Hover text for the DSA cell: every platform's solved / contests / rating. */
@@ -240,6 +249,7 @@ interface DomainShortlistProps {
 /** The mappable sheet columns. Only name + resume are required. */
 type ColKey =
   | "idColumn"
+  | "phoneColumn"
   | "nameColumn"
   | "resumeColumn"
   | "assessmentColumn"
@@ -260,10 +270,12 @@ interface SubConfig {
   cols: Record<ColKey, string>;
 }
 
-const COL_FIELDS: { key: ColKey; label: string; required?: boolean }[] = [
+/** "match" columns find the candidate in the eligible pool (internal assessments): phone first, then user id. */
+const COL_FIELDS: { key: ColKey; label: string; required?: boolean; match?: boolean }[] = [
   { key: "nameColumn", label: "Candidate name", required: true },
   { key: "resumeColumn", label: "Resume link", required: true },
-  { key: "idColumn", label: "UUID / ID" },
+  { key: "phoneColumn", label: "Phone number", match: true },
+  { key: "idColumn", label: "User ID / UUID", match: true },
   { key: "assessmentColumn", label: "Assessment report" },
   { key: "tr1PanelColumn", label: "TR-1 panelist" },
   { key: "tr1LinkedinColumn", label: "TR-1 panelist LinkedIn" },
@@ -289,8 +301,6 @@ const DEFAULT_CONCURRENCY = 8;
 const GITHUB_PARALLEL = 6;
 /** How often the GitHub budget is re-checked during inspection. */
 const GITHUB_BUDGET_CHECK_MS = 60_000;
-const BELOW_BAR_NOTE = "Below the domain-fit bar";
-const STOPPED_NOTE = "Not reached";
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 /** A resume that failed for a passing reason (rate limit, overloaded model, network) is retried this often. */
 const SCREEN_RETRIES = 2;
@@ -335,6 +345,8 @@ interface RunConfig {
   githubRefresh: boolean;
   /** Whose GitHub is deep-inspected: domain-fit candidates only, or everyone with a link. */
   githubScope: GithubScope;
+  /** Read the strongest candidates' top domain repos file by file and judge the project against the requirements. */
+  reviewProjects: boolean;
 }
 
 /** Screen one row through /api/domain/analyze. Never throws. */
@@ -398,7 +410,7 @@ async function postGithub(c: DomainCandidate, cfg: RunConfig): Promise<GithubIns
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        input: { id: c.id, githubProfile: c.githubProfile, githubRepos: c.githubRepos, claimedTechs: c.resumeTechs ?? [] },
+        input: { id: c.id, githubProfile: c.githubProfile, githubRepos: c.githubRepos, claimedTechs: c.resumeTechs ?? [], name: c.name },
         domain: cfg.scoringBrief,
         mandatory: cfg.mandatory,
         refresh: cfg.githubRefresh,
@@ -411,6 +423,75 @@ async function postGithub(c: DomainCandidate, cfg: RunConfig): Promise<GithubIns
   }
 }
 
+/** How a run matched its candidates to the eligible pool. */
+interface PoolInfo {
+  /** matched = looked up; unmapped = no phone / user id column; unavailable = lookup failed; off = no database. */
+  state: "matched" | "unmapped" | "unavailable" | "off";
+  error: string;
+  rows: number;
+  assessed: number;
+  byTier: Record<1 | 2 | 3, number>;
+  byPhone: number;
+  byUserId: number;
+}
+
+function describePool(
+  rows: DomainCandidateRow[],
+  standings: Map<DomainCandidateRow, InternalStanding | null>,
+  state: PoolInfo["state"],
+  error: string,
+): PoolInfo {
+  const info: PoolInfo = { state, error, rows: rows.length, assessed: 0, byTier: { 1: 0, 2: 0, 3: 0 }, byPhone: 0, byUserId: 0 };
+  for (const r of rows) {
+    const st = standings.get(r);
+    if (!isAssessed(st)) continue;
+    info.assessed += 1;
+    info.byTier[st.tier as 1 | 2 | 3] += 1;
+    if (st.matchedBy === "phone") info.byPhone += 1;
+    else info.byUserId += 1;
+  }
+  return info;
+}
+
+/** Review one candidate's top domain repos through /api/domain/review. Never throws. */
+async function postReview(c: DomainCandidate, cfg: RunConfig): Promise<DomainProjectReviewResult> {
+  const failed = (note: string): DomainProjectReviewResult => ({
+    id: c.id,
+    status: "failed",
+    note,
+    score: 0,
+    reviews: [],
+    reviewedAt: "",
+    fromCache: false,
+    retryable: true,
+  });
+  try {
+    const res = await fetch("/api/domain/review", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        input: { id: c.id, repos: c.githubTopRepos.map((r) => ({ url: r.url, name: r.name, matchPct: r.matchPct, techs: r.techs })) },
+        domain: cfg.scoringBrief,
+        mandatory: cfg.mandatory,
+        refresh: cfg.githubRefresh,
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as { result?: DomainProjectReviewResult; error?: string };
+    return data.result ?? failed(data.error || `Server returned HTTP ${res.status}`);
+  } catch (err) {
+    return failed(`${NETWORK_PREFIX}: ${err instanceof Error ? err.message : "request failed"}`);
+  }
+}
+
+/** The best reviewed project, in one line for the table / CSV. */
+const reviewLine = (c: DomainCandidate): string => {
+  const r = c.projectReview;
+  if (!r) return "";
+  if (r.status !== "reviewed") return r.note;
+  const best = r.reviews[0];
+  return best ? `${best.repo}: ${best.summary}` : "";
+};
+
 const rx = (headers: string[], re: RegExp, not?: RegExp): string =>
   headers.find((h) => re.test(h) && !(not?.test(h) ?? false)) ?? "";
 
@@ -422,6 +503,7 @@ function detectSub(name: string, headers: string[], rowCount: number): SubConfig
     selected: false,
     cols: {
       idColumn: rx(headers, /uuid|user\s*id|\bid\b/i),
+      phoneColumn: rx(headers, /phone|mobile|contact\s*(no|num)|whatsapp|^\s*number\s*$/i, /alternate|\balt\b|parent|father|mother|guardian|emergency|secondary/i),
       nameColumn: rx(headers, /name/i, /company|panel|college|project|user|panelist/i),
       resumeColumn: rx(headers, /resume|cv|biodata/i),
       assessmentColumn: rx(headers, /assess?ment/i),
@@ -466,6 +548,9 @@ export function DomainShortlist(_props: DomainShortlistProps) {
   // Off (default): a GitHub inspection from the last 24 h is reused. On: inspect everyone afresh.
   const [githubRefresh, setGithubRefresh] = React.useState(false);
   const [githubScope, setGithubScope] = React.useState<GithubScope>("fit");
+  // Deep, file-level review of the strongest candidates' top domain projects.
+  const [reviewProjects, setReviewProjects] = React.useState(true);
+  const [reviewProgress, setReviewProgress] = React.useState({ done: 0, total: 0, reused: 0 });
   /** GitHub's hourly budget ran low: inspection waits until this time (ISO), "" when not paused. */
   const [ghPausedUntil, setGhPausedUntil] = React.useState("");
   /** Results table: only the candidates whose GitHub shows strength their resume doesn't. */
@@ -483,7 +568,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
 
   const [running, setRunning] = React.useState(false);
   useReportBusy(running);
-  const [phase, setPhase] = React.useState<"idle" | "analyze" | "github" | "build">("idle");
+  const [phase, setPhase] = React.useState<"idle" | "analyze" | "github" | "review" | "build">("idle");
   const [progress, setProgress] = React.useState({ done: 0, total: 0, matched: 0 });
   const [ghProgress, setGhProgress] = React.useState({ done: 0, total: 0, reused: 0 });
   // Parallel screening: how many at once, and how many are running / waiting to retry now.
@@ -499,6 +584,11 @@ export function DomainShortlist(_props: DomainShortlistProps) {
   const [result, setResult] = React.useState<DomainReportResult | null>(null);
   // What the GitHub inspection looked for this run (from the pre-run token check).
   const [githubLookedFor, setGithubLookedFor] = React.useState<{ core: string[]; languages: string[] } | null>(null);
+  // The run's match against the eligible pool (internal assessments).
+  const [poolInfo, setPoolInfo] = React.useState<PoolInfo | null>(null);
+  const standingsRef = React.useRef(new Map<DomainCandidateRow, InternalStanding | null>());
+  /** The eligible pool was really looked up this run (so "not in it" means external). */
+  const poolCheckedRef = React.useRef(false);
   const abortRef = React.useRef(false);
 
   const update = (name: string, partial: Partial<SubConfig>) =>
@@ -572,6 +662,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
       githubRefresh,
       minPresentation,
       githubScope,
+      reviewProjects: reviewProjects && rankGithub,
     };
   };
 
@@ -594,8 +685,9 @@ export function DomainShortlist(_props: DomainShortlistProps) {
       onDone: (row, res) => {
         processedRef.current.add(row);
         if (res.ok) {
+          res.candidate.internal = standingsRef.current.get(row) ?? null;
           collectedRef.current.push(res.candidate);
-          if (res.candidate.domainScore >= MIN_DOMAIN_SCORE) matchedRef.current += 1;
+          if (res.candidate.domainScore >= shortlistBar(res.candidate)) matchedRef.current += 1;
         } else {
           failedRef.current.push({ row, error: res.error, kind: res.kind, retryable: res.retryable });
           setFailedRows([...failedRef.current]);
@@ -683,6 +775,8 @@ export function DomainShortlist(_props: DomainShortlistProps) {
         c.githubClaimedNotFound = gh.claimedNotFound ?? [];
         c.githubCheckedAt = gh.checkedAt ?? "";
         c.githubFromCache = Boolean(gh.fromCache);
+        c.githubAccountName = gh.accountName ?? "";
+        c.githubIdentity = gh.identity;
         done += 1;
         if (gh.fromCache) reused += 1;
         setGhProgress({ done, total: pool.length, reused });
@@ -692,6 +786,64 @@ export function DomainShortlist(_props: DomainShortlistProps) {
     setGhPausedUntil("");
     // A Stop leaves the rest of the queue uninspected — say so rather than "below the bar".
     for (const c of pool) if (c.githubStatus === "not-inspected" && !c.githubNote) c.githubNote = `${STOPPED_NOTE} — the run was stopped before this GitHub was inspected.`;
+  };
+
+  /**
+   * Deep project review: the strongest candidates who can still be shortlisted (clear their
+   * domain-fit bar and every gate), best first and capped, get their top domain repos read
+   * file by file and judged against the requirements. The review blends into the GitHub
+   * score in the rank. Paced by GitHub's hourly budget like the inspection.
+   */
+  const reviewTopProjects = async (cfg: RunConfig) => {
+    const gates = {
+      mandatoryActive: cfg.mandatory.trim().length > 0,
+      requireExperience: cfg.requireExperience,
+      minLeetcode: 0,
+      dsaGates: cfg.dsaGates,
+      minCommits: cfg.minCommits,
+      checkPresentation: cfg.checkPresentation,
+      minPresentation: cfg.minPresentation,
+    };
+    const cap = cfg.limitToTopN ? Math.min(PROJECT_REVIEW_CAP, cfg.topN * 2 + 5) : PROJECT_REVIEW_CAP;
+    const pool = collectedRef.current
+      .filter(
+        (c) =>
+          c.githubStatus === "checked" &&
+          c.githubTopRepos.length > 0 &&
+          c.domainScore >= shortlistBar(c) &&
+          !gateFailure(c, gates) &&
+          c.projectReview?.status !== "reviewed",
+      )
+      .sort((a, b) => comparePriority(a, b, (x) => combinedScore(x, true, cfg.checkPresentation, cfg.fetchDsa)))
+      .slice(0, cap);
+    if (!pool.length) return;
+    setPhase("review");
+    let done = 0;
+    let reused = 0;
+    setReviewProgress({ done, total: pool.length, reused });
+    ghBudgetRef.current = { checkedAt: 0, until: 0 };
+    await runQueue<DomainCandidate, DomainProjectReviewResult>({
+      items: pool,
+      concurrency: () => PROJECT_REVIEW_PARALLEL,
+      stopped: () => abortRef.current,
+      run: async (c) => {
+        await githubBudgetGate();
+        return postReview(c, cfg);
+      },
+      retryAfter: (r, attempt) => {
+        if (r.status !== "failed") return null;
+        if (r.rateLimited && attempt <= 2) return 30_000;
+        return r.retryable && attempt <= 1 ? NETWORK_RETRY_MS : null;
+      },
+      onDone: (c, r) => {
+        c.projectReview = r;
+        done += 1;
+        if (r.fromCache) reused += 1;
+        setReviewProgress({ done, total: pool.length, reused });
+      },
+      onActivity: (running, waiting) => setActivity({ running, waiting }),
+    });
+    setGhPausedUntil("");
   };
 
   /** Rank every screened candidate and build the report (and the CSV outcomes). */
@@ -714,6 +866,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
       requireExperience: cfg.requireExperience,
       checkPresentation: cfg.checkPresentation,
       minPresentation: cfg.minPresentation,
+      poolChecked: poolCheckedRef.current,
     });
     if (built.ok) setResult(built.data);
     else setError(built.error);
@@ -729,7 +882,11 @@ export function DomainShortlist(_props: DomainShortlistProps) {
     setFailedRows([]);
     setShowAll(false);
     setGhProgress({ done: 0, total: 0, reused: 0 });
+    setReviewProgress({ done: 0, total: 0, reused: 0 });
     setGithubLookedFor(null);
+    setPoolInfo(null);
+    standingsRef.current = new Map();
+    poolCheckedRef.current = false;
     abortRef.current = false;
     collectedRef.current = [];
     processedRef.current = new Set();
@@ -771,6 +928,8 @@ export function DomainShortlist(_props: DomainShortlistProps) {
           if (!/^https?:\/\//i.test(resumeUrl)) return;
           rows.push({
             id: (row[c.idColumn] ?? "").trim() || `${sub.name}-${i}`,
+            phone: (row[c.phoneColumn] ?? "").trim(),
+            userId: (row[c.idColumn] ?? "").trim(),
             name: (row[c.nameColumn] ?? "").trim(),
             resumeUrl,
             assessmentReport: (row[c.assessmentColumn] ?? "").trim(),
@@ -791,6 +950,27 @@ export function DomainShortlist(_props: DomainShortlistProps) {
         return;
       }
 
+      // 1b. Internal assessments: find each candidate in the eligible pool (phone first, then
+      //     user id) and screen the assessed ones first — TR-2, then TR-1, then assessment.
+      //     Without the database everyone is external and the run goes on.
+      const mapped = selected.some((sub) => sub.cols.phoneColumn || sub.cols.idColumn);
+      const pool = mapped ? await lookupPoolStandings(rows.map((r) => ({ phone: r.phone, userId: r.userId }))) : null;
+      standingsRef.current = new Map(rows.map((r) => [r, standingFor(pool?.ok ? pool.data.standings : {}, r.phone ?? "", r.userId ?? "")]));
+      poolCheckedRef.current = Boolean(pool?.ok && pool.data.configured);
+      setPoolInfo(
+        describePool(
+          rows,
+          standingsRef.current,
+          !mapped ? "unmapped" : !pool?.ok ? "unavailable" : pool.data.configured ? "matched" : "off",
+          pool && !pool.ok ? pool.error : "",
+        ),
+      );
+      const stage = (r: DomainCandidateRow) => {
+        const s = standingsRef.current.get(r);
+        return isAssessed(s) ? s.tier : 9;
+      };
+      rows.sort((a, b) => stage(a) - stage(b));
+
       sheetRowsRef.current = rows;
       setSheetRows(rows);
       setProgress({ done: 0, total: rows.length, matched: 0 });
@@ -799,6 +979,8 @@ export function DomainShortlist(_props: DomainShortlistProps) {
       await screenRows(rows, cfg);
       // 3. Deep GitHub inspection of the domain-fit candidates — several in parallel.
       if (cfg.fetchGithub && !abortRef.current) await inspectGithub(cfg);
+      // 3b. File-level review of the strongest candidates' top domain projects.
+      if (cfg.reviewProjects && !abortRef.current) await reviewTopProjects(cfg);
       // 4. Rank + build the report; return the top-N (or every candidate) for the CSV/preview.
       await finish(cfg);
     } finally {
@@ -832,6 +1014,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
     try {
       await screenRows(targets, cfg);
       if (cfg.fetchGithub && !abortRef.current) await inspectGithub(cfg);
+      if (cfg.reviewProjects && !abortRef.current) await reviewTopProjects(cfg);
       await finish(cfg);
     } finally {
       setRunning(false);
@@ -849,134 +1032,35 @@ export function DomainShortlist(_props: DomainShortlistProps) {
    */
   const downloadCsv = (kind: "shortlisted" | "complete") => {
     if (!result) return;
-    const dsaOn = useDsa || dsaGatesActive(dsaGates);
-    const ghOn = useGithub || minCommits > 0;
-    // Any GitHub inspection ran (rank, commits gate, or the latest-commit lookup).
-    const ghChecked = ghOn || trackDomainCommit;
-    // A real measurement: inspected, or a profile that exists with nothing to show.
-    const ghMeasured = (c: DomainCandidate) => c.githubStatus === "checked" || c.githubStatus === "no-repos";
-    const headers = [
-      "Rank", "Name", "Status", "Not Shortlisted Because", "Domain", "Domain Score",
-      // DSA — the same columns as the DSA consolidation export, plus the DSA score.
-      "DSA Score",
-      ...DSA_PLATFORMS.flatMap(({ label }) => [`${label} Solved`, `${label} Contests Participated`, `${label} Rating`]),
-      "Total Solved", "Total Contests", "Codeforces Max Rating", "CodeChef Highest Rating",
-      ...DSA_PLATFORMS.map(({ label }) => `${label} URL`), "DSA Notes",
-      "GitHub Check", "GitHub Fit Score", "GitHub Domain Repos", "GitHub Proven Tech", "GitHub Evidence",
-      "Mandatory Not Proven on GitHub", "Claimed but Not Found on GitHub",
-      "GitHub Strength Not On Resume", "Proven on GitHub, Not on Resume", "GitHub Top Repos", "GitHub Commits (2y)",
-      "Last Domain Commit", "Last Domain Commit Repo", "Commit Email Linked To Profile",
-      "GitHub AI-Commit Signal", "GitHub AI-Commit Detail", "GitHub Notes", "GitHub Checked At",
-      "GitHub Profile", "Meets Mandatory", "Has Domain Experience", "Domain Experience",
-      "Resume Presentation Score", "Resume Presentation Notes", "Core Skills",
-      "Placed Company", "Package (LPA)", "Resume", "Assessment Report", "TR-1 Panelist",
-      "TR-1 Panelist LinkedIn", "TR-1 Recording", "TR-2 Panelist", "TR-2 Panelist LinkedIn", "TR-2 Recording",
-    ];
-    // Which model judged each resume — for auditing a run; kept out of the client-facing shortlist.
-    if (kind === "complete") headers.push("Scored By");
-    // Sheet columns carried for every row, evaluated or not.
-    const sheetCells = (r: DomainCandidateRow): Record<string, string> => ({
-      "Name": r.name,
-      "Domain": domain.trim(),
-      "Placed Company": r.placedCompany,
-      "Package (LPA)": r.ctc,
-      "Resume": r.resumeUrl,
-      "Assessment Report": r.assessmentReport,
-      "TR-1 Panelist": r.tr1Panelist,
-      "TR-1 Panelist LinkedIn": r.tr1PanelLinkedin,
-      "TR-1 Recording": r.tr1Recording,
-      "TR-2 Panelist": r.tr2Panelist,
-      "TR-2 Panelist LinkedIn": r.tr2PanelLinkedin,
-      "TR-2 Recording": r.tr2Recording,
+    // Columns follow what this run measured (domain-csv.ts): DSA only when screened, GitHub only
+    // when inspected, presentation only when graded, the sheet's interview columns only when filled.
+    const { headers, rows } = domainCsv({
+      kind,
+      result,
+      domain,
+      mandatoryActive: mandatory.trim().length > 0,
+      dsaOn: useDsa || dsaGatesActive(dsaGates),
+      githubOn: useGithub || minCommits > 0,
+      trackDomainCommit,
+      presentation: checkPresentation,
+      poolChecked: poolInfo?.state === "matched",
+      unscored: [
+        ...failedRows.map(({ row, error, kind: k }) => ({
+          row,
+          status: k === "invalid" ? ("Not a resume" as const) : ("Could not be evaluated" as const),
+          reason: error,
+          internal: standingsRef.current.get(row),
+        })),
+        // Rows a Stop left unscanned (screening runs in parallel, so they can be anywhere in
+        // the sheet) — listed so the sheet still accounts for every candidate.
+        ...unreached.map((row) => ({
+          row,
+          status: "Not evaluated" as const,
+          reason: "The run was stopped before this candidate",
+          internal: standingsRef.current.get(row),
+        })),
+      ],
     });
-    const outcomes = kind === "shortlisted" ? result.candidates.filter((c) => c.shortlisted) : result.candidates;
-    // DSA cells: blank when DSA was off or (older runs) never read — blank is "unknown", not 0.
-    const dsaCells = (c: DomainCandidate): Record<string, string> => {
-      const d = c.dsa;
-      if (!dsaOn || !d) return {};
-      const num = (n: number | null | undefined) => (typeof n === "number" ? String(n) : "");
-      const cells: Record<string, string> = {
-        "DSA Score": String(d.score),
-        "Total Solved": num(d.totalSolved),
-        "Total Contests": num(d.totalContests),
-        "Codeforces Max Rating": num(d.codeforces.maxRating),
-        "CodeChef Highest Rating": num(d.codechef.maxRating),
-      };
-      const notes: string[] = [];
-      for (const { key, label } of DSA_PLATFORMS) {
-        const p = d[key];
-        cells[`${label} Solved`] = dsaStatText(p, "solved");
-        cells[`${label} Contests Participated`] = dsaStatText(p, "contests");
-        cells[`${label} Rating`] = dsaStatText(p, "rating");
-        cells[`${label} URL`] = p.url;
-        if (p.url && p.note && p.note !== "OK") notes.push(`${label}: ${p.note}`);
-      }
-      if (d.partial) notes.push("A linked profile couldn't be read in full");
-      cells["DSA Notes"] = notes.join(" | ");
-      return cells;
-    };
-    const rows: Record<string, string>[] = outcomes.map((c) => {
-      const commit = c.githubLastDomainCommit;
-      return {
-        ...dsaCells(c),
-        "Rank": c.rank ? String(c.rank) : "",
-        "Name": c.name,
-        "Status": c.shortlisted ? "Shortlisted" : "Not shortlisted",
-        "Not Shortlisted Because": c.outcomeReason,
-        "Domain": domain.trim(),
-        "Domain Score": String(c.domainScore),
-        "GitHub Check": ghChecked ? githubCheckLabel(c) : "",
-        // Numbers only where they were actually measured — blank is "unknown", not 0.
-        "GitHub Fit Score": ghOn && ghMeasured(c) ? String(c.githubScore) : "",
-        "GitHub Domain Repos": ghOn && ghMeasured(c) ? String(c.githubMatches) : "",
-        "GitHub Proven Tech": ghChecked ? c.githubTechs.join(", ") : "",
-        "GitHub Evidence": ghChecked && c.githubStatus === "checked" ? evidenceLines(c).join(" ; ") : "",
-        "Mandatory Not Proven on GitHub": ghChecked && c.githubStatus === "checked" ? gapLines(c).join(" ; ") : "",
-        "Claimed but Not Found on GitHub": ghChecked && c.githubStatus === "checked" ? (c.githubClaimedNotFound ?? []).join(", ") : "",
-        "GitHub Strength Not On Resume": ghChecked && githubStrengthNotOnResume(c) ? "Yes" : "",
-        "Proven on GitHub, Not on Resume": ghChecked ? githubTechsNotOnResume(c).join(", ") : "",
-        "GitHub Top Repos": ghChecked ? c.githubTopRepos.map((r) => `${r.url} (${r.matchPct}%)`).join(" ; ") : "",
-        "GitHub Commits (2y)": ghOn && ghMeasured(c) ? String(c.githubCommits2y) : "",
-        "Last Domain Commit": trackDomainCommit && commit ? formatDay(commit.date, "iso") : "",
-        "Last Domain Commit Repo": trackDomainCommit && commit ? commit.repoUrl : "",
-        "Commit Email Linked To Profile": trackDomainCommit && commit ? (commit.linked ? "Yes" : "No") : "",
-        "GitHub AI-Commit Signal": ghChecked && c.githubStatus === "checked" ? c.githubAiLikelihood : "",
-        "GitHub AI-Commit Detail": ghChecked && c.githubStatus === "checked" ? c.githubAiSummary : "",
-        "GitHub Notes": ghChecked ? c.githubNote : "",
-        "GitHub Checked At":
-          ghChecked && c.githubCheckedAt && c.githubStatus !== "failed"
-            ? `${stamp(c.githubCheckedAt)}${c.githubFromCache ? " (reused, 24 h cache)" : ""}`
-            : "",
-        "GitHub Profile": c.githubProfile,
-        "Meets Mandatory": mandatory.trim() ? (c.meetsMandatory ? "Yes" : "No") : "",
-        "Has Domain Experience": c.hasDomainExperience ? "Yes" : "No",
-        "Domain Experience": c.experience,
-        "Resume Presentation Score": checkPresentation ? String(c.presentationScore) : "",
-        "Resume Presentation Notes": checkPresentation ? c.presentationNotes : "",
-        "Core Skills": c.coreSkills.join(", "),
-        "Placed Company": c.placedCompany,
-        "Package (LPA)": c.ctc,
-        "Resume": c.resumeUrl,
-        "Assessment Report": c.assessmentReport,
-        "TR-1 Panelist": c.tr1Panelist,
-        "TR-1 Panelist LinkedIn": c.tr1PanelLinkedin,
-        "TR-1 Recording": c.tr1Recording,
-        "TR-2 Panelist": c.tr2Panelist,
-        "TR-2 Panelist LinkedIn": c.tr2PanelLinkedin,
-        "TR-2 Recording": c.tr2Recording,
-        "Scored By": c.scoredBy ?? "",
-      };
-    });
-    if (kind === "complete") {
-      for (const { row, error, kind: k } of failedRows) {
-        rows.push({ ...sheetCells(row), "Status": k === "invalid" ? "Not a resume" : "Could not be evaluated", "Not Shortlisted Because": error });
-      }
-      // Rows a Stop left unscanned (screening runs in parallel, so they can be anywhere in
-      // the sheet) — listed so the sheet still accounts for every candidate.
-      for (const row of unreached) {
-        rows.push({ ...sheetCells(row), "Status": "Not evaluated", "Not Shortlisted Because": "The run was stopped before this candidate" });
-      }
-    }
     // Leading BOM so Excel reads UTF-8 (₹, names) correctly.
     const blob = new Blob(["\uFEFF" + toCsv(headers, rows)], { type: "text/csv;charset=utf-8;" });
     const href = URL.createObjectURL(blob);
@@ -1097,7 +1181,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                 </div>
                 <SettingList>
                   {subs.map((s, i) => {
-                    const optionalCols = COL_FIELDS.filter((f) => !f.required);
+                    const optionalCols = COL_FIELDS.filter((f) => !f.required && !f.match);
                     const mappedCols = optionalCols.filter((f) => s.cols[f.key]).length;
                     return (
                       <SettingRow
@@ -1111,6 +1195,12 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                       >
                         <div className="space-y-3">
                           <div className="grid gap-3 sm:grid-cols-2">{COL_FIELDS.filter((f) => f.required).map((f) => columnSelect(s, i, f))}</div>
+                          <div>
+                            <div className="grid gap-3 sm:grid-cols-2">{COL_FIELDS.filter((f) => f.match).map((f) => columnSelect(s, i, f))}</div>
+                            <p className="mt-1.5 text-xs text-muted-foreground">
+                              Finds internally assessed candidates (Edge 2.0, Edge 1.0, Academy) by phone, then user id — they&apos;re ranked first.
+                            </p>
+                          </div>
                           <details className="group">
                             <summary className="inline-flex cursor-pointer list-none items-center gap-1.5 rounded-md text-[13px] font-medium text-primary hover:underline [&::-webkit-details-marker]:hidden">
                               Optional columns
@@ -1473,6 +1563,25 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                   </div>
                 ) : null}
                 <SettingRow
+                  id="dom-gh-review"
+                  icon={<FileSearch />}
+                  title="Review the code of top projects"
+                  description="Reads the strongest candidates' top domain repos file by file and judges the features against your requirements."
+                  info={
+                    <>
+                      After the GitHub inspection, the best candidates who can still be shortlisted (up to {PROJECT_REVIEW_CAP}; with a top-N
+                      limit, about twice N) get their top one or two domain repositories downloaded and read: the file tree, manifests,
+                      README and the source in architectural order. A model judges the project as built — what it does, which features
+                      really work, which requirements the code proves, how complete and how deep it is — and every feature it credits
+                      must point at real files in the repo. The review weighs more than the package scan in the GitHub score. One model
+                      call per repository; reviews are reused for 24 hours.
+                    </>
+                  }
+                  checked={reviewProjects && ghShown}
+                  onCheckedChange={setReviewProjects}
+                  disabled={!ghShown}
+                />
+                <SettingRow
                   id="dom-gh-refresh"
                   icon={<RefreshCw />}
                   title="Re-inspect GitHub now"
@@ -1592,11 +1701,13 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                       <span className="font-medium text-foreground">
                         {phase === "github"
                           ? "Inspecting GitHub"
-                          : phase === "build"
-                            ? generateReport
-                              ? "Building report…"
-                              : "Ranking candidates…"
-                            : "Scanning resumes"}
+                          : phase === "review"
+                            ? "Reviewing project code"
+                            : phase === "build"
+                              ? generateReport
+                                ? "Building report…"
+                                : "Ranking candidates…"
+                              : "Scanning resumes"}
                       </span>
                       {phase === "github" ? (
                         <span className="tabular-nums">
@@ -1611,6 +1722,12 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                             </span>
                           ) : null}
                         </span>
+                      ) : phase === "review" ? (
+                        <span className="tabular-nums">
+                          {reviewProgress.done} of {reviewProgress.total}
+                          {reviewProgress.reused ? ` · ${reviewProgress.reused} reused` : ""} · {activity.running} running
+                          {ghPausedUntil ? <span className="font-medium text-warning"> · paused for GitHub&apos;s hourly limit</span> : null}
+                        </span>
                       ) : phase === "build" ? null : (
                         <span className="tabular-nums">
                           {progress.done} of {progress.total} · {progress.matched} domain match{progress.matched === 1 ? "" : "es"} so far ·{" "}
@@ -1621,8 +1738,8 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                     </div>
                     <Progress
                       label="Screening progress"
-                      value={phase === "build" ? undefined : phase === "github" ? ghProgress.done : progress.done}
-                      max={phase === "github" ? ghProgress.total : progress.total}
+                      value={phase === "build" ? undefined : phase === "github" ? ghProgress.done : phase === "review" ? reviewProgress.done : progress.done}
+                      max={phase === "github" ? ghProgress.total : phase === "review" ? reviewProgress.total : progress.total}
                     />
                   </div>
                 ) : (
@@ -1729,6 +1846,8 @@ export function DomainShortlist(_props: DomainShortlistProps) {
             <Notice tone="warning">No candidate cleared every requirement. Try broadening the domain or relaxing the strict gates.</Notice>
           ) : null}
 
+          {poolInfo ? <PoolMatchNotice info={poolInfo} /> : null}
+
           {githubLookedFor ? <GithubRunSummary lookedFor={githubLookedFor} candidates={result.candidates} scope={cfgRef.current?.githubScope ?? "fit"} /> : null}
 
           {githubStrong.length ? (
@@ -1794,6 +1913,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                     <TableRow>
                       <TableHead className="w-12 text-right">#</TableHead>
                       <TableHead>Name</TableHead>
+                      <TableHead>Internal</TableHead>
                       {outcomeColumn ? <TableHead>Outcome</TableHead> : null}
                       <TableHead className="text-right">Fit</TableHead>
                       {dsaShown ? <TableHead>DSA</TableHead> : null}
@@ -1802,7 +1922,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                       {trackDomainCommit ? <TableHead>Last domain commit</TableHead> : null}
                       {requireExperience ? <TableHead>Experience</TableHead> : null}
                       {checkPresentation ? <TableHead className="text-right">Presentation</TableHead> : null}
-                      <TableHead>Core skills</TableHead>
+                      <TableHead>Resume core skills</TableHead>
                       <TableHead>Placed</TableHead>
                     </TableRow>
                   </TableHeader>
@@ -1811,9 +1931,23 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                       <TableRow key={`${c.id}-${i}`}>
                         <TableCell className="text-right tabular-nums text-muted-foreground">{c.rank || "—"}</TableCell>
                         <TableCell className="font-medium">
-                          <div className="max-w-[220px] truncate" title={c.name}>
+                          <div className="max-w-[220px] truncate" title={c.signals?.length ? `${c.name}\n${c.signals.map((s) => `• ${s}`).join("\n")}` : c.name}>
                             {c.name || "—"}
                           </div>
+                        </TableCell>
+                        <TableCell>
+                          {isAssessed(c.internal) ? (
+                            <div className="whitespace-nowrap" title={c.internal.label}>
+                              <Badge variant={c.internal.tier === 1 ? "success" : "default"}>{STAGE_SHORT[c.internal.tier]}</Badge>
+                              <span className="ml-1.5 text-xs text-muted-foreground">{PRODUCT_LABEL[c.internal.product]}</span>
+                              {c.priority ? <span className="block text-[11px] text-muted-foreground">Priority {c.priority}</span> : null}
+                            </div>
+                          ) : (
+                            <span className="whitespace-nowrap text-muted-foreground">
+                              External
+                              {c.priority ? <span className="block text-[11px]">Priority {c.priority}</span> : null}
+                            </span>
+                          )}
                         </TableCell>
                         {!outcomeColumn ? null : (
                           <TableCell>
@@ -1826,7 +1960,13 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                             )}
                           </TableCell>
                         )}
-                        <TableCell className="text-right tabular-nums">{c.domainScore}</TableCell>
+                        <TableCell
+                          className="text-right tabular-nums"
+                          title={c.domainCapped ? `The model said ${c.rawDomainScore}; lowered because ${c.domainCapped}` : c.evidence || undefined}
+                        >
+                          {c.domainScore}
+                          {c.domainCapped ? <span className="ml-0.5 text-warning">*</span> : null}
+                        </TableCell>
                         {dsaShown ? (
                           <TableCell title={dsaTooltip(c)}>
                             {c.dsa && (c.dsa.score > 0 || (c.dsa.totalSolved ?? 0) > 0) ? (
@@ -1863,6 +2003,12 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                                   {" "}
                                   · {c.githubMatches} repo{c.githubMatches === 1 ? "" : "s"}
                                 </span>
+                                {c.githubIdentity === "mismatch" ? <span className="block text-xs text-warning">not their account?</span> : null}
+                                {c.projectReview?.status === "reviewed" ? (
+                                  <span className="block text-xs text-muted-foreground" title={reviewLine(c)}>
+                                    code review {c.projectReview.score}
+                                  </span>
+                                ) : null}
                                 {githubStrengthNotOnResume(c) ? (
                                   <Badge variant="highlight" className="ml-1.5">
                                     Not on resume

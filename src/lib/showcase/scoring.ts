@@ -13,12 +13,16 @@ import {
   type SpJob,
   type SpLinks,
   type SpProject,
+  type SpProfileDef,
+  type SpProfileJudgement,
   type SpProjectProof,
   type SpProofStatus,
   type SpRecord,
   type SpRules,
   type SpSignal,
 } from "@/lib/showcase/types";
+import { evaluateProfileCandidate } from "@/lib/showcase/profile-fit";
+import { profilesHash } from "@/lib/showcase/profile-rules";
 
 /**
  * Sample profiles — the decision (pure, runs in the browser, so every rule re-ranks instantly
@@ -334,7 +338,7 @@ export function trustOf(c: SpCandidate, rec: SpRecord, view: SpDsaView | null): 
 // ── Roles: gates and score ───────────────────────────────────────────────────
 
 export interface SpGate {
-  key: "dsa" | "projects" | "verified" | "trust";
+  key: "dsa" | "projects" | "verified" | "trust" | "mandatory" | "experience" | "fit";
   label: string;
   ok: boolean;
   /** Not decided yet (the stage that decides it hasn't run). */
@@ -358,13 +362,17 @@ export interface SpRoleFit {
   experience: { score: number; months: number; relevant: boolean };
   gates: SpGate[];
   passed: boolean;
-  parts: { projects: number; dsa: number; experience: number; engineering: number };
+  parts: { projects: number; dsa: number; experience: number; engineering: number; fit?: number };
   /** Before the trust factor. */
   raw: number;
   score: number;
+  /** Profiles from JDs: this profile's own tier (a candidate can be Showcase for one profile, Strong for another). */
+  tier?: "Showcase" | "Strong" | "";
+  /** Profiles from JDs: the profile and how the candidate matched it. */
+  profile?: { id: string; name: string; topN: number; judgement: SpProfileJudgement | null; mandatoryInCode: { item: string; ok: boolean; how: string }[] };
 }
 
-const PROOF_FACTOR: Record<SpProofStatus | "unchecked", number> = { verified: 1, weak: 0.8, unchecked: 0.7, unavailable: 0.7, failed: 0.6, "no-repo": 0.6 };
+export const PROOF_FACTOR: Record<SpProofStatus | "unchecked", number> = { verified: 1, weak: 0.8, unchecked: 0.7, unavailable: 0.7, failed: 0.6, "no-repo": 0.6 };
 
 function roleFit(role: string, projects: SpScoredProject[], jobs: SpJob[], view: SpDsaView, trust: SpTrustScore | null, rules: SpRules, stage: { verified: boolean }): SpRoleFit {
   const mine: SpRoleProject[] = projects
@@ -450,8 +458,22 @@ function roleFit(role: string, projects: SpScoredProject[], jobs: SpJob[], view:
 // ── One candidate ────────────────────────────────────────────────────────────
 
 export type SpStatus = "Showcase" | "Strong" | "Near miss" | "Excluded" | "Pending";
-export type SpStage = "Screen" | "DSA" | "GitHub" | "Read" | "Projects" | "Verify" | "Trust" | "Score";
+export type SpStage = "Screen" | "DSA" | "GitHub" | "Prefilter" | "Read" | "Projects" | "Judge" | "Verify" | "Trust" | "Score";
 export const SP_STAGES: SpStage[] = ["Screen", "DSA", "GitHub", "Read", "Projects", "Verify", "Trust", "Score"];
+/** Profiles from JDs: the mandatory prefilter before the model read, and the profile-fit judge before the GitHub proof. */
+export const SP_PROFILE_STAGES: SpStage[] = ["Screen", "DSA", "GitHub", "Prefilter", "Read", "Projects", "Judge", "Verify", "Trust", "Score"];
+export const SP_STAGE_LABEL: Record<SpStage, string> = {
+  Screen: "Screen",
+  DSA: "DSA",
+  GitHub: "GitHub",
+  Prefilter: "Mandatory prefilter",
+  Read: "Read",
+  Projects: "Projects",
+  Judge: "Profile fit",
+  Verify: "Verify",
+  Trust: "Trust",
+  Score: "Scored",
+};
 
 export interface SpRanked {
   c: SpCandidate;
@@ -614,6 +636,10 @@ export interface SpRoleTab {
 export interface SpOutcome {
   rows: SpRanked[];
   tabs: SpRoleTab[];
+  /** The stages of this mode, in order. */
+  stages: SpStage[];
+  /** Profiles from JDs (null = roles found in the evidence). */
+  profiles: SpProfileDef[] | null;
   funnel: Record<SpStage, { reached: number; stopped: number; pending: number }>;
   stats: { rows: number; screened: number; dsaPassed: number; read: number; verified: number; showcase: number; strong: number; nearMiss: number; pending: number; roles: number };
 }
@@ -625,42 +651,69 @@ const byScore = (role: string) => (a: SpRanked, b: SpRanked) => {
   return (fb?.score ?? 0) - (fa?.score ?? 0) || (b.dsa?.strength ?? 0) - (a.dsa?.strength ?? 0) || a.c.sheetRow - b.c.sheetRow;
 };
 
-export function rankShowcase(ds: SpDataset, records: Record<string, SpRecord>, rules: SpRules, rejectedIds: string[] = []): SpOutcome {
+/** Profiles from JDs: the tab key of a profile. */
+export const profileRole = (id: string) => `profile:${id}`;
+
+/**
+ * The whole run: every candidate decided, then one tab per role found in the evidence — or,
+ * with profiles from JDs, one tab per profile (a candidate is listed under every profile they
+ * pass). Pure; a changed rule or profile re-ranks without reading anything again.
+ */
+export function rankShowcase(ds: SpDataset, records: Record<string, SpRecord>, rules: SpRules, rejectedIds: string[] = [], profiles: SpProfileDef[] | null = null): SpOutcome {
   const batch = batchFacts(ds, records);
   const rejected = new Set(rejectedIds);
-  const rows = ds.candidates.map((c) => evaluateCandidate(c, records[c.id] ?? { id: c.id }, rules, batch, rejected));
+  const byProfile = Boolean(profiles?.length);
+  const hash = byProfile ? profilesHash(profiles!) : "";
+  const rows = ds.candidates.map((c) =>
+    byProfile
+      ? evaluateProfileCandidate(c, records[c.id] ?? { id: c.id }, rules, batch, rejected, profiles!, hash)
+      : evaluateCandidate(c, records[c.id] ?? { id: c.id }, rules, batch, rejected),
+  );
   const qualified = rows.filter((r) => r.tier);
 
-  const members = new Map<string, SpRanked[]>();
-  const put = (role: string, r: SpRanked) => members.set(role, [...(members.get(role) ?? []), r]);
-  for (const r of qualified) {
-    put(r.primary!.role, r);
-    if (rules.everyRole) for (const f of r.alsoFor) put(f.role, r);
-    if (r.sde && r.primary!.role !== "sde" && !(rules.everyRole && r.alsoFor.some((f) => f.role === "sde"))) put("sde", r);
+  let tabs: SpRoleTab[];
+  if (byProfile) {
+    tabs = profiles!.map((p) => {
+      const role = profileRole(p.id);
+      const list = qualified.filter((r) => r.fits.some((f) => f.role === role && f.tier));
+      const kept = [...list].sort(byScore(role)).filter((r) => !r.rejected);
+      return { role, label: p.name.trim() || "Untitled profile", rows: kept, shown: kept.slice(0, Math.max(1, p.inputs.topN)) };
+    });
+  } else {
+    const members = new Map<string, SpRanked[]>();
+    const put = (role: string, r: SpRanked) => members.set(role, [...(members.get(role) ?? []), r]);
+    for (const r of qualified) {
+      put(r.primary!.role, r);
+      if (rules.everyRole) for (const f of r.alsoFor) put(f.role, r);
+      if (r.sde && r.primary!.role !== "sde" && !(rules.everyRole && r.alsoFor.some((f) => f.role === "sde"))) put("sde", r);
+    }
+    const order = (role: string) => {
+      const i = Object.keys(SP_ROLE).indexOf(role);
+      return i < 0 ? 100 : i;
+    };
+    tabs = [...members.entries()]
+      .map(([role, list]) => {
+        const sorted = [...list].sort(byScore(role));
+        const kept = sorted.filter((r) => !r.rejected);
+        return { role, label: roleLabel(role), rows: kept, shown: kept.slice(0, Math.max(1, rules.topN)) };
+      })
+      .sort((a, b) => order(a.role) - order(b.role) || b.rows.length - a.rows.length || a.label.localeCompare(b.label));
   }
-  const order = (role: string) => {
-    const i = Object.keys(SP_ROLE).indexOf(role);
-    return i < 0 ? 100 : i;
-  };
-  const tabs: SpRoleTab[] = [...members.entries()]
-    .map(([role, list]) => {
-      const sorted = [...list].sort(byScore(role));
-      const kept = sorted.filter((r) => !r.rejected);
-      return { role, label: roleLabel(role), rows: kept, shown: kept.slice(0, Math.max(1, rules.topN)) };
-    })
-    .sort((a, b) => order(a.role) - order(b.role) || b.rows.length - a.rows.length || a.label.localeCompare(b.label));
 
-  const funnel = Object.fromEntries(SP_STAGES.map((s) => [s, { reached: 0, stopped: 0, pending: 0 }])) as SpOutcome["funnel"];
+  const stages = byProfile ? SP_PROFILE_STAGES : SP_STAGES;
+  const funnel = Object.fromEntries(SP_PROFILE_STAGES.map((s) => [s, { reached: 0, stopped: 0, pending: 0 }])) as SpOutcome["funnel"];
   for (const r of rows) {
-    const idx = SP_STAGES.indexOf(r.stage);
-    for (let i = 0; i <= idx; i++) funnel[SP_STAGES[i]].reached++;
+    const idx = stages.indexOf(r.stage);
+    for (let i = 0; i <= idx; i++) funnel[stages[i]].reached++;
     if (r.status === "Pending") funnel[r.stage].pending++;
     else if (r.status === "Excluded" || r.status === "Near miss") funnel[r.stage].stopped++;
   }
-  const after = (stage: SpStage) => rows.filter((r) => SP_STAGES.indexOf(r.stage) > SP_STAGES.indexOf(stage)).length;
+  const after = (stage: SpStage) => rows.filter((r) => stages.indexOf(r.stage) > stages.indexOf(stage)).length;
   return {
     rows,
     tabs,
+    stages,
+    profiles: byProfile ? profiles : null,
     funnel,
     stats: {
       rows: rows.length,
@@ -672,7 +725,7 @@ export function rankShowcase(ds: SpDataset, records: Record<string, SpRecord>, r
       strong: qualified.filter((r) => r.tier === "Strong" && !r.rejected).length,
       nearMiss: rows.filter((r) => r.status === "Near miss").length,
       pending: rows.filter((r) => r.status === "Pending").length,
-      roles: tabs.length,
+      roles: byProfile ? tabs.filter((t) => t.rows.length).length : tabs.length,
     },
   };
 }
@@ -695,9 +748,9 @@ export function experienceLine(r: SpRanked): string {
     .join("; ");
 }
 
-/** One line for a company: role, DSA, proven projects, experience. */
-export function headline(r: SpRanked): string {
-  const f = r.primary;
+/** One line for a company: role (or profile), DSA, proven projects, experience. */
+export function headline(r: SpRanked, fit: SpRoleFit | null = r.primary): string {
+  const f = fit;
   if (!f) return "";
   const proven = f.verifiedStrong.length;
   const months = f.experience.months;

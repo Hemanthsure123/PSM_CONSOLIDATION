@@ -17,3 +17,6 @@ public/reports
 
 # Cached GitHub inspections (Domain Shortlisting, 24 h)
 .cache
+
+# Local Claude Code settings
+.claude/settings.local.json

@@ -187,6 +187,96 @@ Bands: **High** ≥ 80, **Medium** ≥ 60, **Low** below 60.
     stopped at and why).
 - A CSV of the current role tab, company or internal.
 
+## From job descriptions (toggle)
+
+The **Sample profiles from job descriptions** switch on the setup screen changes what the run looks
+for. When it is off, nothing changes: roles come from the evidence, and one DSA bar and one set of
+rules apply to every role. When it is on, the run ranks candidates against **profiles**. Each profile is
+one job, and a run takes up to 5.
+
+**Drafting a profile.** Paste or upload the JD, or any context about the role (a client's note, a
+recruiter's message). PDF, Word, text, HTML and images are accepted. One model call
+(`/api/showcase/autofill`, Gemini → OpenAI → Mistral) drafts the profile, and you review the draft before
+it is applied. Undo puts the previous values back.
+
+- **Domain name** — the tab's name.
+- **What defines it** — what a *showcase-grade* candidate for this job has built and done. The prompt is
+  stricter than Domain Shortlisting's: it describes the top 1–2 %, not an average fit.
+- **Mandatory — verified** — at most 6 items. Each must be backed by the JD's own words, or the program
+  drops it. "React or Angular" accepts either.
+- **Good to have** — looked for in the resume. These items raise the fit but never gate a candidate.
+- **Every input, each with a one-line reason from the JD:**
+  - DSA required, or off for roles where DSA isn't central (data analyst, QA …), and its bar
+  - strong / exceptional project thresholds
+  - code proof on or off, with its four thresholds
+  - AI-generator traces allowed or not
+  - minimum relevant experience
+  - the fit bar (default 70)
+  - Showcase / Strong cut-offs
+  - profiles to send
+  - the trust agent
+  - the score weights (including a **fit** weight)
+
+  Every number is clamped to a sane range. You can change any value, and "Reset to the JD's values"
+  brings the draft back.
+
+The JD is untrusted. Sentences that try to instruct the model are removed before it reads the JD. The
+run name, the sheet, parallelism and profile links in the company file stay yours to set.
+
+**Judging a candidate (stricter than roles).** Evidence is only projects, experience, certifications
+and achievements. The Skills list and the profile summary are removed before anything is checked
+(`resume-sections.ts`).
+
+1. **DSA** — the profile's own bar, or none.
+2. **Mandatory** — every item proven. A model judge (`/api/showcase/judge`, one call per candidate for
+   every profile) must quote the resume's evidence for each item. The program keeps the item only when
+   the quote is really there and every technology the item names is named in the evidence.
+3. **Strong relevant projects** — 2 strong projects the judge finds relevant to the profile, or 1
+   exceptional project plus relevant experience. The usual caps apply (course work, clones, depth,
+   signals).
+4. **Verified in code** (when the profile asks for it) — a strong relevant project in their own
+   repository. In addition, **every mandatory technology the code can show must be in their own verified
+   code**: a claimed technology that the code doesn't prove fails.
+5. **Relevant experience** — when the profile sets a minimum.
+6. **Fit** — the judged fit must be at or above the profile's bar. A fit that no project or job backs is
+   capped at 35.
+7. **Trust** — not Low, when the profile uses the trust agent.
+
+**Score:** projects, DSA, GitHub engineering and **fit** (the judge's fit plus good-to-have coverage),
+using the profile's weights, plus the experience bonus, × trust. Tiers and near misses work as for roles,
+per profile.
+
+**The funnel** stays cheap and strict first:
+
+1. **Screen**
+   - A GitHub link is required only if every profile wants code proof.
+   - A coding-profile link is required only if every profile needs DSA.
+2. **DSA** — read for the loosest bar of the run.
+3. **GitHub** — the account check.
+4. **Mandatory prefilter** — no model. The resume's projects and experience must name every mandatory
+   technology of at least one profile; otherwise the resume is never read by the model.
+5. **Read** — the same cached reading as for roles.
+6. **A strong project at all.**
+7. **Profile fit** — the judge.
+8. **GitHub proof** — up to 3 relevant projects, chosen to cover the mandatory technologies.
+9. **Trust.**
+10. **Score.**
+
+Rows screened before this switch existed are screened again without a model call.
+
+**Results.**
+- **Tabs:** one tab per profile, named by its domain name. A candidate who passes several profiles is
+  listed under each one, ranked there by that profile's score.
+- **Details:** each candidate's details show every profile's fit, the mandatory proofs (the resume's
+  words and their own code) and the good-to-have items found.
+- **Editing profiles:** on the results screen, editing a definition re-runs only the judge on Continue.
+  Editing an input re-ranks instantly.
+- **Company workbook:**
+  - The About tab gives each profile's definition, mandatory items and bar in plain words.
+  - Each profile sheet adds "Why this profile fits", "Mandatory — verified" (with the proof) and "Good
+    to have found". Personal details are scrubbed as usual.
+- **Internal workbook:** adds every profile's inputs, the JD's reasons, and what was edited.
+
 ## Throughput (2,500 rows)
 
 | Stage | Throughput |
@@ -205,8 +295,9 @@ everything cached in the last 24 hours (`.cache/github-inspect/`).
 
 | Where | What |
 |---|---|
-| `src/lib/showcase/` | `types`, `parse` (sheet → rows), `roles` (catalogue, course / toy detection), `dsa-rules` (bar, owners, shared handles), `screen`, `dsa`, `github-probe`, `reader`, `verify`, `trust`, `scoring` (pure decision), `pipeline` (what to run next), `export` (workbooks, scrub), `store` (IndexedDB) |
+| `src/lib/showcase/` | `types`, `parse` (sheet → rows), `roles` (catalogue, course / toy detection), `dsa-rules` (bar, owners, shared handles), `screen`, `dsa`, `github-probe`, `reader`, `verify`, `trust`, `scoring` (pure decision), `pipeline` (what to run next), `export` (workbooks, scrub), `store` (IndexedDB); profiles from JDs: `profile-rules` (pure: defaults, clamps, draft clean-up, hash), `profile-autofill` (JD → profile + inputs), `profile-judge` (strict fit judge), `profile-fit` (gates, score, funnel) |
 | shared | `src/lib/trust-review.ts` (trust agent core, also used by Academy bucketing), `src/lib/dsa-cache.ts` (24 h DSA cache), `src/lib/resume-folder.ts` |
-| routes | `src/app/api/showcase/{screen,dsa,probe,read,verify,trust}/route.ts` |
-| UI | `src/components/showcase/{sample-profiles,showcase-results,showcase-rules}.tsx` |
+| routes | `src/app/api/showcase/{screen,dsa,probe,read,verify,trust,autofill,techkeys,judge}/route.ts` |
+| shared | `src/lib/jd-source.ts` (a JD from text / PDF / Word / HTML / image — also Domain Shortlisting's autofill), `src/lib/resume-sections.ts` (evidence-only resume text) |
+| UI | `src/components/showcase/{sample-profiles,showcase-results,showcase-rules,profile-panel}.tsx` |
 | tests | `scripts/showcase-selftest.ts` (`npx tsx scripts/showcase-selftest.ts`) |

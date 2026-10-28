@@ -1,4 +1,5 @@
 import type { DsaSnapshot } from "@/lib/dsa-types";
+import type { InternalStanding } from "@/lib/pool/types";
 /** Shared domain types. */
 
 export type SearchType = "uuid" | "phone" | "name" | "email";
@@ -223,6 +224,10 @@ export interface DomainCandidateRow {
   placedCompany: string;
   /** Package / CTC, verbatim from the sheet ("" = none). */
   ctc: string;
+  /** Phone number from the sheet — the first way to find the person in the eligible pool ("" / absent = none). */
+  phone?: string;
+  /** The sheet's user id / UUID — the second way ("" / absent = none). */
+  userId?: string;
 }
 
 /** One of a candidate's repositories that deep GitHub inspection found relevant to the domain. */
@@ -243,6 +248,62 @@ export interface DomainGithubEvidence {
   repoUrl: string;
   /** The finding, e.g. "import torch in src/train.py" or "fastapi declared in requirements.txt". */
   detail: string;
+}
+
+/**
+ * A piece of domain evidence quoted from the resume's projects / experience / achievements /
+ * certifications ("skill" = the quote the model gave for one of the core skills).
+ */
+export interface DomainProof {
+  source: "project" | "experience" | "achievement" | "certification" | "skill";
+  quote: string;
+  /** The core skill the quote backs (source "skill"). */
+  skill?: string;
+}
+
+/** One repository's code review against the domain (deep project review). */
+export interface DomainProjectReview {
+  repo: string;
+  repoUrl: string;
+  /** 0-100: relevance 45% + completeness 30% + depth 25%, capped when no feature is tied to a file. */
+  score: number;
+  /** 0-100 how squarely the project sits in the domain, in real code. */
+  relevance: number;
+  /** 0-100 working end to end vs stub / starter / tutorial. */
+  completeness: number;
+  /** 0-100 engineering depth: structure, data model, error handling, tests, real logic. */
+  depth: number;
+  /** One factual sentence on what the project is and how strong it is for the domain. */
+  summary: string;
+  /** Features the code implements, each with the files it lives in (paths checked against the repo). */
+  features: { name: string; files: string[] }[];
+  /** Requirements / core technologies the code proves, with the files that prove them. */
+  covered: { requirement: string; files: string[] }[];
+  /** Mandatory requirements the project doesn't show. */
+  missing: string[];
+  concerns: string[];
+  /** Files the reviewer read, of all files in the repo. */
+  filesRead: number;
+  filesTotal: number;
+  /** e.g. "gemini/gemini-3.6-flash". */
+  model: string;
+}
+
+/** The deep project review of one candidate's top domain repositories. */
+export interface DomainProjectReviewResult {
+  id: string;
+  /** reviewed = at least one repo reviewed; failed = none could be; no-repos = nothing to review. */
+  status: "reviewed" | "failed" | "no-repos";
+  note: string;
+  /** The best reviewed project's score (0 = none). */
+  score: number;
+  reviews: DomainProjectReview[];
+  reviewedAt: string;
+  fromCache: boolean;
+  /** Failed for a passing reason — worth another try. */
+  retryable?: boolean;
+  /** Stopped by GitHub's or the model's rate limit. */
+  rateLimited?: boolean;
 }
 
 /** A mandatory technology the candidate's GitHub code does not prove. */
@@ -328,6 +389,20 @@ export interface DomainCandidate extends DomainCandidateRow {
   presentationNotes: string;
   /** The model that judged the resume, e.g. "openai/gpt-5.4-mini" (absent in older runs). */
   scoredBy?: string;
+  /** Internal assessment standing from the eligible pool (null = external; absent = not looked up). */
+  internal?: InternalStanding | null;
+  /** Code review of the top domain repositories (absent = not reviewed). */
+  projectReview?: DomainProjectReviewResult;
+  /** The quoted evidence behind domainScore that held up against the resume (absent in older runs). */
+  domainProofs?: DomainProof[];
+  /** The model's domain score before the program's caps (absent = not capped / older runs). */
+  rawDomainScore?: number;
+  /** Why the domain score was lowered ("" / absent = not lowered). */
+  domainCapped?: string;
+  /** The GitHub account's display name ("" = none shown). */
+  githubAccountName?: string;
+  /** Does the GitHub account look like the candidate's? A clear mismatch isn't counted in the rank. */
+  githubIdentity?: "match" | "mismatch" | "unknown";
 }
 
 /** A scored candidate plus where they landed in the shortlist. */
@@ -340,6 +415,15 @@ export interface DomainCandidateOutcome extends DomainCandidate {
   shortlisted: boolean;
   /** Why the candidate was not shortlisted ("" when shortlisted). */
   outcomeReason: string;
+  /**
+   * Shortlisting priority: 1 = internally assessed + good resume, 2 = assessed + average
+   * resume, 3 = external with a good resume; 0 = dropped (absent in older runs).
+   */
+  priority?: 0 | 1 | 2 | 3;
+  /** The number the shortlist is ordered by inside a priority group (domain fit + GitHub + DSA + presentation points). */
+  rankScore?: number;
+  /** Why the candidate is where they are, one line each (the CSV's Signals column). */
+  signals?: string[];
 }
 
 /** Outcome of a domain-shortlisting run. */

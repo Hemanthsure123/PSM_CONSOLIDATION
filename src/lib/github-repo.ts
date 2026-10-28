@@ -489,7 +489,7 @@ function analyzeCommits(data: CommitData | null, owner: string, deadline: string
 
 export async function fetchRepoForEvaluation(
   url: string,
-  hint: { keywords: string[]; deadline: string },
+  hint: { keywords: string[]; deadline: string; /** Refuse repos larger than this (KB); default ~400 MB. */ maxKb?: number },
 ): Promise<FetchRepoResult> {
   const link = parseGithubLink(url);
   if (link.kind === "invalid") return { ok: false, invalid: true, error: link.reason };
@@ -524,7 +524,7 @@ export async function fetchRepoForEvaluation(
     const full = (meta.data as unknown as { full_name?: string }).full_name;
     if (full && full.includes("/")) [owner, repoName] = full.split("/");
     if (meta.data.size === 0) return { ok: false, invalid: true, error: "Repository is empty.", resolvedUrl: plainUrl };
-    if (meta.data.size > MAX_REPO_KB) {
+    if (meta.data.size > (hint.maxKb ?? MAX_REPO_KB)) {
       return {
         ok: false,
         invalid: false,

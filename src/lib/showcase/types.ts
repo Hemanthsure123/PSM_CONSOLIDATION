@@ -70,6 +70,12 @@ export interface SpScreen {
   fromSheet: string[];
   /** Candidate ID shown to companies (stable hash of email / mobile). */
   candidateId: string;
+  /**
+   * Catalogued technologies the resume names in its projects, experience, certifications and
+   * achievements (never the Skills list or the summary) — the profiles' mandatory prefilter.
+   * Absent on rows screened before it existed.
+   */
+  evidenceKeys?: string[];
   version: number;
 }
 
@@ -263,6 +269,110 @@ export interface SpTrust {
   basedOn?: string;
 }
 
+// ── Stage 5b (profiles from JDs): the strict profile-fit judge ──────────────
+
+/** One mandatory item as the judge found it (program-checked: the quote is in the evidence). */
+export interface SpMandatoryVerdict {
+  item: string;
+  met: boolean;
+  quote: string;
+  why: string;
+}
+
+/** One profile's judgement for one candidate. */
+export interface SpProfileJudgement {
+  /** 0-100 after the program's caps. */
+  fit: number;
+  /** The model's number before the caps. */
+  rawFit: number;
+  mandatory: SpMandatoryVerdict[];
+  goodToHave: { item: string; quote: string }[];
+  /** Read projects (titles) relevant to this profile, strongest first. */
+  projects: string[];
+  /** Jobs / internships (companies) relevant to this profile. */
+  jobs: string[];
+  evidence: string;
+  /** Why the program lowered the fit ("" = not lowered). */
+  capped: string;
+}
+
+export interface SpJudge {
+  id: string;
+  status: "ok" | "error";
+  error: string;
+  retryable: boolean;
+  /** The profile definitions it judged against (profilesHash) — edited definitions ask for a new judgement. */
+  basedOn: string;
+  /** The resume reading it judged (its readAt). */
+  readAt: string;
+  /** By profile id. */
+  profiles: Record<string, SpProfileJudgement>;
+  model: string;
+  version: number;
+  checkedAt: string;
+}
+
+// ── Profiles from job descriptions (instead of roles found in the evidence) ──
+
+/** A mandatory item of a profile, with the JD's words behind it and the catalogued technologies it names. */
+export interface SpMandatoryItem {
+  item: string;
+  /** The JD's exact words that make it a must-have ("" = typed by hand). */
+  quote: string;
+  /** Catalogued technology keys the item names (checked in the resume's evidence and in the code). */
+  keys: string[];
+  /** Their display labels. */
+  labels: string[];
+  /** "React or Angular" → any one; "Java, Spring Boot" → all. */
+  mode: "any" | "all";
+}
+
+/** Every setting the LLM fills in from the JD (the user can change any of them). */
+export interface SpProfileInputs {
+  dsaRequired: boolean;
+  dsa: SpDsaBar;
+  strongProject: number;
+  exceptionalProject: number;
+  /** At least one strong relevant project proven in the candidate's own code, and every mandatory technology the code can show. */
+  requireVerified: boolean;
+  proof: { minOwnCommits: number; minShare: number; minDays: number; minSrcFiles: number; allowAiTraces: boolean };
+  /** Months of relevant internship / job the profile requires (0 = not required). */
+  minExperienceMonths: number;
+  /** The judged fit (0-100) a candidate needs. */
+  minFit: number;
+  showcaseAt: number;
+  strongAt: number;
+  topN: number;
+  trustAgent: boolean;
+  /** Projects / DSA / GitHub engineering / fit: weights of the score; experience: bonus points on top. */
+  weights: { projects: number; dsa: number; engineering: number; fit: number; experience: number };
+}
+
+export type SpReasonKey = "dsa" | "projects" | "verified" | "experience" | "fit" | "tiers" | "topN" | "trust" | "weights";
+
+export interface SpProfileDef {
+  /** "p1", "p2" … — stable within the run. */
+  id: string;
+  /** Domain name (the tab's name). */
+  name: string;
+  /** What defines a showcase-grade candidate for this profile. */
+  definesIt: string;
+  /** Must be verified in the sample profile. */
+  mandatory: SpMandatoryItem[];
+  /** Looked for in the resume. */
+  goodToHave: string[];
+  inputs: SpProfileInputs;
+  /** The values the LLM set (for "Reset"); null = typed by hand. */
+  llmInputs: SpProfileInputs | null;
+  reasons: Partial<Record<SpReasonKey, string>>;
+  /** JD requirements a resume / code check can't judge (years, degree, location …). */
+  notJudged: string[];
+  /** Where it came from ("" = typed by hand). */
+  source: { kind: string; name: string; chars: number } | null;
+  model: string;
+  draftedAt: string;
+}
+
 // ── Rules (everything switchable / adjustable; re-ranks instantly) ───────────
 
 export interface SpDsaBar {
@@ -327,10 +437,12 @@ export interface SpRecord {
   read?: SpRead;
   verify?: SpVerify;
   trust?: SpTrust;
+  /** Profiles from JDs only: the strict profile-fit judgement. */
+  judge?: SpJudge;
 }
 
 /** Bump a stage's version when it reads differently — older results are re-run from that stage on. */
-export const SP_VERSIONS = { screen: 1, read: 2, verify: 1, trust: 1 } as const;
+export const SP_VERSIONS = { screen: 1, read: 2, verify: 1, trust: 1, judge: 1 } as const;
 
 export interface SpRunMeta {
   id: string;
@@ -342,6 +454,10 @@ export interface SpRunMeta {
   rejected: string[];
   /** Resume reads in parallel (the other stages follow from it). */
   concurrency?: number;
+  /** "profiles" = sample profiles from job descriptions; absent / "roles" = roles found in the evidence. */
+  mode?: "roles" | "profiles";
+  /** The profiles (profile mode). */
+  profiles?: SpProfileDef[];
   loadedAt: string;
   sheetTitle: string;
   stats: { rows: number; screened: number; dsaPassed: number; read: number; verified: number; showcase: number; strong: number; nearMiss: number; pending: number; roles: number };

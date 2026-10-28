@@ -68,7 +68,7 @@ export interface DomainAutofill {
  * model sees the document and before anything is checked against it.
  */
 const INSTRUCTION =
-  /\b(ignore|disregard|forget|override)\b[^.\n]{0,60}\b(previous|prior|above|earlier|all|these|those|your)\b[^.\n]{0,40}\b(instructions?|prompts?|rules?|directions?|guidelines?)\b|\bsystem prompt\b|\byou are (an?|the) (ai|assistant|model|language model|llm)\b|\b(put|add|include|insert|list|write|output|return|respond with)\b[^.\n]{0,80}\b(in|into|to|under|as)\b[^.\n]{0,20}\b(mandatory|defines ?it|the json|your (answer|output|response))\b/i;
+  /\b(ignore|disregard|forget|override)\b[^.\n]{0,60}\b(previous|prior|above|earlier|all|these|those|your)\b[^.\n]{0,40}\b(instructions?|prompts?|rules?|directions?|guidelines?)\b|\bsystem prompt\b|\byou are (an?|the) (ai|assistant|model|language model|llm)\b|\b(put|add|include|insert|list|write|output|return|respond with)\b[^.\n]{0,80}\b(in|into|to|under|as)\b[^.\n]{0,20}\b(mandatory|defines ?it|good ?to ?have|the json|your (answer|output|response))\b/i;
 
 export function stripInstructions(text: string): { text: string; removed: string[] } {
   const removed: string[] = [];

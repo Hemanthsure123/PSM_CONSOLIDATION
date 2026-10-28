@@ -10,6 +10,8 @@ import { EMPTY_PLATFORM, type DsaLinkSource, type DsaPlatform, type DsaSnapshot 
 import {
   analyzeGithubProfile,
   buildJdTechSpec,
+  githubBudget,
+  githubGetJson,
   githubUsernameFor,
   mandatoryTechsAbsent,
   techsNamedIn,
@@ -18,7 +20,8 @@ import {
   type JdTechSpec,
 } from "@/lib/github-analysis";
 import { coalesce, inspectionCacheKey, readInspectionCache, writeInspectionCache } from "@/lib/github-inspect-cache";
-import { loose, textCtx, inText } from "@/lib/qa-verify";
+import { evidenceText } from "@/lib/resume-sections";
+import { githubIdentity, groundDomainFit } from "@/lib/domain-evidence";
 import { analyzeCandidateForDomain } from "@/actions/llm";
 import type {
   DomainCandidate,
@@ -43,8 +46,12 @@ import type {
  *  - a file with no usable text (photo, certificate, scanned page) is identified
  *    first and only a real resume is screened — from its transcription, so the model
  *    can't invent a resume from a photo; a .docx is read as text;
- *  - core skills the model names must appear in the resume's own text, and a mandatory
- *    technology the resume never names can't be "met".
+ *  - domain evidence is only projects, experience, certifications and achievements: the
+ *    Skills section and the profile summary are taken out of what the model reads (when
+ *    the layout allows) and out of every check below;
+ *  - core skills the model names must appear in that evidence text, and a mandatory
+ *    technology it never names can't be "met";
+ *  - a fit that rests only on the Skills / Summary sections is capped below every bar.
  */
 
 /**
@@ -113,19 +120,6 @@ export function splitGithub(urls: string[]): { profile: string; repos: string[] 
 }
 
 const asText = (text: string): ResumeBytes => ({ data: Buffer.from(text, "utf8"), mimeType: "text/plain" });
-
-/**
- * A core skill the model names must be in the resume — written out ("Jetpack
- * Compose"), squeezed ("jetpackcompose"), or with at least half of its words present
- * ("State Management" ← "managed app state"). Anything else is the model's guess.
- */
-function skillInResume(skill: string, text: string, ctx: ReturnType<typeof textCtx>): boolean {
-  if (inText(skill, ctx) || ctx.loose.includes(loose(skill))) return true;
-  const words = skill.toLowerCase().match(/[a-z0-9+#]{3,}/g) ?? [];
-  if (!words.length) return false;
-  const lower = text.toLowerCase();
-  return words.filter((w) => lower.includes(w)).length / words.length >= 0.5;
-}
 
 /** The whole DSA read (link search + all three platforms) is cut off here — CodeChef paces requests hard. */
 const DSA_READ_MS = 120_000;
@@ -228,6 +222,12 @@ export async function screenDomainCandidate(row: DomainCandidateRow, opts: Domai
     // Links: a PDF's hidden link annotations come from the file itself; otherwise the text.
     const forLinks: ResumeBytes = content.source === "pdf" ? bytes : asText(resumeText);
 
+    // Evidence only: without the Skills / Summary sections. When the sections were found
+    // cleanly the model reads that text (the presentation grade needs the page itself, so a
+    // run that grades presentation keeps the PDF and relies on the prompt's rule).
+    const evidence = evidenceText(resumeText);
+    if (evidence.trusted && evidence.removed.length && !checkPresentation) forModel = asText(evidence.text);
+
     // 3. GitHub links (independent of the model — read alongside it).
     const githubLinks = useGithub
       ? collectResumeUrls(forLinks)
@@ -254,23 +254,32 @@ export async function screenDomainCandidate(row: DomainCandidateRow, opts: Domai
     const leetcodeSolved = dsa?.leetcode.solved ?? 0;
     const codeforcesSolved = dsa?.codeforces.solved ?? 0;
 
-    // 6. Core skills must be in the resume's own text, and so must every plainly
-    //    required technology the model says is met (whichever model judged it).
-    const ctx = textCtx(resumeText);
-    const coreSkills = resumeText ? res.data.coreSkills.filter((s) => skillInResume(s, resumeText, ctx)) : res.data.coreSkills;
-    const absent = res.data.meetsMandatory && mandatory.trim() ? mandatoryTechsAbsent(mandatory, resumeText) : [];
-    // The domain's technologies this resume names — compared later with what the GitHub code proves.
-    const resumeTechs = useGithub && resumeText ? techsNamedIn(specLabels(buildJdTechSpec(mandatory, domain, { modelledOnly: true })), resumeText) : [];
-    if (absent.length) console.warn(`[domain] ${row.id}: ${res.data.scoredBy} said every mandatory item is met, but the resume never names ${absent.join(", ")}`);
+    // 6. Ground the model's answer in the resume's EVIDENCE text (projects, experience,
+    //    certifications, achievements — never the Skills list or the summary): core skills
+    //    need their quote there, the domain score needs quoted evidence (domain-evidence.ts),
+    //    and every plainly required technology the model says is met must be named there.
+    const proof = evidence.text;
+    const grounded = proof
+      ? groundDomainFit(res.data, proof, { sectionsRemoved: evidence.removed.length > 0 })
+      : { domainScore: res.data.domainScore, rawScore: res.data.domainScore, coreSkills: res.data.coreSkills, proofs: res.data.proofs, capped: "" };
+    const absent = res.data.meetsMandatory && mandatory.trim() ? mandatoryTechsAbsent(mandatory, proof) : [];
+    // The domain's technologies the resume's evidence names — compared later with what the GitHub code proves.
+    const resumeTechs = useGithub && proof ? techsNamedIn(specLabels(buildJdTechSpec(mandatory, domain, { modelledOnly: true })), proof) : [];
+    if (absent.length) console.warn(`[domain] ${row.id}: ${res.data.scoredBy} said every mandatory item is met, but the evidence never names ${absent.join(", ")}`);
+    if (grounded.capped) console.warn(`[domain] ${row.id}: fit ${grounded.rawScore} → ${grounded.domainScore} (${grounded.capped})`);
+    const domainScore = grounded.domainScore;
+    const coreSkills = grounded.coreSkills;
 
     return {
       ok: true,
       source: content.source === "pdf" && forModel === bytes ? "pdf" : `${content.source} (as text)`,
       candidate: {
         ...row,
-        domainScore: res.data.domainScore,
+        domainScore,
         coreSkills,
-        evidence: res.data.evidence,
+        evidence: grounded.capped && grounded.domainScore <= 35 && !grounded.proofs.length ? "No domain work quoted from the projects, experience or achievements" : res.data.evidence,
+        domainProofs: grounded.proofs,
+        ...(grounded.capped ? { rawDomainScore: grounded.rawScore, domainCapped: grounded.capped } : {}),
         meetsMandatory: res.data.meetsMandatory && absent.length === 0,
         hasDomainExperience: res.data.hasDomainExperience,
         experience: res.data.experience,
@@ -310,6 +319,8 @@ export interface GithubInspectInput {
   githubRepos: string[];
   /** The domain's technologies the resume names (from screening) — compared with what the code proves. */
   claimedTechs?: string[];
+  /** The candidate's name — compared with the GitHub account's name. */
+  name?: string;
 }
 
 /** Every technology label a spec looks for, mandatory first. */
@@ -338,6 +349,10 @@ export interface GithubInspectResult {
   checkedAt: string;
   /** Reused from the 24 h cache. */
   fromCache: boolean;
+  /** The GitHub account's display name ("" = none shown). */
+  accountName?: string;
+  /** Does the account look like the candidate's (name vs the account's name / login)? */
+  identity?: "match" | "mismatch" | "unknown";
   /** Failed for a passing reason (network) — worth one more try. */
   retryable?: boolean;
   /** Stopped by GitHub's rate limit — worth retrying after the hourly reset. */
@@ -345,7 +360,7 @@ export interface GithubInspectResult {
 }
 
 /** The part of an inspection that depends only on the GitHub account + domain (what the cache stores). */
-type InspectionOutcome = Omit<GithubInspectResult, "id" | "claimedNotFound" | "fromCache">;
+type InspectionOutcome = Omit<GithubInspectResult, "id" | "claimedNotFound" | "fromCache" | "identity">;
 
 const FAILURE_STATUS: Record<GithubFailure, DomainGithubStatus> = {
   "no-username": "no-link",
@@ -377,17 +392,20 @@ export async function inspectDomainGithub(
 ): Promise<GithubInspectResult> {
   const spec = buildJdTechSpec(mandatory, domain, { modelledOnly: true });
   const claimed = new Set((input.claimedTechs ?? []).filter((t) => specLabels(spec).includes(t)));
+  const user = githubUsernameFor(input.githubProfile, input.githubRepos);
   const finish = (o: InspectionOutcome, fromCache: boolean): GithubInspectResult => ({
     ...o,
     id: input.id,
     fromCache,
     claimedNotFound: o.status === "checked" ? [...claimed].filter((t) => !o.techs.includes(t)) : [],
+    identity: o.status === "checked" ? githubIdentity(input.name ?? "", o.accountName ?? "", user ?? "") : undefined,
   });
 
-  const user = githubUsernameFor(input.githubProfile, input.githubRepos);
   const key = user
     ? inspectionCacheKey({
         v: GITHUB_ANALYSIS_VERSION,
+        // 2: the outcome carries the account's display name (identity check).
+        outcome: 2,
         user: user.toLowerCase(),
         repos: [...new Set(input.githubRepos.map((r) => r.trim().toLowerCase().replace(/\/+$/, "").replace(/\.git$/, "")))].sort(),
         mandatory: [...spec.mandatory].sort(),
@@ -430,10 +448,14 @@ async function inspectFresh(input: GithubInspectInput, spec: JdTechSpec): Promis
   try {
     // The profile URL, or any repo URL — its owner is the candidate.
     const who = input.githubProfile || input.githubRepos[0] || "";
-    const [deep, commits] = await Promise.all([
+    const login = githubUsernameFor(input.githubProfile, input.githubRepos);
+    const [deep, commits, account] = await Promise.all([
       analyzeGithubProfile(input.githubProfile, input.githubRepos, spec),
       getGithubContributions(who),
+      // The account's display name — to check the account is the candidate's (one REST call).
+      login ? githubGetJson<{ name?: string | null }>(`/users/${encodeURIComponent(login)}`, githubBudget(2)).catch(() => null) : Promise.resolve(null),
     ]);
+    const accountName = (account?.ok && account.data?.name ? String(account.data.name) : "").trim().slice(0, 120);
     if (!deep.ok) {
       const status = FAILURE_STATUS[deep.reason];
       return {
@@ -474,6 +496,7 @@ async function inspectFresh(input: GithubInspectInput, spec: JdTechSpec): Promis
         aiSummary: a.authenticity.summary,
         evidence: a.techEvidence.map((e) => ({ tech: e.tech, repo: e.repo, repoUrl: e.repoUrl, detail: e.detail })),
         mandatoryGaps: a.mandatoryGaps.map((g) => ({ tech: g.tech, reason: g.reason, detail: g.detail })),
+        accountName,
         checkedAt,
       },
       // A run cut short (rate limit / call budget) or a missing commit count is not reused.

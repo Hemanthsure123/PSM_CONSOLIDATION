@@ -9,6 +9,7 @@ import { pdfBufferToText } from "@/lib/pdf-text";
 import { env } from "@/lib/env";
 import type {
   ActionResult,
+  DomainProof,
   GithubProject,
   ReportCriteria,
   ResumeAnalysis,
@@ -484,7 +485,9 @@ export async function extractProjectsFromResume(
  */
 const DOMAIN_SYSTEM = `You assess whether a candidate FITS a target domain, using only their resume.
 
-Judge fit ONLY on real evidence in the resume: domain-relevant PROJECTS, INTERNSHIP / WORK experience, and GitHub / portfolio work that is described. Consider the FULL breadth of the domain — its technologies, topics, sub-topics and tools. Coding-platform activity (LeetCode / Codeforces), when provided, is a SECONDARY strength signal only, never a substitute for domain evidence.
+Judge fit ONLY on real evidence in the resume, from these sections and nothing else: PROJECTS (including GitHub / portfolio work described there), INTERNSHIP / WORK EXPERIENCE, CERTIFICATIONS and ACHIEVEMENTS (hackathons, coding contests, competitions, research and publications, open-source contributions, positions where real technical work was done). Consider the FULL breadth of the domain — its technologies, topics, sub-topics and tools. Coding-platform activity (LeetCode / Codeforces), when provided, is a SECONDARY strength signal only, never a substitute for domain evidence.
+
+NEVER use the SKILLS / TECHNICAL SKILLS / TOOLS list or the PROFILE SUMMARY / OBJECTIVE / ABOUT section as evidence — treat them as if they were not there. A technology that appears only in those sections is NOT evidence of anything: it adds nothing to domainScore, it can't be a core skill, and it can't satisfy a mandatory requirement. Coursework, interests and spoken languages aren't evidence either. Certifications are lighter evidence than projects and experience.
 
 Return JSON only:
 1) "domainScore" (0-100): how strongly this candidate fits the domain.
@@ -493,9 +496,10 @@ Return JSON only:
    - 1-54: tangential, tutorial-grade, or only keyword mentions.
    - 0: no domain evidence at all.
    Be strict and calibrated. Do NOT cluster scores; most candidates are not a strong fit.
-2) "coreSkills": the domain-specific skills the candidate is GENUINELY STRONG in — each MUST be backed by a real project, experience, or github work in the resume. Short names (e.g. "RAG", "LangChain", "Fine-tuning", "Vector DBs", "Prompt Engineering"). 4-8 max, strongest first. NEVER list a skill the resume does not substantiate. If the candidate does not fit the domain, return an empty array.
+2) "coreSkills": the domain-specific skills the candidate is GENUINELY STRONG in, each as {"skill", "quote"}: "skill" a short name (e.g. "RAG", "LangChain", "Fine-tuning", "Vector DBs", "React"); "quote" 3-20 consecutive words copied EXACTLY from a project, internship / job, certification or achievement line of the resume that shows the skill being USED (never from the Skills list or the summary). 4-8 max, strongest first. A skill you can't quote from that kind of line must be left out. If the candidate does not fit the domain, return an empty array.
 3) "evidence": ONE short, factual line naming the strongest domain proof (e.g. "Built a production RAG assistant and interned on an LLM team"). No hype, no pronouns, no "the candidate". Empty string when there is no fit.
-4) "meetsMandatory" (boolean): when MANDATORY REQUIREMENTS are given, set true ONLY if the resume shows genuine, evidence-backed proof of EVERY one (a real project/experience for each — not a mere mention in a skills list). If any single mandatory item is missing or only name-dropped, set false. When no mandatory requirements are given, set true.
+   "proofs": the 1-5 strongest pieces of domain evidence behind domainScore, each {"source": "project" | "experience" | "achievement" | "certification", "quote": 5-25 consecutive words copied EXACTLY from that part of the resume}. A program checks every quote against the resume and lowers domainScore when the quotes don't hold it up, so give real quotes — never paraphrase. Empty when there is no domain evidence.
+4) "meetsMandatory" (boolean): when MANDATORY REQUIREMENTS are given, set true ONLY if the resume shows genuine, evidence-backed proof of EVERY one (a real project, experience, certification or achievement for each — a mention in the Skills list or the summary does NOT count). If any single mandatory item is missing or only name-dropped, set false. When no mandatory requirements are given, set true.
 5) "hasDomainExperience" (boolean) + "experience" (string): does the resume show INTERNSHIP or WORK experience that is genuinely RELEVANT to this domain (and to the mandatory requirements)? Set hasDomainExperience true ONLY for a real internship or job where domain-relevant work was actually done — NOT a personal project, a course, or an unrelated job. Give "experience" as ONE short factual line naming the most relevant one (company + what was done), e.g. "Backend intern at Acme — built Node/Express REST APIs". Empty string and false when there is no relevant internship/work experience.
 
 6) "presentationScore" (0-100) + "presentationNotes" (string): ONLY when a RESUME PRESENTATION CHECK is requested in the instruction. Judge the DOCUMENT ITSELF — how well structured, aligned, organised and visually presentable it is against industry-standard resume conventions — SEPARATELY from the candidate's skills. A weak candidate can have a beautiful resume and a strong one a messy resume; never let domainScore leak into this number. Return 0 and an empty string when no presentation check was requested.
@@ -532,8 +536,22 @@ const DOMAIN_SCHEMA: Schema = {
   type: SchemaType.OBJECT,
   properties: {
     domainScore: { type: SchemaType.NUMBER },
-    coreSkills: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } },
+    coreSkills: {
+      type: SchemaType.ARRAY,
+      items: { type: SchemaType.OBJECT, properties: { skill: { type: SchemaType.STRING }, quote: { type: SchemaType.STRING } }, required: ["skill", "quote"] },
+    },
     evidence: { type: SchemaType.STRING },
+    proofs: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          source: { type: SchemaType.STRING, format: "enum", enum: ["project", "experience", "achievement", "certification"] },
+          quote: { type: SchemaType.STRING },
+        },
+        required: ["source", "quote"],
+      },
+    },
     meetsMandatory: { type: SchemaType.BOOLEAN },
     hasDomainExperience: { type: SchemaType.BOOLEAN },
     experience: { type: SchemaType.STRING },
@@ -544,7 +562,7 @@ const DOMAIN_SCHEMA: Schema = {
 };
 
 const DOMAIN_SHAPE_HINT = `Return ONLY a JSON object with exactly this shape:
-{"domainScore":number,"coreSkills":string[],"evidence":string,"meetsMandatory":boolean,"hasDomainExperience":boolean,"experience":string,"presentationScore":number,"presentationNotes":string}`;
+{"domainScore":number,"coreSkills":[{"skill":string,"quote":string}],"evidence":string,"proofs":[{"source":"project"|"experience"|"achievement"|"certification","quote":string}],"meetsMandatory":boolean,"hasDomainExperience":boolean,"experience":string,"presentationScore":number,"presentationNotes":string}`;
 
 const DOMAIN_TASK: LlmTask = {
   system: DOMAIN_SYSTEM,
@@ -553,11 +571,17 @@ const DOMAIN_TASK: LlmTask = {
   temperature: 0.15,
 };
 
+const PROOF_SOURCES = ["project", "experience", "achievement", "certification"] as const;
+
 /** One candidate's domain-fit judgement. */
 export interface DomainFit {
   domainScore: number;
   coreSkills: string[];
+  /** The resume's words behind each core skill ("" when the model gave none) — checked by the caller. */
+  skillQuotes: string[];
   evidence: string;
+  /** The model's quotes behind domainScore — checked by the caller against the resume's evidence text. */
+  proofs: DomainProof[];
   /** Whether ALL mandatory requirements are met (true when none were given). */
   meetsMandatory: boolean;
   /** Whether the resume shows domain-relevant internship/work experience. */
@@ -604,11 +628,21 @@ function normalizeDomainFit(raw: string): Omit<DomainFit, "scoredBy"> | null {
   const rawScore = typeof p.domainScore === "number" ? p.domainScore : Number(p.domainScore);
   if (p.domainScore === undefined || p.domainScore === null || p.domainScore === "" || !Number.isFinite(rawScore)) return null;
   const domainScore = clamp100(p.domainScore);
-  const coreSkills = (Array.isArray(p.coreSkills) ? p.coreSkills : [])
-    .map(str)
-    .map((s) => s.replace(/^[•\-*\s]+/, "").trim())
-    .filter(Boolean)
+  // Each core skill as {skill, quote}; a bare string (older / looser answers) has no quote.
+  const skills = (Array.isArray(p.coreSkills) ? p.coreSkills : [])
+    .map((x) => {
+      const o = x && typeof x === "object" ? (x as Record<string, unknown>) : null;
+      const skill = (o ? str(o.skill) : str(x)).replace(/^[•\-*\s]+/, "").trim();
+      return { skill, quote: o ? str(o.quote).replace(/\s+/g, " ").trim() : "" };
+    })
+    .filter((x) => x.skill)
     .slice(0, 8);
+  const coreSkills = skills.map((x) => x.skill);
+  const proofs: DomainProof[] = (Array.isArray(p.proofs) ? p.proofs : [])
+    .map((x) => (x && typeof x === "object" ? (x as Record<string, unknown>) : {}))
+    .map((x) => ({ source: str(x.source).toLowerCase() as DomainProof["source"], quote: str(x.quote).replace(/\s+/g, " ").trim() }))
+    .filter((x) => x.quote && (PROOF_SOURCES as readonly string[]).includes(x.source))
+    .slice(0, 5);
   // Default true so a run WITHOUT mandatory requirements never spuriously gates;
   // the model only returns false when it was asked to check and one is missing.
   const meetsMandatory = p.meetsMandatory === undefined ? true : Boolean(p.meetsMandatory);
@@ -618,7 +652,9 @@ function normalizeDomainFit(raw: string): Omit<DomainFit, "scoredBy"> | null {
   return {
     domainScore,
     coreSkills,
+    skillQuotes: skills.map((x) => x.quote),
     evidence,
+    proofs,
     meetsMandatory,
     hasDomainExperience: Boolean(p.hasDomainExperience),
     experience: str(p.experience).replace(/\s+/g, " ").trim(),

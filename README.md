@@ -15,11 +15,13 @@ Each tool sits in the sidebar, grouped by the job it does in a placement drive.
 
 | Group | Tool | Input | What it produces | Saved runs |
 |---|---|---|---|---|
-| — | **Dashboard** | — | Companies, saved runs of every tool, source analytics | — |
+| — | **Dashboard** | — | Companies, saved runs of every tool, source analytics; the eligible pool's numbers and a "Refetch eligible pool" button | — |
+| — | **Eligible pool** | The Edge 2.0, Edge 1.0 and Academy pool sheets (or CSV exports) | Who is internally assessed and eligible at each stage, per product, and how that ranks them in Domain shortlisting; refetch and CSV upload | Postgres |
+| — | **Standing lookup** | Pasted UUIDs / phone numbers | Internal Standing, Stage and Product per candidate from the internal assessments (no resume), plus one Requirements column with the assessment results you pick; copy for Sheets in the pasted order, or CSV | — |
 | Company sheets | **Build company sheet** | Internal Google Sheet (+ optional BigQuery columns) | `<Company> \|\| Nxtwave` CSV with AI screening-report PDF links, skill set and remarks | localStorage |
 | | **Analyze company sheet** | A company's Google Sheet | Source split (Edge / Academy / External) and interview-round funnels | localStorage |
-| | **Sample profiles** | One Google Sheet of resumes (thousands of rows) | The strongest candidates per tech role, from the resume, the candidate's own GitHub code and DSA profiles only, to show a company's hiring manager; a company workbook (Candidate IDs, no contact details) and an internal workbook | IndexedDB |
-| Screening | **Domain shortlisting** | Google Sheet of candidates + a domain brief | Ranked shortlist backed by resume, GitHub code and DSA profiles; PDF report + CSVs | — (report on Drive) |
+| | **Sample profiles** | One Google Sheet of resumes (thousands of rows), and optionally job descriptions | The strongest candidates per tech role — or, with "from job descriptions" on, per JD (the model drafts each profile's definition, mandatory items and every input from the JD) — from the resume, the candidate's own GitHub code and DSA profiles only, to show a company's hiring manager; a company workbook (Candidate IDs, no contact details) and an internal workbook | IndexedDB |
+| Screening | **Domain shortlisting** | Google Sheet of candidates + a domain brief | Ranked shortlist: internally assessed candidates first (eligible pool), then resume evidence from projects, experience, certifications and achievements only, GitHub code (with a file-level review of the top projects) and DSA profiles; PDF report + CSVs | — (report on Drive) |
 | | **QA screening** | Pasted rows (mobile + resume) | Ranked QA shortlist with per-section skill evidence; CSVs | IndexedDB |
 | | **Zaggle SDE 1** | Pasted rows | JD-based screening for one client role (Zaggle SDE 1 Backend); CSVs | IndexedDB |
 | | **Candidate bucketing** | Pasted rows / sheet CSV with stage | Candidates sorted into 5 buckets with tags and a trust score; CSVs | IndexedDB |
@@ -31,6 +33,9 @@ Each tool sits in the sidebar, grouped by the job it does in a placement drive.
 | Reference | **Benchmark projects** | Pasted resumes + one domain | 15+ LPA-grade projects in that domain, exported as Markdown for Notion | IndexedDB |
 
 Feature deep-dives live in [`docs/`](./docs):
+- [`architecture.md`](./docs/architecture.md) — system architecture, the eligible-pool database, sync, security and deployment
+- [`standing-lookup.md`](./docs/standing-lookup.md) — internal standing for pasted UUIDs / phone numbers, and the Requirements column
+- [`domain-shortlisting-results.md`](./docs/domain-shortlisting-results.md) — the results CSVs, Signals, and the evidence / GitHub-identity trust rules
 - [`domain-shortlisting-dsa.md`](./docs/domain-shortlisting-dsa.md)
 - [`github-inspection.md`](./docs/github-inspection.md)
 - [`zaggle-sde1-screening.md`](./docs/zaggle-sde1-screening.md)
@@ -119,10 +124,18 @@ are kept for single calls: reading sheets, BigQuery, building PDF reports and ge
 | `POST /api/domain/analyze` | Domain shortlisting: screen one resume (model judgement + mandatory guard + DSA read + GitHub links) |
 | `POST /api/domain/github` | Domain shortlisting: deep-inspect one candidate's GitHub (24 h cache) |
 | `POST /api/domain/autofill` | Domain shortlisting: draft "What defines it" + "Mandatory skills" from a JD (text, PDF, .docx, HTML or image) for review |
+| `POST /api/domain/review` | Domain shortlisting: file-level review of one candidate's top domain repos against the requirements (24 h cache) |
+| `GET  /api/pool/summary` | Eligible pool: counts per product and stage, sources, recent syncs |
+| `POST /api/pool/sync` | Eligible pool: refetch one product from its Google Sheet |
+| `POST /api/pool/upload` | Eligible pool: upsert a CSV export of a product's sheet |
+| `POST /api/pool/lookup` | Eligible pool: internal standings for a batch of people (phone first, then user id); `include` adds each product's assessment records (Standing lookup) |
+| `GET /api/health` | Liveness, open without sign-in: `{status, version, uptimeSec}`; `?db=1` adds a cached database ping |
+| `GET /api/status` | Readiness (signed in): database and pool freshness, which integrations are configured (counts only), `?pdf=1` renders a test PDF |
 | `POST /api/qa/evaluate` | QA screening: evidence per QA item and resume section |
 | `POST /api/zaggle/evaluate` | Zaggle SDE 1: work history, dates and evidence per JD item |
 | `POST /api/academy/evaluate` | Academy bucketing: one candidate's resume items by stack, GitHub code (24 h cache), coding profiles, identity check and trust review |
 | `POST /api/showcase/{screen,dsa,probe,read,verify,trust}` | Sample profiles, one stage per call: resume links (no model) · DSA for the bar (Codeforces batched) · GitHub account probe · resume read · GitHub proof of flagship projects · trust review |
+| `POST /api/showcase/{autofill,techkeys,judge}` | Sample profiles from job descriptions: draft a profile and every input from a JD · the technologies a mandatory item names · the strict profile-fit judge (one call per candidate, every profile) |
 | `POST /api/experience/analyze` | Experience analysis: every internship / job in one resume |
 | `POST /api/assignment/evaluate` | Assignment evaluation: download a repo, build its dossier, review it against the rubric |
 | `POST /api/benchmarks/profile` | Benchmark projects: turn the typed domain into a domain profile (once per run) |
@@ -252,7 +265,8 @@ The CSV's "Scored By" column records which model judged each candidate.
 | localStorage | Companies, sheet analyses, DSA runs, assignment runs, experience runs (`company-store`, `analysis-store`, `dsa-store`, `assignment-store`, `experience-store`) | Small runs; dependency-free |
 | IndexedDB | QA, Zaggle, Candidate bucketing, Academy bucketing, Sample profiles and Benchmark runs (`qa-store`, `zaggle/store`, `bucketing-store`, `academy/store`, `showcase/store`, `benchmark-store`) | Thousands of candidates; one record per candidate, written on arrival |
 | Google Drive | PDF reports | Shareable links for companies |
-| `.cache/github-inspect/` | GitHub inspection results, Academy bucketing's and Sample profiles' resume readings and trust reviews, DSA profiles, GitHub probes and repo proofs (24 h) | Re-runs cost no GitHub or model quota |
+| Postgres (Supabase), schema `placement` | The **eligible pool**: internal assessments of Edge 2.0, Edge 1.0 and Academy, their derived standing, and the sync log | Shared by everyone using the app; see [`docs/architecture.md`](./docs/architecture.md) |
+| `.cache/github-inspect/` | GitHub inspection results, Domain shortlisting's project reviews, Academy bucketing's and Sample profiles' resume readings and trust reviews, DSA profiles, GitHub probes and repo proofs (24 h) | Re-runs cost no GitHub or model quota |
 
 Saved runs live in the browser profile that created them. Clearing site data or using another browser
 starts empty.
@@ -279,13 +293,14 @@ src/
   app/
     layout.tsx, page.tsx, globals.css    # shell entry, fonts, design tokens
     api/                                 # route handlers — one candidate per request
-      domain/{analyze,github}  qa/evaluate  zaggle/evaluate  academy/evaluate  experience/analyze
-      showcase/{screen,dsa,probe,read,verify,trust}
+      domain/{analyze,github,autofill,review}  pool/{summary,sync,upload,lookup}  qa/evaluate  zaggle/evaluate  academy/evaluate  experience/analyze
+      showcase/{screen,dsa,probe,read,verify,trust,autofill,techkeys,judge}
       assignment/evaluate  benchmarks/{profile,extract}  bucketing/{evaluate,github}
   actions/                               # server actions (single calls)
     sheets.ts bigquery.ts report.ts domain.ts projects.ts dsa.ts assignment.ts llm.ts academy.ts
   components/
     app-shell.tsx  busy-context.tsx  home-dashboard.tsx  company-detail.tsx  charts.tsx
+    pool/                                # Eligible pool screen, dashboard card, pool charts
     ui/                                  # design-system primitives
     wizard/                              # Build company sheet (5 steps)
     sheet-analyzer/  domain-shortlist/  qa-screening/  zaggle/  bucketing/  academy/  showcase/
@@ -293,6 +308,10 @@ src/
     projects-consolidation/  project-benchmarks/
   lib/
     env.ts                               # lazy, validated environment access (server-only)
+    db/client.ts                         # Postgres pool (Supabase transaction pooler), query / transaction
+    pool/                                # Eligible pool: types · parse · standing · match · sources · sync · queries · client
+    resume-sections.ts domain-project-review.ts               # Domain shortlisting: evidence-only text, deep project review
+    domain-evidence.ts domain-signals.ts domain-csv.ts        # Domain shortlisting: score grounding + GitHub identity, Signals, the CSVs
     sheets.ts drive.ts bigquery.ts gemini.ts                   # Google clients (lazy singletons)
     resume.ts resume-content.ts resume-input.ts resume-links.ts pdf-text.ts docx-text.ts
     gemini-keys.ts key-pool.ts llm-router.ts llm-escalation.ts  # LLM layer
@@ -303,13 +322,14 @@ src/
     qa-*.ts  experience-*.ts  assignment-*.ts  benchmark-*.ts   # per-feature types / parse / evaluate / score / csv / store
     zaggle/  bucketing/ (+ bucketing/nodes/)  bucketing-store.ts
     academy/                             # Academy bucketing: parse · scoring · evaluator · trust-agent · export · xlsx · store
-    showcase/                            # Sample profiles: parse · roles · dsa-rules · screen · dsa · github-probe · reader · verify · trust · scoring · pipeline · export · store
+    showcase/                            # Sample profiles: parse · roles · dsa-rules · screen · dsa · github-probe · reader · verify · trust · scoring · pipeline · export · store · profile-rules · profile-autofill · profile-judge · profile-fit
     trust-review.ts dsa-cache.ts resume-folder.ts                # shared: trust agent core, 24 h DSA cache, Drive folder links
     company-sheet.ts company-store.ts analysis-store.ts columns.ts source-track.ts
     report-template.ts projects-template.ts pdf.ts report-storage.ts
     types.ts utils.ts
   types/                                 # ambient type declarations
-scripts/                                 # self-tests and a bucketing CLI (run with tsx)
+db/migrations/                           # versioned SQL (npm run db:migrate)
+scripts/                                 # self-tests, db-migrate, pool-sync and a bucketing CLI (run with tsx)
 docs/                                    # feature and design documentation
 ```
 
@@ -331,6 +351,7 @@ Requirements: Node.js 20+, npm, and a Google Cloud service account.
 ```bash
 npm install
 cp .env.local.example .env.local   # fill in the values (see below)
+npm run db:migrate                  # once, and after pulling new migrations (needs DIRECT_URL)
 npm run dev                         # http://localhost:3000
 ```
 
@@ -340,6 +361,8 @@ npm run dev                         # http://localhost:3000
 | `npm run build` / `npm start` | Production build / server |
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run lint` | Next.js lint |
+| `npm run db:migrate` / `npm run db:status` | Apply / list database migrations (`db/migrations`) |
+| `npm run pool:sync` | Refetch the eligible pool from its sheets (`-- edge2`, or `-- academy --csv=file.csv`) |
 
 > Tailwind reads `tailwind.config.ts` only when the server starts. Restart `npm run dev` after changing it.
 
@@ -356,6 +379,10 @@ npx tsx scripts/zaggle-selftest.ts              # dates, overlap counting, IT-se
 npx tsx scripts/bucketing-selftest.ts           # bucket rules, commit integrity, scoring, stage arbiter
 npx tsx scripts/academy-selftest.ts             # sheet reading / joins, eligibility, stack rules, Mixed rule, ranking, .xlsx
 npx tsx scripts/showcase-selftest.ts            # DSA bar and owners, roles, course caps, GitHub proof, gates, tiers, plan, both workbooks
+npx tsx scripts/pool-selftest.ts                # eligible pool: sheets → records, standing rules, CSV detection, matching, shortlist priority, gates, review grounding
+npx tsx scripts/standing-lookup-selftest.ts     # standing lookup: reading the paste, requirements, rows / columns, clipboard formats
+npx tsx scripts/resume-sections-selftest.ts     # domain evidence: Skills / Summary sections removed, mandatory checked on evidence only
+npx tsx scripts/domain-csv-selftest.ts          # domain score grounding + caps, GitHub identity, rank order / tie-breaks, Signals, CSV columns
 ```
 
 `scripts/bucketing-run.ts` runs the bucketing workflow for real candidates from the command line.
@@ -377,6 +404,9 @@ are read lazily (`src/lib/env.ts`), so a missing optional key only matters when 
 | Mistral / Groq | `MISTRAL_API_KEY(S)`, `MISTRAL_MODEL`, `GROQ_API_KEY(S)`, `GROQ_MODEL` | Optional. Last-resort fallbacks |
 | Model chains | `DOMAIN_`, `ZAGGLE_`, `QA_`, `EXPERIENCE_`, `BENCHMARK_`, `ASSIGNMENT_`, `LINKS_`, `BUCKETING_LLM_CHAIN`, `BUCKETING_VERIFIER_CHAIN` | Optional. Comma-separated `provider:model` tiers; empty uses the defaults above |
 | GitHub | `GITHUB_TOKEN`, `GITHUB_CACHE_TTL_HOURS` (24), `GITHUB_CACHE_DIR` | Token needs public-repo read only. Required for GitHub inspection, assignment review and bucketing |
+| Database | `DATABASE_URL` (transaction pooler, 6543), `DIRECT_URL` (session pooler, 5432) | The eligible pool. Without them the app works and every candidate counts as external |
+| Eligible pool sources | `POOL_EDGE2_SHEET` / `_TAB`, `POOL_EDGE1_…`, `POOL_ACADEMY_…` | Optional; only if a pool sheet moves |
+| Sign-in | `APP_BASIC_AUTH` (`user:password`) | Set it on any deployment that has no host-level sign-in |
 
 ### Google setup
 
@@ -392,6 +422,9 @@ are read lazily (`src/lib/env.ts`), so a missing optional key only matters when 
 ---
 
 ## Deployment notes
+
+The full picture — database design, sync, security, sign-in, migrations, backups and scaling — is in
+[`docs/architecture.md`](./docs/architecture.md).
 
 - **Long-running Node server required.** Puppeteer launches Chromium for PDF reports, and runs last many
   minutes with a browser driving them. Use `next build && next start` on a VM or container, not

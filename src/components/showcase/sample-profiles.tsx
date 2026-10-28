@@ -1,7 +1,7 @@
 "use client";
 
 import * as React from "react";
-import { Award, FileSpreadsheet, Loader2, Play, Users } from "lucide-react";
+import { Award, FileSpreadsheet, Loader2, Play, Target, Users } from "lucide-react";
 import { useReportBusy } from "@/components/busy-context";
 import { ActionBar } from "@/components/ui/action-bar";
 import { Badge } from "@/components/ui/badge";
@@ -14,7 +14,10 @@ import { Notice } from "@/components/ui/notice";
 import { Panel } from "@/components/ui/panel";
 import { NativeSelect } from "@/components/ui/select";
 import { Stat, StatGrid } from "@/components/ui/stat";
+import { SettingList, SettingRow } from "@/components/ui/setting-row";
 import { SpDsaBarPanel, SpRulesCard } from "@/components/showcase/showcase-rules";
+import { ProfilePanel } from "@/components/showcase/profile-panel";
+import { newProfile, profileReady, runDsaBar } from "@/lib/showcase/profile-rules";
 import { SP_CONCURRENCY_OPTIONS, ShowcaseResults, type SpLaneProgress } from "@/components/showcase/showcase-results";
 import { previewAcademySheet, readAcademyTabs, type AcademySheetPreview } from "@/actions/academy";
 import { runQueue } from "@/lib/parallel-queue";
@@ -29,7 +32,9 @@ import {
   type SpCandidate,
   type SpDataset,
   type SpDsaPlatform,
+  type SpJudge,
   type SpProbe,
+  type SpProfileDef,
   type SpRead,
   type SpRecord,
   type SpRules,
@@ -112,6 +117,21 @@ const failedRead = (id: string, error: string, retryable: boolean): SpRead => ({
 const failedProbe = (login: string, note: string): SpProbe => ({ status: "failed", note, login, name: "", createdAt: "", repos: [], checkedAt: now(), retryAfterMs: 5_000 });
 const failedVerify = (id: string, error: string): SpVerify => ({ id, status: "error", error, retryable: true, proofs: [], dsa: {}, version: SP_VERSIONS.verify, checkedAt: now() });
 const failedTrust = (id: string, error: string): SpTrust => ({ id, identity: null, review: null, error, retryable: true, version: SP_VERSIONS.trust });
+const failedJudge = (x: { id: string; basedOn: string; readAt: string }, error: string, retryable: boolean): SpJudge => ({
+  id: x.id,
+  status: "error",
+  error,
+  retryable,
+  basedOn: x.basedOn,
+  readAt: x.readAt,
+  profiles: {},
+  model: "",
+  version: SP_VERSIONS.judge,
+  checkedAt: now(),
+});
+type Mode = "roles" | "profiles";
+/** The profiles a run ranks by (null = roles found in the evidence). */
+const activeProfiles = (mode: Mode, profiles: SpProfileDef[]) => (mode === "profiles" && profiles.length ? profiles : null);
 
 /** Read the sheet (view only); the candidate tab is recognised unless chosen. */
 async function loadSheet(url: string, chosen = ""): Promise<{ ok: true; dataset: SpDataset; preview: AcademySheetPreview; tab: string } | { ok: false; error: string }> {
@@ -142,6 +162,8 @@ export function SampleProfiles({ runId, onDone }: Props) {
   const [preview, setPreview] = React.useState<AcademySheetPreview | null>(null);
   const [dataset, setDataset] = React.useState<SpDataset | null>(null);
   const [rules, setRules] = React.useState<SpRules>(DEFAULT_SP_RULES);
+  const [mode, setMode] = React.useState<Mode>("roles");
+  const [profiles, setProfiles] = React.useState<SpProfileDef[]>(() => [newProfile("p1")]);
   const [rejected, setRejected] = React.useState<string[]>([]);
   const [concurrency, setConcurrency] = React.useState(DEFAULT_CONCURRENCY);
   const [records, setRecords] = React.useState<Record<string, SpRecord>>({});
@@ -157,8 +179,8 @@ export function SampleProfiles({ runId, onDone }: Props) {
   const abortRef = React.useRef(false);
   const runningRef = React.useRef(false);
   const progressRef = React.useRef<SpLaneProgress | null>(null);
-  const meta = React.useRef({ name, createdAt, rules, rejected, concurrency, dataset });
-  meta.current = { name, createdAt, rules, rejected, concurrency, dataset };
+  const meta = React.useRef({ name, createdAt, rules, rejected, concurrency, dataset, mode, profiles });
+  meta.current = { name, createdAt, rules, rejected, concurrency, dataset, mode, profiles };
 
   React.useEffect(() => {
     if (!runId) setLink(lastSpLink());
@@ -174,6 +196,8 @@ export function SampleProfiles({ runId, onDone }: Props) {
         setName(m.name);
         setCreatedAt(m.createdAt);
         setRules(withSpDefaults(m.rules));
+        setMode(m.mode === "profiles" && m.profiles?.length ? "profiles" : "roles");
+        if (m.profiles?.length) setProfiles(m.profiles);
         setRejected(m.rejected ?? []);
         setConcurrency(m.concurrency || DEFAULT_CONCURRENCY);
         recordsRef.current = saved.records;
@@ -195,7 +219,7 @@ export function SampleProfiles({ runId, onDone }: Props) {
   const saveMeta = React.useCallback(async () => {
     const m = meta.current;
     if (!m.dataset) return;
-    const out = rankShowcase(m.dataset, recordsRef.current, m.rules, m.rejected);
+    const out = rankShowcase(m.dataset, recordsRef.current, m.rules, m.rejected, activeProfiles(m.mode, m.profiles));
     const record: SpRunMeta = {
       id,
       name: m.name.trim() || "Sample profiles",
@@ -204,6 +228,8 @@ export function SampleProfiles({ runId, onDone }: Props) {
       rules: m.rules,
       rejected: m.rejected,
       concurrency: m.concurrency,
+      mode: m.mode,
+      profiles: m.mode === "profiles" ? m.profiles : undefined,
       loadedAt: m.dataset.loadedAt,
       sheetTitle: m.dataset.source.title,
       stats: out.stats,
@@ -270,6 +296,9 @@ export function SampleProfiles({ runId, onDone }: Props) {
     if (!total) return 0;
     setLane(lane, total);
     const rules = meta.current.rules;
+    const ranked = activeProfiles(meta.current.mode, meta.current.profiles);
+    // Profile mode reads Codeforces for the loosest DSA bar of the run.
+    const minRating = ranked ? runDsaBar(ranked).codeforces : rules.dsa.codeforces;
     let done = 0;
     const finished = () => {
       done++;
@@ -301,7 +330,7 @@ export function SampleProfiles({ runId, onDone }: Props) {
       await runQueue({
         items: chunks(plan.dsa[platform], size),
         concurrency: () => (platform === "leetcode" ? 2 : 1),
-        run: (items) => post<{ results: Record<string, SpDsaPlatform> }>("/api/showcase/dsa", { platform, items, minRating: rules.dsa.codeforces }),
+        run: (items) => post<{ results: Record<string, SpDsaPlatform> }>("/api/showcase/dsa", { platform, items, minRating }),
         retryAfter: (r, attempt) => (!r.ok && r.retryable && attempt <= 2 ? 10_000 * attempt : null),
         stopped,
         onDone: (items, r) => {
@@ -355,6 +384,25 @@ export function SampleProfiles({ runId, onDone }: Props) {
         stopped,
         onDone: (x, r) => {
           update(x.id, () => ({ read: r }));
+          finished();
+        },
+        onActivity: activity,
+      });
+      return done;
+    }
+
+    if (lane === "judge") {
+      await runQueue({
+        items: plan.judge,
+        concurrency: width(6),
+        run: async (x) => {
+          const r = await post<{ result: SpJudge }>("/api/showcase/judge", x);
+          return r.ok ? r.data.result : failedJudge(x, r.error, r.retryable);
+        },
+        retryAfter: (j, attempt) => (j.status === "error" && j.retryable && attempt <= 2 ? (j.error.startsWith(NETWORK) ? 4_000 : 30_000 * attempt) : null),
+        stopped,
+        onDone: (x, j) => {
+          update(x.id, () => ({ judge: j }));
           finished();
         },
         onActivity: activity,
@@ -420,7 +468,7 @@ export function SampleProfiles({ runId, onDone }: Props) {
         for (const lane of SP_LANES) {
           if (abortRef.current) break;
           const m = meta.current;
-          const plan = planShowcase(rankShowcase(ds, recordsRef.current, m.rules, m.rejected), m.rules);
+          const plan = planShowcase(rankShowcase(ds, recordsRef.current, m.rules, m.rejected, activeProfiles(m.mode, m.profiles)), m.rules);
           moved += await runLane(lane, plan);
         }
         if (!moved) break;
@@ -500,6 +548,11 @@ export function SampleProfiles({ runId, onDone }: Props) {
     setRules(next);
     touch();
   };
+  const changeProfiles = (next: SpProfileDef[]) => {
+    meta.current = { ...meta.current, profiles: next };
+    setProfiles(next);
+    touch();
+  };
   const toggleReject = (cid: string) => {
     const next = meta.current.rejected.includes(cid) ? meta.current.rejected.filter((x) => x !== cid) : [...meta.current.rejected, cid];
     meta.current = { ...meta.current, rejected: next };
@@ -515,7 +568,7 @@ export function SampleProfiles({ runId, onDone }: Props) {
   const found = React.useMemo(() => {
     if (!dataset) return null;
     const c = dataset.candidates;
-    const plan = planShowcase(rankShowcase(dataset, {}, rules), rules);
+    const plan = planShowcase(rankShowcase(dataset, {}, rules, [], activeProfiles(mode, profiles)), rules);
     return {
       rows: c.length,
       withResume: c.filter((x) => x.resumeUrl).length,
@@ -523,7 +576,8 @@ export function SampleProfiles({ runId, onDone }: Props) {
       dsa: c.filter((x) => x.sheetLinks.leetcode || x.sheetLinks.codeforces || x.sheetLinks.codechef).length,
       toScreen: plan.screen.length,
     };
-  }, [dataset, rules]);
+  }, [dataset, rules, mode, profiles]);
+  const profilesOk = mode === "roles" || (profiles.length > 0 && profiles.every(profileReady));
 
   if (loading) {
     return (
@@ -541,6 +595,8 @@ export function SampleProfiles({ runId, onDone }: Props) {
         records={records}
         rules={rules}
         onRulesChange={changeRules}
+        profiles={activeProfiles(mode, profiles)}
+        onProfilesChange={changeProfiles}
         rejected={rejected}
         onToggleReject={toggleReject}
         running={running}
@@ -659,8 +715,44 @@ export function SampleProfiles({ runId, onDone }: Props) {
         </Panel>
       ) : null}
 
-      <SpDsaBarPanel rules={rules} onChange={setRules} />
-      <SpRulesCard rules={rules} onChange={setRules} />
+      <Panel icon={<Target />} title="What to look for">
+        <SettingList>
+          <SettingRow
+            id="sp-mode"
+            title="Sample profiles from job descriptions"
+            description={
+              mode === "profiles"
+                ? "Each profile comes from a JD: its definition, mandatory items and every input are drafted for you to review."
+                : "Off: the strongest profiles in every tech role the evidence shows, with the rules below."
+            }
+            info="On: you add one profile per job (up to 5). The model drafts each from the JD — domain name, a strict definition, mandatory items that must be verified, good to have, and every input (DSA bar or none, project and proof thresholds, experience, fit, cut-offs, how many to send) with its reason. Candidates are judged against each profile and listed under every profile they pass. Off: the run works as before — roles come from the evidence, with one DSA bar and one set of rules."
+            checked={mode === "profiles"}
+            onCheckedChange={(v) => setMode(v ? "profiles" : "roles")}
+          />
+        </SettingList>
+      </Panel>
+
+      {mode === "profiles" ? (
+        <>
+          <ProfilePanel profiles={profiles} onChange={setProfiles} />
+          <Panel>
+            <SettingList>
+              <SettingRow
+                id="sp-links-p"
+                title="Profile links in the company workbook"
+                description="GitHub, DSA and project links. They show the candidate's name on those sites."
+                checked={rules.companyLinks}
+                onCheckedChange={(v) => setRules({ ...rules, companyLinks: v })}
+              />
+            </SettingList>
+          </Panel>
+        </>
+      ) : (
+        <>
+          <SpDsaBarPanel rules={rules} onChange={setRules} />
+          <SpRulesCard rules={rules} onChange={setRules} />
+        </>
+      )}
 
       <Disclosure title="Advanced options" summary={`${concurrency} resumes at a time`}>
         <Field
@@ -680,13 +772,19 @@ export function SampleProfiles({ runId, onDone }: Props) {
 
       <ActionBar
         status={
-          !dataset ? "Load the sheet to see the candidates." : !name.trim() ? "Name the run to start." : `${found?.toScreen ?? 0} resumes to screen · ${SP_LANES.length} stages · saved as it goes.`
+          !dataset
+            ? "Load the sheet to see the candidates."
+            : !name.trim()
+              ? "Name the run to start."
+              : !profilesOk
+                ? "Give every profile a domain name and a definition — draft it from the JD."
+                : `${found?.toScreen ?? 0} resumes to screen${mode === "profiles" ? ` · ${profiles.length} profile${profiles.length === 1 ? "" : "s"}` : ""} · saved as it goes.`
         }
       >
         <Button variant="outline" onClick={onDone}>
           Cancel
         </Button>
-        <Button size="lg" onClick={() => void start()} disabled={!dataset || !name.trim() || sheetBusy}>
+        <Button size="lg" onClick={() => void start()} disabled={!dataset || !name.trim() || sheetBusy || !profilesOk}>
           <Play className="h-4 w-4" /> Start
         </Button>
       </ActionBar>

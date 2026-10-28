@@ -8,6 +8,7 @@ import {
   Building2,
   ClipboardCheck,
   Code2,
+  Database,
   FileCode2,
   FileSpreadsheet,
   FolderKanban,
@@ -17,6 +18,7 @@ import {
   Menu,
   Star,
   Target,
+  UserSearch,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -37,8 +39,10 @@ import { CandidateBucketing } from "@/components/bucketing/bucketing";
 import { ZaggleScreening } from "@/components/zaggle/zaggle-screening";
 import { AcademyBucketing } from "@/components/academy/academy-bucketing";
 import { SampleProfiles } from "@/components/showcase/sample-profiles";
+import { EligiblePool } from "@/components/pool/eligible-pool";
+import { StandingLookup } from "@/components/pool/standing-lookup";
 
-type View = "home" | "wizard" | "analyze" | "showcase" | "dsa" | "projects" | "domain" | "assignment" | "experience" | "qa" | "benchmarks" | "bucketing" | "zaggle" | "academy";
+type View = "home" | "pool" | "lookup" | "wizard" | "analyze" | "showcase" | "dsa" | "projects" | "domain" | "assignment" | "experience" | "qa" | "benchmarks" | "bucketing" | "zaggle" | "academy";
 
 interface ViewMeta {
   label: string;
@@ -50,6 +54,16 @@ interface ViewMeta {
 
 const VIEWS: Record<View, ViewMeta> = {
   home: { label: "Dashboard", description: "Your companies and every saved run, in one place.", icon: LayoutDashboard },
+  pool: {
+    label: "Eligible pool",
+    description: "Candidates assessed internally in Edge 2.0, Edge 1.0 and Academy: who is eligible at each stage, and how they rank in Domain shortlisting.",
+    icon: Database,
+  },
+  lookup: {
+    label: "Standing lookup",
+    description: "Paste UUIDs or phone numbers to get each candidate's internal standing, stage and product from the Edge 2.0, Edge 1.0 and Academy assessments, with any assessment results you pick.",
+    icon: UserSearch,
+  },
   wizard: {
     label: "Build company sheet",
     description: "Consolidate candidates, add AI screening reports and export a sheet for the company.",
@@ -62,7 +76,7 @@ const VIEWS: Record<View, ViewMeta> = {
   },
   showcase: {
     label: "Sample profiles",
-    description: "The strongest candidates per tech role — proven by their resume, own GitHub code and DSA — to show a company's hiring manager.",
+    description: "The strongest candidates per tech role, or per job description — proven by their resume, own GitHub code and DSA — to show a company's hiring manager.",
     icon: Star,
   },
   domain: {
@@ -112,7 +126,7 @@ const VIEWS: Record<View, ViewMeta> = {
 
 /** Tools grouped by the job they do in the placement pipeline. */
 const NAV: { group?: string; views: View[] }[] = [
-  { views: ["home"] },
+  { views: ["home", "pool", "lookup"] },
   { group: "Company sheets", views: ["wizard", "analyze", "showcase"] },
   { group: "Screening", views: ["domain", "qa", "zaggle", "bucketing", "academy"] },
   { group: "Evaluation", views: ["assignment", "experience", "dsa", "projects"] },
@@ -301,6 +315,7 @@ export function AppShell() {
                 onDsa={() => navigate("dsa")}
                 onProjects={() => navigate("projects")}
                 onDomain={() => navigate("domain")}
+                onPool={() => navigate("pool")}
                 onAssignment={(runId) => {
                   setAssignmentRunId(runId ?? null);
                   setView("assignment");
@@ -335,6 +350,10 @@ export function AppShell() {
                   setView("benchmarks");
                 }}
               />
+            ) : view === "pool" ? (
+              <EligiblePool />
+            ) : view === "lookup" ? (
+              <StandingLookup />
             ) : view === "analyze" ? (
               <SheetAnalyzer onDone={goHome} />
             ) : view === "projects" ? (

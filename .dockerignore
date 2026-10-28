@@ -1,0 +1,19 @@
+# Never in the image: secrets, local state, build output, tooling.
+.env
+.env.*
+!.env.local.example
+.git
+.github
+.claude
+.next
+.cache
+node_modules
+public/reports
+*.log
+*.tsbuildinfo
+next-env.d.ts
+Dockerfile
+.dockerignore
+docs
+db
+scripts

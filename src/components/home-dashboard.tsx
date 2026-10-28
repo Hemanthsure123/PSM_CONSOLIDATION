@@ -28,6 +28,7 @@ import { Stat } from "@/components/ui/stat";
 import { EmptyState } from "@/components/ui/empty-state";
 import { DonutChart, Legend, SERIES, SERIES_NEUTRAL, type Slice } from "@/components/charts";
 import { CompanyDetail } from "@/components/company-detail";
+import { PoolHomeCard } from "@/components/pool/pool-home-card";
 import { AnalysisView } from "@/components/sheet-analyzer/analysis-view";
 import { DsaResultsView } from "@/components/dsa-consolidation/dsa-results-view";
 import { bucketLabel } from "@/lib/source-track";
@@ -62,6 +63,8 @@ interface HomeDashboardProps {
   onDsa: () => void;
   onProjects: () => void;
   onDomain: () => void;
+  /** Open the Eligible pool screen. */
+  onPool: () => void;
   /** Open Assignment Evaluation — a saved run by id, or a new one. */
   onAssignment: (runId?: string) => void;
   /** Open Experience Analysis — a saved run by id, or a new one. */
@@ -122,6 +125,7 @@ export function HomeDashboard({
   onAnalyze,
   onDsa,
   onDomain,
+  onPool,
   onAssignment,
   onExperience,
   onQa,
@@ -298,24 +302,27 @@ export function HomeDashboard({
     showcaseRuns.length === 0
   ) {
     return (
-      <EmptyState
-        icon={<LayoutDashboard />}
-        title="Nothing saved yet"
-        description="Company sheets you build and the runs you save from every tool appear here. Start with one of these, or pick any tool from the sidebar."
-        action={
-          <>
-            <Button onClick={onNew}>
-              <FileSpreadsheet /> Build company sheet
-            </Button>
-            <Button variant="outline" onClick={onDomain}>
-              <Target /> Domain shortlisting
-            </Button>
-            <Button variant="outline" onClick={onAnalyze}>
-              <BarChart3 /> Analyze company sheet
-            </Button>
-          </>
-        }
-      />
+      <>
+        <PoolHomeCard onOpen={onPool} />
+        <EmptyState
+          icon={<LayoutDashboard />}
+          title="Nothing saved yet"
+          description="Company sheets you build and the runs you save from every tool appear here. Start with one of these, or pick any tool from the sidebar."
+          action={
+            <>
+              <Button onClick={onNew}>
+                <FileSpreadsheet /> Build company sheet
+              </Button>
+              <Button variant="outline" onClick={onDomain}>
+                <Target /> Domain shortlisting
+              </Button>
+              <Button variant="outline" onClick={onAnalyze}>
+                <BarChart3 /> Analyze company sheet
+              </Button>
+            </>
+          }
+        />
+      </>
     );
   }
 
@@ -329,6 +336,7 @@ export function HomeDashboard({
 
   return (
     <div>
+      <PoolHomeCard onOpen={onPool} />
       <TabList
         label="Saved work"
         tabs={TABS.map((t) => ({ ...t, count: counts[t.id] }))}
@@ -907,10 +915,15 @@ function ShowcaseCard({ run, onDelete, onOpen }: { run: SpRunMeta; onDelete: () 
       metrics={[
         { label: "Showcase", value: s.showcase, highlight: true },
         { label: "Strong", value: s.strong },
-        { label: "Roles", value: s.roles },
+        { label: run.mode === "profiles" ? "Profiles" : "Roles", value: s.roles },
       ]}
       badges={
         <>
+          {run.mode === "profiles" && run.profiles?.length ? (
+            <Badge variant="secondary" title={run.profiles.map((p) => p.name).join(", ")}>
+              From {plural(run.profiles.length, "JD", "JDs")}
+            </Badge>
+          ) : null}
           <Badge variant="outline">
             DSA bar cleared <span className="tabular-nums">{s.dsaPassed}</span>
           </Badge>

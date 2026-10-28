@@ -49,6 +49,10 @@ export interface DomainCardInput {
   presentationNotes: string;
   /** Whether the presentation badge is rendered at all (check was on). */
   showPresentation: boolean;
+  /** What the candidate cleared in NxtWave's internal assessments, in plain words ("" / absent = external). */
+  assessedLine?: string;
+  /** The deep code review of the best domain project (absent = not reviewed). */
+  projectReview?: { repo: string; repoUrl: string; summary: string; features: string[] };
 }
 
 export interface DomainReportInput {
@@ -164,7 +168,14 @@ export function buildDomainReportHtml(input: DomainReportInput): string {
           .filter((r) => isUrl(r.url))
           .map((r) => `<a class="ghrepo" href="${esc(r.url)}">${esc(shortLabel(r.name, 30))}${ARROW}</a>`)
           .join("");
-        return `${badge}${techs ? `<div class="ghtechs">Proven in code: <b>${techs}</b></div>` : ""}${
+        const pr = c.projectReview;
+        const review =
+          pr && clean(pr.summary)
+            ? `<div class="ghreview"><span class="ghreview-label">Code review${isUrl(pr.repoUrl) ? ` · <a href="${esc(pr.repoUrl)}">${esc(shortLabel(pr.repo, 34))}</a>` : ""}</span>${esc(clean(pr.summary))}${
+                pr.features.length ? `<div class="ghfeatures">Built: ${pr.features.map(esc).join(" · ")}</div>` : ""
+              }</div>`
+            : "";
+        return `${badge}${techs ? `<div class="ghtechs">Proven in code: <b>${techs}</b></div>` : ""}${review}${
           repos ? `<div class="ghrepos">${repos}</div>` : ""
         }`;
       })();
@@ -249,6 +260,7 @@ export function buildDomainReportHtml(input: DomainReportInput): string {
   ${chips ? `<div class="chips">${chips}</div>` : `<div class="chips-empty">Not specified</div>`}
   ${c.evidence ? `<p class="evidence">${esc(c.evidence)}</p>` : ""}
   ${clean(c.experience) ? `<div class="exp">${ICONS.placed}<span>${esc(clean(c.experience))}</span></div>` : ""}
+  ${clean(c.assessedLine ?? "") ? `<div class="assessed">${ICONS.shield}<span>${esc(clean(c.assessedLine ?? ""))}</span></div>` : ""}
   ${presBadge}
   ${codingRow}
   ${githubBadge ? `<div class="ghwrap">${githubBadge}</div>` : ""}
@@ -336,6 +348,19 @@ export function buildDomainReportHtml(input: DomainReportInput): string {
   .exp { display:flex; align-items:center; gap:7px; margin-top:10px; font-size:11.5px; font-weight:600; color:#0F5132;
     background:#ECFDF5; border:1px solid #A7F3D0; border-radius:8px; padding:6px 11px; }
   .exp svg { flex:0 0 auto; color:#059669; }
+
+  /* Deep code review of the best domain project */
+  .ghreview { margin-top:8px; font-size:11.5px; line-height:1.5; color:#3A3F55; background:#F8F9FD; border:1px solid var(--line);
+    border-radius:8px; padding:7px 11px; }
+  .ghreview-label { display:block; font-family:var(--mono); font-size:9px; letter-spacing:1.1px; text-transform:uppercase; color:var(--faint);
+    margin-bottom:3px; }
+  .ghreview-label a { color:var(--accent); text-decoration:none; text-transform:none; letter-spacing:0; }
+  .ghfeatures { margin-top:4px; color:var(--muted); }
+
+  /* Cleared an internal assessment / interview */
+  .assessed { display:flex; align-items:center; gap:7px; margin-top:8px; font-size:11.5px; font-weight:600; color:#1E3A8A;
+    background:#EEF3FF; border:1px solid #C7D6FB; border-radius:8px; padding:6px 11px; }
+  .assessed svg { flex:0 0 auto; color:#1F57E0; }
 
   /* Resume presentation — structure, alignment and visual quality of the document */
   .pres { display:flex; align-items:center; flex-wrap:wrap; gap:8px; margin-top:10px; font-size:11.5px;

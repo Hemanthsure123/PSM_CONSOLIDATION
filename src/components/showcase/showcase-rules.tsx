@@ -12,7 +12,7 @@ import type { SpDsaBar, SpRules } from "@/lib/showcase/types";
 
 const num = (v: string, min: number, max: number) => Math.min(max, Math.max(min, Math.round(Number(v) || 0)));
 
-function NumberField({ id, label, hint, value, min, max, onChange }: { id: string; label: string; hint?: string; value: number; min: number; max: number; onChange: (n: number) => void }) {
+export function NumberField({ id, label, hint, value, min, max, onChange }: { id: string; label: string; hint?: string; value: number; min: number; max: number; onChange: (n: number) => void }) {
   return (
     <Field label={label} htmlFor={id} hint={hint}>
       <Input id={id} type="number" min={min} max={max} className="tabular-nums" value={value} onChange={(e) => onChange(num(e.target.value, min, max))} />
@@ -20,7 +20,7 @@ function NumberField({ id, label, hint, value, min, max, onChange }: { id: strin
   );
 }
 
-function BarFields({ prefix, bar, onChange }: { prefix: string; bar: SpDsaBar; onChange: (b: SpDsaBar) => void }) {
+export function BarFields({ prefix, bar, onChange }: { prefix: string; bar: SpDsaBar; onChange: (b: SpDsaBar) => void }) {
   const set = (patch: Partial<SpDsaBar>) => onChange({ ...bar, ...patch });
   return (
     <div className="grid gap-3 sm:grid-cols-5">

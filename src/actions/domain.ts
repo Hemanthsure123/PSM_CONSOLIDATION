@@ -5,8 +5,11 @@ import { buildDomainReportHtml, type DomainCardInput } from "@/lib/domain-report
 import { storePdf } from "@/lib/report-storage";
 import { buildJdTechSpec, checkGithubAccess, describeJdTechSpec } from "@/lib/github-analysis";
 import { mapWithConcurrency } from "@/lib/rate-limit";
-import { GITHUB_BATCH_SIZE, MIN_DOMAIN_SCORE, combinedScore } from "@/lib/domain-scoring";
-import { bestRating, dsaGateFailure, dsaGatesActive, type DsaGates } from "@/lib/dsa-scoring";
+import { GITHUB_BATCH_SIZE, MIN_DOMAIN_SCORE, combinedScore, compareShortlist, gateFailure, githubEvidenceScore, priorityGroup, shortlistBar } from "@/lib/domain-scoring";
+import { candidateSignals } from "@/lib/domain-signals";
+import { isAssessed } from "@/lib/pool/match";
+import type { InternalStanding } from "@/lib/pool/types";
+import { bestRating, type DsaGates } from "@/lib/dsa-scoring";
 import {
   inspectDomainGithub,
   screenDomainCandidate,
@@ -100,58 +103,50 @@ export async function buildDomainReport(
     checkPresentation: boolean;
     /** Presentation gate; 0 = grade and rank on it, but exclude nobody. */
     minPresentation: number;
+    /** The eligible pool was looked up (a phone / user id column was mapped) — for the Signals. */
+    poolChecked?: boolean;
   },
 ): Promise<ActionResult<DomainReportResult>> {
   const { domain, topN, limitToTopN, runName, resumesScanned, useDsa, useGithub, showDomainCommit, showStats, minCommits, mandatoryActive, requireExperience, checkPresentation, minPresentation } = opts;
-  const minLeetcode = opts.minLeetcode ?? 0;
-  const dsaGates = opts.dsaGates;
-  const dsaGated = dsaGatesActive(dsaGates);
+  const gates = {
+    mandatoryActive,
+    requireExperience,
+    minLeetcode: opts.minLeetcode ?? 0,
+    dsaGates: opts.dsaGates,
+    minCommits,
+    checkPresentation,
+    minPresentation,
+  };
 
   // Domain-fit floor first, then the STRICT gates — a candidate must clear every
   // enabled one and is dropped at the first it fails. Track how many each gate
   // removes so the UI can explain the funnel, and keep the reason per candidate
   // for the all-candidates view.
   const excluded = { mandatory: 0, leetcode: 0, dsa: 0, commits: 0, experience: 0, presentation: 0 };
-  const presentationGate = checkPresentation && minPresentation > 0;
   const rejectionReason = (c: DomainCandidate): string => {
-    if (c.domainScore < MIN_DOMAIN_SCORE) return `Domain fit ${c.domainScore} is below the ${MIN_DOMAIN_SCORE} bar`;
-    if (mandatoryActive && !c.meetsMandatory) { excluded.mandatory++; return "Missing a mandatory skill"; }
-    if (requireExperience && !c.hasDomainExperience) { excluded.experience++; return "No domain internship / experience"; }
-    if (minLeetcode > 0 && c.leetcodeSolved < minLeetcode) {
-      excluded.leetcode++;
-      return `${c.leetcodeSolved} LeetCode solved, below the ${minLeetcode} minimum`;
+    const bar = shortlistBar(c);
+    if (c.domainScore < bar) {
+      return isAssessed(c.internal)
+        ? `Domain fit ${c.domainScore} is below the ${bar} bar for internally assessed candidates`
+        : `Domain fit ${c.domainScore} is below the ${MIN_DOMAIN_SCORE} bar`;
     }
-    if (dsaGated) {
-      const why = dsaGateFailure(c.dsa, dsaGates);
-      if (why) {
-        excluded.dsa++;
-        return why;
-      }
-    }
-    if (minCommits > 0 && c.githubCommits2y < minCommits) {
-      excluded.commits++;
-      // Say WHY the count is low — unknown (failed check) is not the same as zero.
-      if (c.githubStatus === "failed") return `GitHub check failed, commits unknown (${c.githubNote || "error"})`;
-      if (c.githubStatus === "no-link") return `No GitHub link in the resume — commits gate needs one`;
-      if (c.githubStatus === "not-found") return `GitHub user in the resume does not exist — commits gate`;
-      return `${c.githubCommits2y} GitHub commits (2y), below the ${minCommits} minimum`;
-    }
-    if (presentationGate && c.presentationScore < minPresentation) {
-      excluded.presentation++;
-      return `Resume presentation ${c.presentationScore}, below the ${minPresentation} minimum`;
-    }
-    return "";
+    const failed = gateFailure(c, gates);
+    if (!failed) return "";
+    excluded[failed.gate]++;
+    return failed.reason;
   };
   const judged = candidates.map((c) => ({ c, reason: rejectionReason(c) }));
 
-  // Final rank folds the live GitHub signal — and, when graded, the resume's
-  // presentation polish — into the resume domain fit.
-  const byRank = (a: DomainCandidate, b: DomainCandidate) =>
-    combinedScore(b, useGithub, checkPresentation, useDsa) - combinedScore(a, useGithub, checkPresentation, useDsa);
+  // Internally assessed people first (eligible pool): priority group, then their internal
+  // stage, then the combined score — resume domain fit plus the live GitHub signal and,
+  // when graded, DSA and the resume's presentation polish.
+  const byRank = (a: DomainCandidate, b: DomainCandidate) => compareShortlist(a, b, useGithub, checkPresentation, useDsa);
   const matches = judged.filter((j) => !j.reason).map((j) => j.c).sort(byRank);
   const considered = matches.length;
   const ranked = limitToTopN ? matches.slice(0, Math.max(1, topN)) : matches;
 
+  // GitHub shown on a card only when it counted: an account that clearly belongs to someone else doesn't.
+  const ghShown = (c: DomainCandidate) => useGithub && c.githubIdentity !== "mismatch";
   const cards: DomainCardInput[] = ranked.map((c, i) => ({
     rank: i + 1,
     name: c.name,
@@ -169,10 +164,19 @@ export async function buildDomainReport(
     placedCompany: c.placedCompany,
     ctc: c.ctc,
     githubProfile: c.githubProfile,
-    githubMatches: useGithub ? c.githubMatches : 0,
-    githubScore: useGithub ? c.githubScore : 0,
-    githubTechs: useGithub ? c.githubTechs : [],
-    githubTopRepos: useGithub ? c.githubTopRepos : [],
+    githubMatches: ghShown(c) ? c.githubMatches : 0,
+    githubScore: ghShown(c) ? githubEvidenceScore(c) : 0,
+    githubTechs: ghShown(c) ? c.githubTechs : [],
+    projectReview:
+      ghShown(c) && c.projectReview?.status === "reviewed" && c.projectReview.reviews[0]
+        ? {
+            repo: c.projectReview.reviews[0].repo,
+            repoUrl: c.projectReview.reviews[0].repoUrl,
+            summary: c.projectReview.reviews[0].summary,
+            features: c.projectReview.reviews[0].features.map((f) => f.name).slice(0, 5),
+          }
+        : undefined,
+    githubTopRepos: ghShown(c) ? c.githubTopRepos : [],
     // Presentation shown only when it was actually graded this run.
     presentationScore: checkPresentation ? c.presentationScore : 0,
     presentationNotes: checkPresentation ? c.presentationNotes : "",
@@ -185,8 +189,9 @@ export async function buildDomainReport(
     ratings: useDsa && c.dsa
       ? { codeforces: bestRating(c.dsa.codeforces), codechef: bestRating(c.dsa.codechef), leetcode: bestRating(c.dsa.leetcode) }
       : { codeforces: null, codechef: null, leetcode: null },
-    githubCommits2y: useGithub ? c.githubCommits2y : 0,
+    githubCommits2y: ghShown(c) ? c.githubCommits2y : 0,
     lastDomainCommit: showDomainCommit ? c.githubLastDomainCommit : null,
+    assessedLine: assessedLine(c.internal),
     showCoding: useDsa || useGithub || showDomainCommit,
   }));
 
@@ -196,7 +201,7 @@ export async function buildDomainReport(
   //   2. with a top-N limit, those who cleared every gate but ranked below it —
   //      their rank continues (N+1, N+2 …);
   //   3. everyone a gate or the domain-fit bar dropped — strongest first, with the reason.
-  const outcomes: DomainCandidateOutcome[] = ranked.map((c, i) => ({ ...c, rank: i + 1, shortlisted: true, outcomeReason: "" }));
+  const outcomes: DomainCandidateOutcome[] = ranked.map((c, i) => ({ ...c, rank: i + 1, shortlisted: true, outcomeReason: "", priority: priorityGroup(c) ?? 0 }));
   if (limitToTopN) {
     matches.slice(ranked.length).forEach((c, i) => {
       const rank = ranked.length + i + 1;
@@ -205,11 +210,27 @@ export async function buildDomainReport(
         rank,
         shortlisted: false,
         outcomeReason: `Cleared every gate — ranked #${rank} of ${considered}, outside the top ${ranked.length}`,
+        priority: priorityGroup(c) ?? 0,
       });
     });
   }
   const dropped = judged.filter((j) => j.reason).sort((a, b) => byRank(a.c, b.c));
-  for (const { c, reason } of dropped) outcomes.push({ ...c, rank: 0, shortlisted: false, outcomeReason: reason });
+  for (const { c, reason } of dropped) outcomes.push({ ...c, rank: 0, shortlisted: false, outcomeReason: reason, priority: 0 });
+  // The rank score and, line by line, why each candidate is where they are (the CSV's Signals).
+  const signalCtx = {
+    useGithub,
+    githubChecked: useGithub || minCommits > 0 || showDomainCommit,
+    useDsa,
+    checkPresentation,
+    mandatoryActive,
+    requireExperience,
+    shortlisted: ranked.length,
+    poolChecked: Boolean(opts.poolChecked),
+  };
+  for (const o of outcomes) {
+    o.rankScore = combinedScore(o, useGithub, checkPresentation, useDsa);
+    o.signals = candidateSignals(o, signalCtx);
+  }
   const base = { shortlisted: cards.length, considered, candidates: outcomes, excluded, limitedToTopN: limitToTopN };
 
   // Report switched off: same ranking and outcomes, just no PDF render / upload.
@@ -240,4 +261,15 @@ export async function buildDomainReport(
     console.error("[buildDomainReport] pdf/store failed (shortlist preserved):", message);
     return { ok: true, data: { link: "", storage: "local", ...base, pdfError: message } };
   }
+}
+
+/**
+ * The company-facing line for an internally assessed candidate — what they cleared, in
+ * plain words (internal product names stay internal). "" = external.
+ */
+function assessedLine(internal: InternalStanding | null | undefined): string {
+  if (!isAssessed(internal)) return "";
+  if (internal.tier === 1) return "Cleared NxtWave's top-level technical interview";
+  if (internal.tier === 2) return "Cleared NxtWave's first-round technical interview";
+  return "Cleared NxtWave's coding assessment";
 }

@@ -2,8 +2,9 @@ import { toCsv } from "@/lib/utils";
 import { buildXlsx, type XlsxCell, type XlsxSheet } from "@/lib/academy/xlsx";
 import { DSA_NAME, DSA_ORDER, platformLine } from "@/lib/showcase/dsa-rules";
 import { roleLabel } from "@/lib/showcase/roles";
-import { dsaHeadline, experienceLine, headline, SP_STAGES, type SpOutcome, type SpRanked, type SpRoleProject, type SpRoleTab } from "@/lib/showcase/scoring";
-import { SP_SIGNAL_LABEL, type SpDataset, type SpRules } from "@/lib/showcase/types";
+import { dsaHeadline, experienceLine, headline, SP_STAGE_LABEL, type SpOutcome, type SpRanked, type SpRoleFit, type SpRoleProject, type SpRoleTab } from "@/lib/showcase/scoring";
+import { REASON_LABEL, inputsInWords, profileRulesInWords } from "@/lib/showcase/profile-rules";
+import { SP_SIGNAL_LABEL, type SpDataset, type SpProfileDef, type SpReasonKey, type SpRules } from "@/lib/showcase/types";
 
 /**
  * Sample profiles — the two workbooks. The COMPANY workbook is what a CRM sends to a hiring
@@ -67,10 +68,21 @@ function fitFor(r: SpRanked, tab: SpRoleTab) {
   return tab.role === "sde" ? r.primary! : (r.fits.find((f) => f.role === tab.role) ?? r.primary!);
 }
 
-/** One role tab, for either audience. */
+/** Profiles from JDs: the mandatory items with what proves each (resume words, own code). */
+function mandatoryCell(f: SpRoleFit, clean: (s: string) => string): string {
+  const j = f.profile?.judgement;
+  if (!j?.mandatory.length) return "";
+  const code = new Map((f.profile?.mandatoryInCode ?? []).map((m) => [m.item, m]));
+  return j.mandatory
+    .map((m) => `${m.met ? "✓" : "✗"} ${m.item}${m.met ? ` — “${clean(m.quote)}”` : ` — ${m.why}`}${code.get(m.item)?.ok ? ` · ${code.get(m.item)!.how}` : ""}`)
+    .join("\n");
+}
+
+/** One role (or profile) tab, for either audience. */
 function roleTable(tab: SpRoleTab, audience: SpAudience, rules: SpRules): { header: string[]; rows: XlsxCell[][] } {
   const company = audience === "company";
   const list = company ? tab.shown : tab.rows;
+  const byProfile = tab.role.startsWith("profile:");
   const header = [
     "Rank",
     "Candidate ID",
@@ -78,6 +90,7 @@ function roleTable(tab: SpRoleTab, audience: SpAudience, rules: SpRules): { head
     "Tier",
     "Profile score",
     "Headline",
+    ...(byProfile ? ["Why this profile fits", "Mandatory — verified", "Good to have found"] : []),
     "Degree",
     "College",
     "Year",
@@ -89,10 +102,10 @@ function roleTable(tab: SpRoleTab, audience: SpAudience, rules: SpRules): { head
     "Experience",
     "Verified skills",
     ...(company && !rules.companyLinks ? [] : ["GitHub"]),
-    "Also strong for",
+    byProfile ? "Also fits" : "Also strong for",
     ...(company
       ? []
-      : ["Score: projects", "Score: DSA", "Score: experience", "Score: GitHub engineering", "Trust", "Trust checks", "Gates", "Note"]),
+      : ["Score: projects", "Score: DSA", "Score: experience", "Score: GitHub engineering", ...(byProfile ? ["Score: fit"] : []), "Trust", "Trust checks", "Gates", "Note"]),
   ];
   const rows = list.map((r, i): XlsxCell[] => {
     const f = fitFor(r, tab);
@@ -103,9 +116,12 @@ function roleTable(tab: SpRoleTab, audience: SpAudience, rules: SpRules): { head
       i + 1,
       r.candidateId,
       ...(company ? [] : [r.c.name, r.c.email, r.c.mobile, r.c.resumeUrl, r.c.sheetRow, tab.shown.includes(r) ? "Yes" : "No (beyond top N)"]),
-      r.tier,
+      f.tier || r.tier,
       f.score,
-      clean(tab.role === "sde" ? `SDE · ${headline(r)}` : headline(r)),
+      clean(tab.role === "sde" ? `SDE · ${headline(r)}` : headline(r, f)),
+      ...(byProfile
+        ? [clean(f.profile?.judgement?.evidence ?? ""), mandatoryCell(f, clean), (f.profile?.judgement?.goodToHave ?? []).map((g) => g.item).join(", ")]
+        : []),
       read?.education.degree || r.c.degree,
       read?.education.institution || r.c.college,
       read?.education.year || r.c.yog,
@@ -117,7 +133,9 @@ function roleTable(tab: SpRoleTab, audience: SpAudience, rules: SpRules): { head
       clean(experienceLine(r)),
       (read?.skills ?? []).slice(0, 20).join(", "),
       ...(company && !rules.companyLinks ? [] : [r.rec.screen?.links.githubProfile ?? ""]),
-      [r.primary && r.primary.role !== tab.role ? r.primary.label : "", ...r.alsoFor.filter((x) => x.role !== tab.role).map((x) => x.label)].filter(Boolean).join(", "),
+      byProfile
+        ? r.fits.filter((x) => x.tier && x.role !== tab.role).map((x) => x.label).join(", ")
+        : [r.primary && r.primary.role !== tab.role ? r.primary.label : "", ...r.alsoFor.filter((x) => x.role !== tab.role).map((x) => x.label)].filter(Boolean).join(", "),
       ...(company
         ? []
         : [
@@ -125,6 +143,7 @@ function roleTable(tab: SpRoleTab, audience: SpAudience, rules: SpRules): { head
             f.parts.dsa,
             f.parts.experience,
             f.parts.engineering,
+            ...(byProfile ? [f.parts.fit ?? ""] : []),
             r.trust ? `${r.trust.score} (${r.trust.band})` : "off",
             (r.trust?.checks ?? []).map((x) => `${x.points ? `${x.points} ` : ""}${x.label}: ${x.detail}`).join("\n"),
             f.gates.map((g) => `${g.ok ? "✓" : "✗"} ${g.label}: ${g.detail}`).join("\n"),
@@ -145,8 +164,39 @@ function rulesInWords(rules: SpRules): string[][] {
   ];
 }
 
+/** About tab for the company when the profiles come from JDs: each profile's definition and bar. */
+function profilesAboutSheet(outcome: SpOutcome, profiles: SpProfileDef[]): XlsxSheet {
+  const rows: XlsxCell[][] = [
+    ["What this is", "Sample profiles of NxtWave students for your open roles — only the strongest for each role are included."],
+    ["How they were chosen", "Each profile was checked by program against the resume's projects, experience, certifications and achievements, the student's own GitHub code and their competitive-programming profiles:"],
+  ];
+  for (const p of profiles) {
+    const tab = outcome.tabs.find((t) => t.role === `profile:${p.id}`);
+    rows.push(["", ""], [p.name || "Profile", `${tab?.shown.length ?? 0} profile${tab?.shown.length === 1 ? "" : "s"} (${tab?.shown.filter((r) => r.fits.find((f) => f.role === tab.role)?.tier === "Showcase").length ?? 0} Showcase)`]);
+    rows.push(...profileRulesInWords(p));
+    rows.push(["Tiers", `Showcase = the very top (profile score ≥ ${p.inputs.showcaseAt}); Strong = clearly strong (≥ ${p.inputs.strongAt})`]);
+  }
+  rows.push(["", ""], ["Candidate ID", "Each student has a stable ID — quote it to ask for the full profile or an interview."], ["Generated", new Date().toISOString().slice(0, 10)]);
+  return { name: "About these profiles", header: ["Sample profiles", "NxtWave"], rows, widths: [26, 140] };
+}
+
+/** Internal summary rows for the profiles: the definition, every input with the JD's reason, and what was edited. */
+function profilesSummaryRows(profiles: SpProfileDef[]): XlsxCell[][] {
+  const rows: XlsxCell[][] = [];
+  for (const p of profiles) {
+    const edited = p.llmInputs && JSON.stringify(p.llmInputs) !== JSON.stringify(p.inputs);
+    rows.push(["", ""], [`Profile: ${p.name || p.id}`, p.source ? `Drafted from ${p.source.name} (${p.source.kind}) by ${p.model}` : "Typed by hand"]);
+    rows.push(...profileRulesInWords(p));
+    rows.push(["Inputs", `${inputsInWords(p.inputs)}${edited ? " (edited after the draft)" : ""}`]);
+    for (const k of Object.keys(REASON_LABEL) as SpReasonKey[]) if (p.reasons[k]) rows.push([`Reason — ${REASON_LABEL[k]}`, p.reasons[k]!]);
+    if (p.notJudged.length) rows.push(["Not judged from resumes", p.notJudged.join("; ")]);
+  }
+  return rows;
+}
+
 /** About tab for the company: what these profiles are and how they were chosen. */
 function aboutSheet(outcome: SpOutcome, rules: SpRules): XlsxSheet {
+  if (outcome.profiles) return profilesAboutSheet(outcome, outcome.profiles);
   const rows: XlsxCell[][] = [
     ["What this is", "Sample profiles of NxtWave students — only the strongest in each role are included."],
     ["How they were chosen", "Every profile cleared the same strict bar, checked by program against the resume, the student's own GitHub code and their competitive-programming profiles:"],
@@ -170,11 +220,12 @@ function summarySheet(title: string, ds: SpDataset, outcome: SpOutcome, rules: S
     ["Showcase / Strong", `${s.showcase} / ${s.strong}`],
     ["Near misses (worth a look by hand)", s.nearMiss],
     ["Still pending (run the stages again)", s.pending],
-    ["Roles with profiles", s.roles],
+    [outcome.profiles ? "Profiles with candidates" : "Roles with profiles", s.roles],
     ["", ""],
-    ...SP_STAGES.map((st) => [`Stage: ${st}`, `${outcome.funnel[st].reached} reached · ${outcome.funnel[st].stopped} stopped here · ${outcome.funnel[st].pending} pending`]),
+    ...outcome.stages.map((st) => [`Stage: ${SP_STAGE_LABEL[st]}`, `${outcome.funnel[st].reached} reached · ${outcome.funnel[st].stopped} stopped here · ${outcome.funnel[st].pending} pending`]),
+    ...(outcome.profiles ? profilesSummaryRows(outcome.profiles) : []),
     ["", ""],
-    ...rulesInWords(rules),
+    ...(outcome.profiles ? [] : rulesInWords(rules)),
     ["Trust agent", rules.trustAgent ? `On — Low trust is excluded; Showcase needs High trust` : "Off"],
     ["Score", `Projects ${rules.weights.projects} · DSA ${rules.weights.dsa} · GitHub engineering ${rules.weights.engineering} (weighted average), plus up to ${rules.weights.experience} points for experience, × trust factor (0.6 + 0.4 × trust/100)`],
     ["Placement", rules.everyRole ? "Listed in every role the candidate qualifies for" : "Listed once, in the role of their strongest projects (the SDE tab lists every qualified candidate whose DSA clears the SDE bar)"],

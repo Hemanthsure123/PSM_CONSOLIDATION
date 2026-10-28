@@ -284,4 +284,19 @@ export const env = {
       return optional("GITHUB_CACHE_DIR", "");
     },
   },
+  database: {
+    /** Supabase Postgres — transaction pooler (port 6543): the app's queries. */
+    get url() {
+      return optional("DATABASE_URL", "");
+    },
+    /** Supabase Postgres — session pooler (port 5432): migrations and long sessions. */
+    get directUrl() {
+      return optional("DIRECT_URL", "");
+    },
+    /** A usable connection string is set (not the "[YOUR-PASSWORD]" template). */
+    get configured() {
+      const url = optional("DATABASE_URL", "");
+      return Boolean(url) && !url.includes("[YOUR-PASSWORD]");
+    },
+  },
 };

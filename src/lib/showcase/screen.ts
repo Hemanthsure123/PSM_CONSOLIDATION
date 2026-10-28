@@ -5,6 +5,8 @@ import { fetchResume, type ResumeBytes } from "@/lib/resume";
 import { contentFromBytes, looksLikeResume } from "@/lib/resume-content";
 import { collectResumeUrls, extractProfileLinksFromResume, toCodeChefUrl, toCodeforcesUrl, toLeetCodeUrl } from "@/lib/resume-links";
 import { splitGithub } from "@/lib/domain-screen";
+import { techKeysInText } from "@/lib/github-analysis";
+import { evidenceText } from "@/lib/resume-sections";
 import { FOLDER, resumeInFolder } from "@/lib/resume-folder";
 import type { DsaPlatform } from "@/lib/dsa-types";
 import { SP_VERSIONS, type SpCandidate, type SpLinks, type SpScreen } from "@/lib/showcase/types";
@@ -138,6 +140,8 @@ export async function screenCandidate(c: SpCandidate): Promise<SpScreen> {
       namedWithoutLink,
       inferred,
       fromSheet,
+      // What the projects / experience / certifications / achievements name (never the Skills list) — for the profiles' prefilter.
+      ...(textLayer ? { evidenceKeys: techKeysInText(evidenceText(content.text).text) } : {}),
     };
   } catch (err) {
     return empty(c, "error", err instanceof Error ? err.message.slice(0, 200) : "Screening failed.", true);

@@ -36,8 +36,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { SpDsaBarPanel, SpRulesCard } from "@/components/showcase/showcase-rules";
 import { buildCompanyWorkbook, buildInternalWorkbook, buildRoleCsv, dsaPlatformLines, slug } from "@/lib/showcase/export";
 import { SP_LANES, SP_LANE_LABEL, laneMinutes, laneSize, planShowcase, type SpLane } from "@/lib/showcase/pipeline";
-import { SP_STAGES, dsaHeadline, experienceLine, headline, rankShowcase, type SpRanked, type SpRoleFit, type SpStage, type SpStatus, type SpTrustScore } from "@/lib/showcase/scoring";
-import { SP_SIGNAL_LABEL, type SpDataset, type SpRecord, type SpRules } from "@/lib/showcase/types";
+import { SP_STAGE_LABEL, dsaHeadline, experienceLine, headline, rankShowcase, type SpRanked, type SpRoleFit, type SpStage, type SpStatus, type SpTrustScore } from "@/lib/showcase/scoring";
+import { ProfilePanel } from "@/components/showcase/profile-panel";
+import { SettingList, SettingRow } from "@/components/ui/setting-row";
+import { SP_SIGNAL_LABEL, type SpDataset, type SpProfileDef, type SpRecord, type SpRules } from "@/lib/showcase/types";
 import { cn, slugify } from "@/lib/utils";
 
 export const SP_CONCURRENCY_OPTIONS = [2, 4, 6, 8, 10, 12];
@@ -58,6 +60,9 @@ interface Props {
   records: Record<string, SpRecord>;
   rules: SpRules;
   onRulesChange: (rules: SpRules) => void;
+  /** Profiles from JDs (null = roles found in the evidence). */
+  profiles: SpProfileDef[] | null;
+  onProfilesChange: (profiles: SpProfileDef[]) => void;
   rejected: string[];
   onToggleReject: (id: string) => void;
   running: boolean;
@@ -92,13 +97,56 @@ function download(name: string, data: BlobPart, type: string) {
 
 const STATUS_VARIANT: Record<SpStatus, BadgeVariant> = { Showcase: "success", Strong: "default", "Near miss": "warning", Excluded: "secondary", Pending: "outline" };
 
-function StatusBadge({ row }: { row: SpRanked }) {
-  const Icon = row.status === "Showcase" ? Award : row.status === "Strong" ? CircleCheck : row.status === "Pending" ? Clock : row.status === "Near miss" ? Sparkles : CircleX;
+function StatusBadge({ row, status = row.status }: { row: SpRanked; status?: SpStatus }) {
+  const Icon = status === "Showcase" ? Award : status === "Strong" ? CircleCheck : status === "Pending" ? Clock : status === "Near miss" ? Sparkles : CircleX;
   return (
-    <Badge variant={STATUS_VARIANT[row.status]}>
+    <Badge variant={STATUS_VARIANT[status]}>
       <Icon aria-hidden />
-      {row.status}
+      {status}
     </Badge>
+  );
+}
+
+/** Profiles from JDs: how the candidate matched each profile — mandatory proofs, code proofs, good to have, the judge's line. */
+function ProfileMatches({ row }: { row: SpRanked }) {
+  const fits = row.fits.filter((f) => f.profile);
+  if (!fits.length) return null;
+  return (
+    <Section title="Profiles" info="Judged only from the resume's projects, experience, certifications and achievements — never the Skills list. A mandatory item counts only with the resume's exact words behind it; with code proof on, its technology must also be in their own verified code.">
+      <div className="grid gap-3 lg:grid-cols-2">
+        {fits.map((f) => {
+          const j = f.profile!.judgement;
+          return (
+            <div key={f.role} className="rounded-lg border bg-card p-3">
+              <p className="font-medium">
+                {f.label}{" "}
+                <span className="font-normal text-muted-foreground">
+                  · fit {j ? `${j.fit}/100` : "—"} · score {f.score}
+                  {f.tier ? ` · ${f.tier}` : ""}
+                </span>
+              </p>
+              {j?.evidence ? <p className="text-muted-foreground">{j.evidence}</p> : null}
+              {j?.mandatory.length ? (
+                <ul className="mt-1.5 space-y-0.5">
+                  {j.mandatory.map((m) => (
+                    <li key={m.item} className="flex items-start gap-1.5">
+                      {m.met ? <CircleCheck className="mt-0.5 h-3.5 w-3.5 shrink-0 text-success" aria-hidden /> : <CircleX className="mt-0.5 h-3.5 w-3.5 shrink-0 text-destructive" aria-hidden />}
+                      <span>
+                        <span className="font-medium">{m.item}</span> — {m.met ? <span className="text-muted-foreground">&ldquo;{m.quote}&rdquo;</span> : <span className="text-muted-foreground">{m.why}</span>}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {f.profile!.mandatoryInCode.length ? (
+                <p className="mt-1 text-xs text-muted-foreground">In their code: {f.profile!.mandatoryInCode.map((m) => `${m.ok ? "✓" : "✗"} ${m.item}`).join(" · ")}</p>
+              ) : null}
+              {j?.goodToHave.length ? <p className="mt-1 text-xs text-muted-foreground">Good to have found: {j.goodToHave.map((g) => g.item).join(", ")}</p> : null}
+            </div>
+          );
+        })}
+      </div>
+    </Section>
   );
 }
 
@@ -143,7 +191,7 @@ function Details({ row }: { row: SpRanked }) {
       </p>
 
       {fit ? (
-        <Section title={`Checks — ${fit.label}`} aside={`profile score ${fit.score}${fit.score !== fit.raw ? ` (${fit.raw} before trust)` : ""} · projects ${fit.parts.projects} · DSA ${fit.parts.dsa} · GitHub ${fit.parts.engineering} · experience ${fit.parts.experience}`}>
+        <Section title={`Checks — ${fit.label}`} aside={`profile score ${fit.score}${fit.score !== fit.raw ? ` (${fit.raw} before trust)` : ""} · projects ${fit.parts.projects} · DSA ${fit.parts.dsa} · GitHub ${fit.parts.engineering}${fit.parts.fit !== undefined ? ` · fit ${fit.parts.fit}` : ""} · experience ${fit.parts.experience}`}>
           <ul className="space-y-1">
             {fit.gates.map((g) => (
               <li key={g.key} className="flex items-start gap-2">
@@ -163,6 +211,8 @@ function Details({ row }: { row: SpRanked }) {
           {row.alsoFor.length ? <p className="text-muted-foreground">Also strong for: {row.alsoFor.map((f) => `${f.label} (${f.score})`).join(", ")}</p> : null}
         </Section>
       ) : null}
+
+      <ProfileMatches row={row} />
 
       {row.projects.length ? (
         <Section
@@ -294,6 +344,8 @@ export function ShowcaseResults({
   records,
   rules,
   onRulesChange,
+  profiles,
+  onProfilesChange,
   rejected,
   onToggleReject,
   running,
@@ -307,7 +359,8 @@ export function ShowcaseResults({
   reloadError,
   storageError,
 }: Props) {
-  const outcome = React.useMemo(() => rankShowcase(dataset, records, rules, rejected), [dataset, records, rules, rejected]);
+  const outcome = React.useMemo(() => rankShowcase(dataset, records, rules, rejected, profiles), [dataset, records, rules, rejected, profiles]);
+  const byProfile = Boolean(outcome.profiles);
   const plan = React.useMemo(() => planShowcase(outcome, rules), [outcome, rules]);
   const s = outcome.stats;
   const work = SP_LANES.map((lane) => ({ lane, n: laneSize(plan, lane) })).filter((x) => x.n > 0);
@@ -326,7 +379,12 @@ export function ShowcaseResults({
 
   const base: SpRanked[] =
     active.kind === "role"
-      ? [...(tab?.rows ?? []), ...outcome.rows.filter((r) => r.rejected && r.tier && (r.primary?.role === active.role || (active.role === "sde" && r.sde)))]
+      ? [
+          ...(tab?.rows ?? []),
+          ...outcome.rows.filter(
+            (r) => r.rejected && r.tier && (byProfile ? r.fits.some((f) => f.role === active.role && f.tier) : r.primary?.role === active.role || (active.role === "sde" && r.sde)),
+          ),
+        ]
       : active.kind === "near"
         ? outcome.rows.filter((r) => r.status === "Near miss").sort((a, b) => ((b.primary ?? b.fits[0])?.raw ?? 0) - ((a.primary ?? a.fits[0])?.raw ?? 0))
         : outcome.rows.filter((r) => !stageFilter || r.stage === stageFilter);
@@ -344,7 +402,7 @@ export function ShowcaseResults({
     download(`${slugify(title)}-${slug(tab.label)}-${audience}.csv`, buildRoleCsv(tab, audience, rules), "text/csv;charset=utf-8;");
   };
   const complete = !running && left === 0;
-  const profiles = s.showcase + s.strong;
+  const listed = s.showcase + s.strong;
 
   return (
     <div className="space-y-6">
@@ -433,7 +491,7 @@ export function ShowcaseResults({
 
       <StatGrid cols={6}>
         <Stat icon={<Award />} label="Showcase" value={s.showcase} tone="highlight" hint="the very top" />
-        <Stat icon={<CircleCheck />} label="Strong" value={s.strong} hint={`${outcome.tabs.length} role${outcome.tabs.length === 1 ? "" : "s"}`} />
+        <Stat icon={<CircleCheck />} label="Strong" value={s.strong} hint={byProfile ? `${outcome.tabs.length} profile${outcome.tabs.length === 1 ? "" : "s"}` : `${outcome.tabs.length} role${outcome.tabs.length === 1 ? "" : "s"}`} />
         <Stat icon={<Sparkles />} label="Near misses" value={s.nearMiss} tone={s.nearMiss ? "warning" : "default"} hint="one check short" />
         <Stat label="DSA bar cleared" value={s.dsaPassed} hint={`of ${s.screened} screened`} />
         <Stat label="Resumes read" value={s.read} hint="DSA + GitHub survivors" />
@@ -441,8 +499,8 @@ export function ShowcaseResults({
       </StatGrid>
 
       <Panel title="Funnel" description="Where every row stopped. Select a stage in “All rows” to see who and why.">
-        <div className="grid gap-2 sm:grid-cols-4 lg:grid-cols-8">
-          {SP_STAGES.map((st) => {
+        <div className={cn("grid gap-2 sm:grid-cols-4", byProfile ? "lg:grid-cols-5" : "lg:grid-cols-8")}>
+          {outcome.stages.map((st) => {
             const f = outcome.funnel[st];
             return (
               <button
@@ -454,7 +512,7 @@ export function ShowcaseResults({
                 }}
                 className="rounded-lg border bg-card px-3 py-2 text-left text-[13px] transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/25"
               >
-                <div className="font-medium">{st === "Score" ? "Scored" : st}</div>
+                <div className="font-medium">{SP_STAGE_LABEL[st]}</div>
                 <div className="tabular-nums text-muted-foreground">{f.reached} reached</div>
                 <div className="text-xs tabular-nums text-muted-foreground">
                   {f.stopped ? `${f.stopped} stopped` : ""}
@@ -467,25 +525,53 @@ export function ShowcaseResults({
         </div>
       </Panel>
 
-      <SpDsaBarPanel rules={rules} onChange={onRulesChange} note={`${s.dsaPassed} clear it now. Changing it re-ranks instantly; profiles not read yet are read on Continue.`} />
-      <SpRulesCard rules={rules} onChange={onRulesChange} />
+      {byProfile && profiles ? (
+        <>
+          <ProfilePanel profiles={profiles} onChange={onProfilesChange} disabled={running} compact />
+          <Panel>
+            <SettingList>
+              <SettingRow
+                id="sp-links-r"
+                title="Profile links in the company workbook"
+                description="GitHub, DSA and project links. They show the candidate's name on those sites."
+                checked={rules.companyLinks}
+                onCheckedChange={(v) => onRulesChange({ ...rules, companyLinks: v })}
+              />
+            </SettingList>
+          </Panel>
+        </>
+      ) : (
+        <>
+          <SpDsaBarPanel rules={rules} onChange={onRulesChange} note={`${s.dsaPassed} clear it now. Changing it re-ranks instantly; profiles not read yet are read on Continue.`} />
+          <SpRulesCard rules={rules} onChange={onRulesChange} />
+        </>
+      )}
 
       <Panel
         flush
         title={
           <span className="inline-flex items-center gap-1">
-            Sample profiles by role
+            {byProfile ? "Sample profiles by job" : "Sample profiles by role"}
             <InfoHint label="How profiles are placed" align="start">
-              A candidate&apos;s role comes from the evidence — the technologies each strong project names and its code proves — never from the
-              resume&apos;s title. They are placed once, in the role of their strongest projects; the SDE tab lists every qualified candidate whose DSA
-              also clears the SDE bar. Each tab is ranked by profile score; the company workbook takes the top {rules.topN}. Take a profile out by
-              hand and the next one moves up.
+              {byProfile ? (
+                <>
+                  One tab per profile. A candidate is listed under every profile whose checks they pass, ranked there by that profile&apos;s score;
+                  the company workbook takes each profile&apos;s top N. Take a profile out by hand and the next one moves up.
+                </>
+              ) : (
+                <>
+                  A candidate&apos;s role comes from the evidence — the technologies each strong project names and its code proves — never from the
+                  resume&apos;s title. They are placed once, in the role of their strongest projects; the SDE tab lists every qualified candidate whose
+                  DSA also clears the SDE bar. Each tab is ranked by profile score; the company workbook takes the top {rules.topN}. Take a profile
+                  out by hand and the next one moves up.
+                </>
+              )}
             </InfoHint>
           </span>
         }
         description={
           profiles
-            ? `${profiles} profile${profiles === 1 ? "" : "s"} across ${outcome.tabs.length} role${outcome.tabs.length === 1 ? "" : "s"}. Select a row for the evidence.`
+            ? `${listed} profile${listed === 1 ? "" : "s"} across ${outcome.tabs.length} ${byProfile ? "job" : "role"}${outcome.tabs.length === 1 ? "" : "s"}. Select a row for the evidence.`
             : "Profiles appear here as candidates pass every check."
         }
         footer={
@@ -505,7 +591,7 @@ export function ShowcaseResults({
         }
       >
         <div className="flex flex-wrap items-center gap-2 border-t bg-muted/40 px-5 py-3">
-          <Button size="sm" variant={complete && profiles ? "default" : "outline"} onClick={downloadCompany} disabled={!profiles}>
+          <Button size="sm" variant={complete && listed ? "default" : "outline"} onClick={downloadCompany} disabled={!listed}>
             <Download className="h-4 w-4" /> Company workbook (.xlsx)
           </Button>
           <Button size="sm" variant="outline" onClick={downloadInternal}>
@@ -551,9 +637,9 @@ export function ShowcaseResults({
                 <Filter className="h-4 w-4 text-muted-foreground" aria-hidden />
                 <NativeSelect aria-label="Stopped at stage" value={stageFilter} onChange={(e) => setStageFilter(e.target.value as SpStage | "")} className="h-9 text-[13px]">
                   <option value="">Every stage</option>
-                  {SP_STAGES.map((st) => (
+                  {outcome.stages.map((st) => (
                     <option key={st} value={st}>
-                      Stopped at {st === "Score" ? "scoring" : st}
+                      Stopped at {st === "Score" ? "scoring" : SP_STAGE_LABEL[st].toLowerCase()}
                     </option>
                   ))}
                 </NativeSelect>
@@ -622,16 +708,19 @@ export function ShowcaseResults({
                         ) : null}
                       </TableCell>
                       <TableCell className="align-top">
-                        <StatusBadge row={row} />
-                        {active.kind !== "role" ? <div className="mt-0.5 text-[11px] text-muted-foreground">at {row.stage === "Score" ? "scoring" : row.stage}</div> : null}
-                        {active.kind === "role" && row.tier && !shownIds.has(row.c.id) && !row.rejected ? <div className="mt-0.5 text-[11px] text-muted-foreground">beyond top {rules.topN}</div> : null}
+                        <StatusBadge row={row} status={active.kind === "role" && fit?.tier ? fit.tier : row.status} />
+                        {active.kind !== "role" ? <div className="mt-0.5 text-[11px] text-muted-foreground">at {row.stage === "Score" ? "scoring" : SP_STAGE_LABEL[row.stage].toLowerCase()}</div> : null}
+                        {active.kind === "role" && row.tier && !shownIds.has(row.c.id) && !row.rejected ? (
+                          <div className="mt-0.5 text-[11px] text-muted-foreground">beyond top {fit?.profile?.topN ?? rules.topN}</div>
+                        ) : null}
                       </TableCell>
                       <TableCell className="text-right align-top">
                         {fit ? (
                           <>
                             <div className="text-[15px] font-semibold tabular-nums">{fit.score}</div>
-                            <div className="whitespace-nowrap text-[11px] tabular-nums text-muted-foreground" title="Projects · DSA · GitHub · experience">
-                              {fit.parts.projects} · {fit.parts.dsa} · {fit.parts.engineering} · {fit.parts.experience}
+                            <div className="whitespace-nowrap text-[11px] tabular-nums text-muted-foreground" title={fit.parts.fit !== undefined ? "Projects · DSA · GitHub · fit · experience" : "Projects · DSA · GitHub · experience"}>
+                              {fit.parts.projects} · {fit.parts.dsa} · {fit.parts.engineering}
+                              {fit.parts.fit !== undefined ? ` · ${fit.parts.fit}` : ""} · {fit.parts.experience}
                             </div>
                           </>
                         ) : (
@@ -646,13 +735,14 @@ export function ShowcaseResults({
                               {fit?.verifiedStrong.map((x) => x.p.title).join(" · ") || "—"}
                               {fit && fit.strong.length > fit.verifiedStrong.length ? ` (+${fit.strong.length - fit.verifiedStrong.length} strong, unproven)` : ""}
                             </div>
-                            {fit?.experience.months ? <div className="text-muted-foreground">{fit.experience.months} months in-role experience</div> : null}
+                            {fit?.experience.months ? <div className="text-muted-foreground">{fit.experience.months} months {fit.profile ? "relevant" : "in-role"} experience</div> : null}
+                            {fit?.profile?.judgement?.evidence ? <div className="text-muted-foreground">{fit.profile.judgement.evidence}</div> : null}
                             {row.reason ? <div className="text-warning">{row.reason}</div> : null}
                           </>
                         ) : (
                           <>
                             {fit ? <div className="font-medium text-foreground">{fit.label}</div> : null}
-                            <div className="line-clamp-3 text-muted-foreground">{row.tier ? headline(row) : row.reason}</div>
+                            <div className="line-clamp-3 text-muted-foreground">{row.tier ? headline(row, fit ?? row.primary) : row.reason}</div>
                           </>
                         )}
                       </TableCell>

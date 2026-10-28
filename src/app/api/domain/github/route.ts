@@ -30,6 +30,7 @@ export async function POST(req: Request) {
     githubProfile: text(i.githubProfile, 300),
     githubRepos: repos,
     claimedTechs: strings(i.claimedTechs, 60, 80),
+    name: text(i.name, 120),
   };
   if (!input.id || (!input.githubProfile && !repos.length)) {
     return NextResponse.json({ error: "A candidate id and a GitHub profile or repo link are required." }, { status: 400 });
