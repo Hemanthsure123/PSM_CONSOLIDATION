@@ -1,19 +1,12 @@
 import "server-only";
 import { reviewDomainProjects } from "@/lib/domain-project-review";
-import {
-  GITHUB_BUDGET_FLOOR,
-  GITHUB_INSPECT_CAP,
-  PROJECT_REVIEW_CAP,
-  combinedScore,
-  comparePriority,
-  gateFailure,
-  planGithubInspection,
-  shortlistBar,
-} from "@/lib/domain-scoring";
+import { GITHUB_BUDGET_FLOOR, shortlistBar } from "@/lib/domain-scoring";
 import { inspectDomainGithub, type GithubInspectResult } from "@/lib/domain-screen";
 import { BELOW_BAR_NOTE } from "@/lib/domain-csv";
 import { checkGithubAccess } from "@/lib/github-analysis";
 import { runQueue } from "@/lib/parallel-queue";
+import { adaptiveConcurrency } from "@/lib/automation/load";
+import { clearsGates, contenders, type BoundsConfig } from "@/lib/automation/ranking-bounds";
 import { loadCandidates, markPending, saveEvaluated, type CandidateCheckpoint } from "@/lib/automation/store";
 import type { RunContext } from "@/lib/automation/context";
 import type { DomainCandidate, DomainProjectReviewResult } from "@/lib/types";
@@ -26,11 +19,28 @@ import type { DomainCandidate, DomainProjectReviewResult } from "@/lib/types";
  *  - code review: the strongest candidates who can still be shortlisted get their top domain
  *    repos read file by file;
  *  - DSA profiles were read during screening; internal assessments came from the eligible pool.
- * Who gets inspected / reviewed is decided once and stored, so a restart continues the same set.
+ * Only CONTENDERS — candidates who can still reach the top N (ranking-bounds.ts, exact) — are
+ * inspected and reviewed, so a top-10 run reads ~15 GitHub profiles instead of every domain
+ * fit; with "(all candidates)" everyone else's GitHub is read too, after the shortlist.
+ * Who was picked is stored (pending), so a restart continues the same set.
  */
 
-const GITHUB_PARALLEL = 3;
-const REVIEW_PARALLEL = 2;
+const githubParallel = () => adaptiveConcurrency(4, 6);
+const reviewParallel = () => adaptiveConcurrency(3, 4);
+
+export const boundsOf = (ctx: RunContext): BoundsConfig | null =>
+  ctx.plan.topN
+    ? {
+        topN: ctx.plan.topN,
+        useGithub: ctx.plan.github !== "off",
+        useDsa: ctx.plan.dsa.use,
+        mandatoryActive: ctx.plan.mandatory.trim().length > 0,
+        dsaGates: ctx.plan.dsa.gates,
+      }
+    : null;
+
+/** Why a candidate's GitHub wasn't read (shown in the GitHub Notes column). */
+export const NOT_CONTENDER_NOTE = "Not inspected — can't reach the top N whatever their GitHub shows";
 const BUDGET_CHECK_MS = 60_000;
 
 /** Copy an inspection onto the candidate (same fields as the screen's GitHub step). */
@@ -74,24 +84,27 @@ class BudgetGate {
 const screened = (all: CandidateCheckpoint[]) => all.filter((c) => c.state === "screened" && c.candidate);
 const withInternal = (cp: CandidateCheckpoint): DomainCandidate => ({ ...cp.candidate!, internal: cp.internal });
 
-export async function evaluateGithub(ctx: RunContext): Promise<void> {
+/**
+ * GitHub for the contenders (`everyone` = also every other candidate with a link, for the
+ * "(all candidates)" scope once the shortlist is out). Called again later, it only adds the
+ * newly wanted ones; finished inspections are never repeated.
+ */
+export async function evaluateGithub(ctx: RunContext, everyone = false): Promise<void> {
   if (ctx.plan.github === "off") return;
   let all = screened(await loadCandidates(ctx.job.id));
-  // Plan the inspection once: candidates already planned (pending / done) keep their place.
-  if (!all.some((c) => c.githubState !== "none")) {
-    const pool = all.map((cp) => ({ ...withInternal(cp), key: cp.key }));
-    const plan = planGithubInspection(pool, ctx.plan.github, 0);
-    for (const c of plan.overCap) {
-      const cp = all.find((x) => x.key === c.key)!;
-      cp.candidate!.githubNote = `Beyond the top-${GITHUB_INSPECT_CAP} GitHub inspection cap.`;
-      await saveEvaluated(ctx.job.id, cp.key, cp.candidate!, {});
-    }
-    for (const c of plan.belowBar) {
-      const cp = all.find((x) => x.key === c.key)!;
-      cp.candidate!.githubNote = `${BELOW_BAR_NOTE} — scope was domain-fit candidates only.`;
-      await saveEvaluated(ctx.job.id, cp.key, cp.candidate!, {});
-    }
-    await markPending(ctx.job.id, plan.pool.map((c) => c.key), "github_state");
+  const bounds = boundsOf(ctx);
+  const withLink = (cp: CandidateCheckpoint) => Boolean(cp.candidate!.githubProfile || cp.candidate!.githubRepos.length);
+  const pool = all.map(withInternal);
+  const wanted = new Set(
+    everyone
+      ? all.filter(withLink).map((cp) => cp.key)
+      : bounds
+        ? all.filter((cp) => withLink(cp) && contenders(pool, bounds, "github").has(cp.candidate!.id)).map((cp) => cp.key)
+        : all.filter((cp) => withLink(cp) && clearsGates(withInternal(cp), { topN: 0, useGithub: true, useDsa: ctx.plan.dsa.use, mandatoryActive: ctx.plan.mandatory.trim().length > 0, dsaGates: ctx.plan.dsa.gates })).map((cp) => cp.key),
+  );
+  const fresh = all.filter((cp) => wanted.has(cp.key) && cp.githubState === "none" && cp.candidate!.githubStatus === "not-inspected").map((cp) => cp.key);
+  if (fresh.length) {
+    await markPending(ctx.job.id, fresh, "github_state");
     all = screened(await loadCandidates(ctx.job.id));
   }
   const todo = all.filter((c) => c.githubState === "pending");
@@ -103,7 +116,7 @@ export async function evaluateGithub(ctx: RunContext): Promise<void> {
   const saves: Promise<unknown>[] = [];
   await runQueue<CandidateCheckpoint, GithubInspectResult>({
     items: todo,
-    concurrency: () => GITHUB_PARALLEL,
+    concurrency: githubParallel,
     stopped: () => ctx.stopped,
     run: async (cp) => {
       await gate.pass();
@@ -145,26 +158,22 @@ export async function evaluateGithub(ctx: RunContext): Promise<void> {
   await Promise.all(saves);
 }
 
+/** Code review of the contenders' top domain repos (after their GitHub is read). */
 export async function evaluateReviews(ctx: RunContext): Promise<void> {
   if (ctx.plan.github === "off" || !ctx.plan.review) return;
   let all = screened(await loadCandidates(ctx.job.id));
-  if (!all.some((c) => c.reviewState !== "none")) {
-    const gates = {
-      mandatoryActive: ctx.plan.mandatory.trim().length > 0,
-      requireExperience: false,
-      minLeetcode: 0,
-      dsaGates: ctx.plan.dsa.gates,
-      minCommits: 0,
-      checkPresentation: false,
-      minPresentation: 0,
-    };
-    const cap = ctx.plan.topN ? Math.min(PROJECT_REVIEW_CAP, ctx.plan.topN * 2 + 5) : PROJECT_REVIEW_CAP;
-    const pool = all
-      .map((cp) => ({ cp, c: withInternal(cp) }))
-      .filter(({ c }) => c.githubStatus === "checked" && c.githubTopRepos.length > 0 && c.domainScore >= shortlistBar(c) && !gateFailure(c, gates))
-      .sort((a, b) => comparePriority(a.c, b.c, (x) => combinedScore(x, true, false, ctx.plan.dsa.use)))
-      .slice(0, cap);
-    await markPending(ctx.job.id, pool.map((x) => x.cp.key), "review_state");
+  const bounds = boundsOf(ctx);
+  const pool = all.map(withInternal);
+  const can = bounds ? contenders(pool, bounds, "review") : null;
+  const fresh = all
+    .filter((cp) => {
+      const c = withInternal(cp);
+      if (cp.reviewState !== "none" || c.githubStatus !== "checked" || !c.githubTopRepos.length || c.githubIdentity === "mismatch") return false;
+      return can ? can.has(c.id) : c.domainScore >= shortlistBar(c);
+    })
+    .map((cp) => cp.key);
+  if (fresh.length) {
+    await markPending(ctx.job.id, fresh, "review_state");
     all = screened(await loadCandidates(ctx.job.id));
   }
   const todo = all.filter((c) => c.reviewState === "pending");
@@ -176,7 +185,7 @@ export async function evaluateReviews(ctx: RunContext): Promise<void> {
   const saves: Promise<unknown>[] = [];
   await runQueue<CandidateCheckpoint, DomainProjectReviewResult>({
     items: todo,
-    concurrency: () => REVIEW_PARALLEL,
+    concurrency: reviewParallel,
     stopped: () => ctx.stopped,
     run: async (cp) => {
       await gate.pass();
@@ -207,4 +216,22 @@ export async function evaluateReviews(ctx: RunContext): Promise<void> {
     },
   });
   await Promise.all(saves);
+}
+
+/** Notes for the candidates whose GitHub wasn't read, so the complete sheet says why. */
+export async function noteUninspected(ctx: RunContext): Promise<void> {
+  if (ctx.plan.github === "off") return;
+  const all = screened(await loadCandidates(ctx.job.id));
+  const cfg = { topN: 0, useGithub: true, useDsa: ctx.plan.dsa.use, mandatoryActive: ctx.plan.mandatory.trim().length > 0, dsaGates: ctx.plan.dsa.gates };
+  for (const cp of all) {
+    const c = cp.candidate!;
+    if (c.githubStatus !== "not-inspected" || c.githubNote) continue;
+    const cand = withInternal(cp);
+    c.githubNote = clearsGates(cand, cfg)
+      ? NOT_CONTENDER_NOTE
+      : cand.domainScore < shortlistBar(cand)
+        ? `${BELOW_BAR_NOTE} — not inspected`
+        : "Not inspected — misses a must-have, so GitHub can't change the result";
+    await saveEvaluated(ctx.job.id, cp.key, c, {});
+  }
 }

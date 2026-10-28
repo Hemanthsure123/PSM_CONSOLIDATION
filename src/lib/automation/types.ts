@@ -93,7 +93,14 @@ export interface JobProgress {
   read?: number;
   screened?: number;
   failed?: number;
+  /** Cleared the domain-fit bar. */
   matches?: number;
+  /** Cleared the bar AND showed every must-have. */
+  mustHaves?: number;
+  /** The shortlist was delivered before the full screening finished. */
+  shortlistTab?: string;
+  shortlistUrl?: string;
+  shortlistCount?: number;
   githubDone?: number;
   githubTotal?: number;
   reviewDone?: number;
@@ -116,4 +123,6 @@ export interface JobResult {
   flagged: number;
   reviewReasons: string[];
   rowsWritten: number;
+  /** Every screened candidate written below the shortlist (complete screening). */
+  complete: boolean;
 }

@@ -94,7 +94,7 @@ const draft = parseDraft({
   settingsHints: ["Turn on DSA gates — the JD requires data structures and algorithms."],
 });
 const done = finishDraft(draft, { sourceText: JD, domainName: "" });
-ok("supported must-haves kept, in order", done.mandatory === "Java, Spring Boot, MySQL or PostgreSQL, DSA", done.mandatory);
+ok("supported must-haves kept, in order", done.mandatory === "Java; Spring Boot; MySQL or PostgreSQL; DSA", done.mandatory);
 ok("unsupported item dropped with a reason", done.dropped.length === 1 && done.dropped[0].startsWith("React"), done.dropped);
 ok("duplicates removed", done.mandatoryItems.length === 4);
 ok("good-to-have de-duplicated", draft.goodToHave.join() === "Kafka,Redis");

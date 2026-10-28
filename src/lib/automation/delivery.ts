@@ -3,11 +3,12 @@ import { buildDomainReport } from "@/actions/domain";
 import { getSheetsWriter } from "@/lib/sheets";
 import { env } from "@/lib/env";
 import { withSheetsRetry } from "@/lib/automation/control-sheet";
-import { columnLetter, deliveredBefore, deliveryTable, mergeHeaders, sheetRows } from "@/lib/automation/delivery-rules";
+import { deliveredKeys, deliveryTable, planHeaders, rowKey, sheetRows, unscoredRow } from "@/lib/automation/delivery-rules";
 import { JobError } from "@/lib/automation/errors";
 import { destinationTabName } from "@/lib/automation/instructions";
 import { loadCandidates, logEvent } from "@/lib/automation/store";
 import { jobVerdict, reviewFlags } from "@/lib/automation/validation";
+import type { UnscoredRow } from "@/lib/domain-csv";
 import type { RunContext } from "@/lib/automation/context";
 import type { JobResult } from "@/lib/automation/types";
 import type { DomainCandidate, DomainReportResult } from "@/lib/types";
@@ -21,14 +22,17 @@ import type { DomainCandidate, DomainReportResult } from "@/lib/types";
  * AWAITING_REVIEW. Missing assessments never count as passed: a person not in the eligible
  * pool is external, an unread DSA profile scores nothing.
  *
- * Delivery appends the shortlist to psm_final_shortlisted_<date> in the candidates'
- * spreadsheet: the tab is created if missing, existing rows are never touched, columns are
- * matched by name, and the Job ID column makes a retried delivery a no-op instead of a duplicate.
+ * Delivery writes to psm_final_shortlisted_<date> in the candidates' spreadsheet: first the
+ * shortlist (as soon as it is final), then every other candidate below it (the complete
+ * screening). The tab is created if missing, existing rows are never touched, columns are
+ * matched by name, and a candidate already written for this job (by mobile number) is never
+ * written again — so a retried or repeated delivery is a no-op, not a duplicate.
  */
 
 const q = (tab: string) => `'${tab.replace(/'/g, "''")}'`;
+const APPEND_CHUNK = 250;
 
-/** One delivery at a time per destination tab (header merge + append must not interleave). */
+/** One delivery at a time per destination tab (header changes + appends must not interleave). */
 const tabLocks = new Map<string, Promise<unknown>>();
 async function withTabLock<T>(key: string, work: () => Promise<T>): Promise<T> {
   const prev = tabLocks.get(key) ?? Promise.resolve();
@@ -48,12 +52,14 @@ export interface Validated {
   report: DomainReportResult;
   flags: Map<string, string[]>;
   sourceTabOf: Map<string, string>;
+  unscored: (UnscoredRow & { sourceTab: string })[];
   status: "completed" | "awaiting_review";
   reasons: string[];
   stats: { read: number; scored: number; notResumes: number; unscored: number; duplicates: number };
 }
 
-export async function validate(ctx: RunContext): Promise<Validated> {
+/** Rank the screened candidates and check the shortlist. `final` = the whole sheet is screened. */
+export async function validate(ctx: RunContext, final = true): Promise<Validated> {
   const all = await loadCandidates(ctx.job.id);
   const screened = all.filter((c) => c.state === "screened" && c.candidate);
   const candidates: DomainCandidate[] = screened.map((c) => ({ ...c.candidate!, internal: c.internal }));
@@ -82,6 +88,9 @@ export async function validate(ctx: RunContext): Promise<Validated> {
   for (const c of report.candidates.filter((x) => x.shortlisted)) flags.set(c.id, reviewFlags(c, ctx.plan));
   const sourceTabOf = new Map(screened.map((c) => [c.candidate!.id, c.sourceTab]));
   const live = all.filter((c) => c.state !== "duplicate");
+  const unscored = live
+    .filter((c) => c.state === "invalid" || c.state === "error" || c.state === "pending")
+    .map((c) => unscoredRow(c.row, c.state as "invalid" | "error" | "pending", c.error ?? "", c.internal, c.sourceTab));
   const stats = {
     read: live.length,
     scored: screened.length,
@@ -93,30 +102,43 @@ export async function validate(ctx: RunContext): Promise<Validated> {
   const verdict = jobVerdict({
     shortlisted,
     requested: ctx.plan.topN,
-    unscored: stats.unscored,
+    unscored: final ? stats.unscored : 0,
     flaggedShortlisted: [...flags.values()].filter((f) => f.length).length,
     briefSource: ctx.plan.briefSource,
   });
-  await logEvent(ctx.job.id, "validating", "info", `${shortlisted} shortlisted of ${stats.scored} scored; ${verdict.status}${verdict.reasons.length ? `: ${verdict.reasons.join("; ")}` : ""}.`);
-  return { report, flags, sourceTabOf, status: verdict.status, reasons: verdict.reasons, stats };
+  await logEvent(
+    ctx.job.id,
+    "validating",
+    "info",
+    `${final ? "" : "Shortlist final before the full screening: "}${shortlisted} shortlisted of ${stats.scored} scored; ${verdict.status}${verdict.reasons.length ? `: ${verdict.reasons.join("; ")}` : ""}.`,
+  );
+  return { report, flags, sourceTabOf, unscored, status: verdict.status, reasons: verdict.reasons, stats };
 }
 
-export async function deliver(ctx: RunContext, v: Validated): Promise<JobResult> {
+/** Write the shortlist (`only: "shortlist"`) or every candidate (`"all"`) to the job's tab. */
+export async function deliver(ctx: RunContext, v: Validated, only: "shortlist" | "all" = "all"): Promise<JobResult> {
   const runDate = ctx.job.runDate ?? new Date().toISOString().slice(0, 10);
   const tab = destinationTabName(runDate);
   const spreadsheetId = ctx.plan.sourceSpreadsheetId;
-  const { headers: wanted, rows } = deliveryTable(v.report, ctx.plan, {
-    jobId: ctx.job.id,
-    deliveredAt: deliveredAtText(),
-    sourceTabOf: (id) => v.sourceTabOf.get(id) ?? "",
-    flagsOf: (id) => v.flags.get(id) ?? [],
-  });
+  const { headers: wanted, rows } = deliveryTable(
+    v.report,
+    ctx.plan,
+    {
+      jobId: ctx.job.id,
+      deliveredAt: deliveredAtText(),
+      sourceTabOf: (id) => v.sourceTabOf.get(id) ?? "",
+      flagsOf: (id) => v.flags.get(id) ?? [],
+      unscored: v.unscored,
+    },
+    only,
+  );
   const sheets = getSheetsWriter();
 
   const written = await withTabLock(`${spreadsheetId}|${tab}`, async () => {
     try {
       // 1. The tab (created if missing; another job creating it at the same moment is fine).
-      const meta = await withSheetsRetry(() => sheets.spreadsheets.get({ spreadsheetId, fields: "sheets.properties(sheetId,title,gridProperties(columnCount))" }));
+      const fields = "sheets.properties(sheetId,title,gridProperties(columnCount))";
+      const meta = await withSheetsRetry(() => sheets.spreadsheets.get({ spreadsheetId, fields }));
       let sheet = (meta.data.sheets ?? []).find((s) => s.properties?.title === tab)?.properties;
       if (!sheet) {
         try {
@@ -127,57 +149,45 @@ export async function deliver(ctx: RunContext, v: Validated): Promise<JobResult>
           await logEvent(ctx.job.id, "delivering", "info", `Created the tab "${tab}".`);
         } catch (err) {
           if (!/already exists/i.test(String((err as Error).message))) throw err;
-          const again = await withSheetsRetry(() => sheets.spreadsheets.get({ spreadsheetId, fields: "sheets.properties(sheetId,title,gridProperties(columnCount))" }));
+          const again = await withSheetsRetry(() => sheets.spreadsheets.get({ spreadsheetId, fields }));
           sheet = (again.data.sheets ?? []).find((s) => s.properties?.title === tab)?.properties;
         }
       }
       if (!sheet || sheet.sheetId === undefined || sheet.sheetId === null) throw new JobError(`Couldn't create the tab "${tab}".`, true);
+      const sheetId = sheet.sheetId;
 
-      // 2. Already delivered by an earlier attempt of this job? (the response can be lost after a write)
-      const head = await withSheetsRetry(() => sheets.spreadsheets.values.get({ spreadsheetId, range: `${q(tab)}!1:1` }));
-      const existing = ((head.data.values ?? [])[0] ?? []).map((c) => String(c ?? ""));
-      const jobCol = existing.findIndex((h) => h.trim() === "Job ID");
-      if (jobCol >= 0) {
-        const col = await withSheetsRetry(() =>
-          sheets.spreadsheets.values.get({ spreadsheetId, range: `${q(tab)}!${columnLetter(jobCol + 1)}2:${columnLetter(jobCol + 1)}` }),
-        );
-        const n = deliveredBefore(((col.data.values ?? []) as unknown[][]).map((r) => String(r[0] ?? "")), ctx.job.id);
-        if (n > 0) {
-          await logEvent(ctx.job.id, "delivering", "info", `Already delivered (${n} rows in "${tab}") — not written again.`);
-          return { rowsWritten: n, gid: sheet.sheetId, already: true };
-        }
-      }
+      // 2. What the tab holds: its header, and the rows this job already wrote (by mobile number).
+      const existing = await withSheetsRetry(() => sheets.spreadsheets.values.get({ spreadsheetId, range: q(tab) }));
+      const values = ((existing.data.values ?? []) as unknown[][]).map((r) => r.map((c) => String(c ?? "")));
+      const plan = planHeaders(values[0] ?? [], wanted);
+      const already = deliveredKeys(values[0] ?? [], values.slice(1), ctx.job.id);
+      const toWrite = rows.filter((r) => !already.has(rowKey(r)));
 
-      // 3. Headers: existing ones stay in place, missing ones are added at the end.
-      const { headers, added } = mergeHeaders(existing, wanted);
-      const needCols = headers.length;
-      if ((sheet.gridProperties?.columnCount ?? 0) < needCols) {
+      // 3. Header: key columns missing from an older tab are inserted in place, other new ones appended.
+      const requests: object[] = plan.inserts.map((index) => ({ insertDimension: { range: { sheetId, dimension: "COLUMNS", startIndex: index, endIndex: index + 1 }, inheritFromBefore: false } }));
+      const have = (sheet.gridProperties?.columnCount ?? 0) + plan.inserts.length;
+      if (have < plan.headers.length) requests.push({ appendDimension: { sheetId, dimension: "COLUMNS", length: plan.headers.length - have } });
+      if (requests.length) await withSheetsRetry(() => sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } }));
+      if (plan.inserts.length || plan.appended.length || !values.length) {
         await withSheetsRetry(() =>
-          sheets.spreadsheets.batchUpdate({
-            spreadsheetId,
-            requestBody: { requests: [{ appendDimension: { sheetId: sheet!.sheetId!, dimension: "COLUMNS", length: needCols - (sheet!.gridProperties?.columnCount ?? 0) } }] },
-          }),
-        );
-      }
-      if (added.length || !existing.length) {
-        await withSheetsRetry(() =>
-          sheets.spreadsheets.values.update({ spreadsheetId, range: `${q(tab)}!A1`, valueInputOption: "RAW", requestBody: { values: [headers] } }),
+          sheets.spreadsheets.values.update({ spreadsheetId, range: `${q(tab)}!A1`, valueInputOption: "RAW", requestBody: { values: [plan.headers] } }),
         );
       }
 
-      // 4. The rows, appended below whatever is there (RAW: nothing in a cell is run as a formula).
-      if (rows.length) {
+      // 4. The new rows, appended below whatever is there, in chunks (RAW: nothing in a cell runs as a formula).
+      for (let i = 0; i < toWrite.length; i += APPEND_CHUNK) {
+        const chunk = toWrite.slice(i, i + APPEND_CHUNK);
         await withSheetsRetry(() =>
           sheets.spreadsheets.values.append({
             spreadsheetId,
             range: `${q(tab)}!A1`,
             valueInputOption: "RAW",
             insertDataOption: "INSERT_ROWS",
-            requestBody: { values: sheetRows(headers, rows) },
+            requestBody: { values: sheetRows(plan.headers, chunk) },
           }),
         );
       }
-      return { rowsWritten: rows.length, gid: sheet.sheetId, already: false };
+      return { written: toWrite.length, skipped: rows.length - toWrite.length, gid: sheetId };
     } catch (err) {
       if (err instanceof JobError) throw err;
       const status = Number((err as { code?: number }).code ?? (err as { response?: { status?: number } }).response?.status);
@@ -188,7 +198,12 @@ export async function deliver(ctx: RunContext, v: Validated): Promise<JobResult>
     }
   });
 
-  if (!written.already) await logEvent(ctx.job.id, "delivering", "info", `Wrote ${written.rowsWritten} rows to "${tab}" in "${ctx.plan.sourceTitle}".`);
+  await logEvent(
+    ctx.job.id,
+    "delivering",
+    "info",
+    `${only === "shortlist" ? "Shortlist" : "Complete screening"}: wrote ${written.written} rows to "${tab}"${written.skipped ? ` (${written.skipped} already there)` : ""}.`,
+  );
   return {
     destinationTab: tab,
     destinationUrl: `https://docs.google.com/spreadsheets/d/${spreadsheetId}/edit#gid=${written.gid}`,
@@ -202,6 +217,7 @@ export async function deliver(ctx: RunContext, v: Validated): Promise<JobResult>
     duplicates: v.stats.duplicates,
     flagged: [...v.flags.values()].filter((f) => f.length).length,
     reviewReasons: v.reasons,
-    rowsWritten: written.rowsWritten,
+    rowsWritten: written.written + written.skipped,
+    complete: only === "all",
   };
 }

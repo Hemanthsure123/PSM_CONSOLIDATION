@@ -41,7 +41,7 @@ DSA: yes
 | Item | How to write it | If you leave it out |
 |---|---|---|
 | **Subsheets** | Tab names in the Internal Sheets spreadsheet, separated by commas. Case and spaces don't matter. Quote a name that contains a comma: `'Batch 2, late'`. | Required |
-| **Focus** | What a good candidate looks like for this company, in your own words. The model turns it into the domain brief and the must-have skills, keeping only must-haves that your text actually states. | Required |
+| **Focus** | What a good candidate looks like for this company, in your own words. Write must-haves as "Must have: …" separated by `;`. Write alternatives with "or": "Node.js or Golang" is met by either. Leave out the company's product or industry (gaming, fintech …): candidates are judged on technology, not on their projects' subject. The model turns it into the domain brief and the must-have skills, keeping only must-haves that your text actually states. | Required |
 | **GitHub** | `(domain-fit candidates)` inspects only candidates whose resume fits. `(all candidates)` inspects everyone with a GitHub link. `no` skips GitHub. Add `no review` to skip the code review of the top projects. | Domain-fit candidates, with code review |
 | **DSA** | `yes`, `no`, or minimums such as `CF 1400 or CC 1600, 300 solved, 10 contests, DSA score 50` | Off |
 | **Top** | `Top: 10` | The row's No. of Profiles Required; if that is blank, everyone who clears every requirement |
@@ -64,16 +64,35 @@ Edge Applied, Academy Applied -> MERN developers with deployed full-stack apps -
 
 ### What you get
 
-The shortlist goes to the candidates' spreadsheet, in a tab named **`psm_final_shortlisted_<YYYY-MM-DD>`**. The date is the day the job started, in India time.
+The result goes to the candidates' spreadsheet, in a tab named **`psm_final_shortlisted_<YYYY-MM-DD>`**. The date is the day the job started, in India time.
 
-- The tab is created if it doesn't exist.
-- Jobs on the same day add their rows below the rows already there. Existing rows are never changed or removed, and a retried delivery never writes the same rows twice.
-- Each row starts with four columns:
+**The complete screening, best first.** Every candidate the job read is in the tab, in this order:
+1. **The shortlist** (the top N): Status `Shortlisted`.
+2. Candidates who cleared every requirement but ranked below the top N. They have a rank, and the reason says where they ranked.
+3. Candidates left out, with the reason, such as a missing must-have or a domain fit below the bar.
+4. Rows that couldn't be screened, such as a resume that isn't shared or a file that isn't a resume.
+
+**The shortlist arrives first.** Screening runs by internal stage: TR-2, then TR-1, then assessment, then external candidates. As soon as nobody left unscreened can enter the top N, the shortlist is checked (GitHub, code review), validated and written to the tab. The row's Details then says `Shortlist ready (10) → psm_final_shortlisted_…`. The remaining candidates are screened afterwards and written below it. When the internally assessed candidates fill the top N, the shortlist comes in minutes even for a long sheet.
+
+**Columns.**
+- Every row starts with these columns:
   - **Job ID**;
   - **Delivered At**;
-  - **Source Tab**;
-  - **Review Flags**.
-- The rest are Domain shortlisting's columns: rank, domain score, resume core skills, internal standing / stage / product, GitHub and DSA (when screened), and Signals.
+  - **Mobile Number**, the candidate's key;
+  - **Rank**;
+  - **Name**;
+  - **Status**;
+  - **Not Shortlisted Because**;
+  - **Review Flags**;
+  - **Source Tab**.
+- The rest are Domain shortlisting's columns: domain score, resume core skills, internal standing / stage / product, GitHub and DSA (when screened), Signals, and more.
+
+**Safe to re-run and to share a tab.**
+- Jobs on the same day add their rows below the rows already there. Existing rows are never changed or removed.
+- A candidate already written for a job, matched by mobile number, is never written again. Neither a retried delivery nor the shortlist-then-rest delivery can duplicate a row.
+- When a tab from an earlier version lacks one of the leading columns, that column is inserted in place, and the old rows simply leave it blank.
+
+The tab's name in Automation Details is a link to it.
 
 | Final status | Meaning |
 |---|---|
@@ -170,6 +189,20 @@ The **orchestrator** (`orchestrator.ts`) runs the agents in order and decides re
 
 The self-tests are `scripts/automation-selftest.ts` (instructions, columns, flags, delivery rules, status text) and `scripts/apps-script-selftest.ts` (the real `.gs` file against a simulated sheet).
 
+### Why it's fast on the free plan
+
+| What | Effect |
+|---|---|
+| **Stage-first screening and an early shortlist** | The shortlist is delivered as soon as it can't change, before the rest of the sheet is screened |
+| **GitHub and code review only for contenders** | Only candidates who can still reach the top N are inspected. The test uses exact score bounds:<br>• domain fit, plus DSA, plus up to 20 points for GitHub;<br>• the code review can move the GitHub part only within known limits.<br>Anyone who would rank below the N-th candidate even at their best is skipped. A top-10 run inspects about 10–20 profiles instead of every domain fit, and the shortlist is identical to inspecting everyone.<br>With `GitHub: (all candidates)`, everyone else's GitHub is read after the shortlist is out. |
+| **Memory-aware parallelism** | 5 resumes, 4 GitHub profiles and 3 code reviews run at once, scaled down while memory is high |
+| **Nothing done twice** | Inspections and reviews are cached for 24 h, and a restarted job skips finished candidates |
+
+**"X or Y" must-haves.** A must-have such as "Node.js or Golang" or "MongoDB or MySQL" is met when any one alternative is proven. This applies to:
+- the resume screening;
+- GitHub (score, "Mandatory not proven" flags);
+- the code review.
+
 ## Operations
 
 | Task | How |
@@ -178,7 +211,7 @@ The self-tests are `scripts/automation-selftest.ts` (instructions, columns, flag
 | Recent jobs | `GET /api/automation/jobs?limit=20` |
 | Database | Schema `automation`: `jobs`, `job_requests`, `job_events`, `job_candidates`. Checkpoints of jobs finished more than 30 days ago are pruned; the jobs and their events stay. |
 | Turn the worker off | Set `AUTOMATION_WORKER` to anything but `on`. Jobs wait as `PENDING` until it is on again. |
-| Speed | `AUTOMATION_CONCURRENCY` (default 4) sets how many resumes are screened at once. Keep it at 3–4 on the free plan's 512 MB. |
+| Speed | `AUTOMATION_CONCURRENCY` (default 5) sets how many resumes are screened at once. It drops automatically while memory is high (`AUTOMATION_MEMORY_SOFT_MB` 380 halves it; `AUTOMATION_MEMORY_HARD_MB` 450 makes it one at a time), so the free plan's 512 MB is never exceeded. |
 
 Server settings (Render → Environment):
 
@@ -188,7 +221,7 @@ Server settings (Render → Environment):
 | `AUTOMATION_WORKER` | `on` |
 | `AUTOMATION_SPREADSHEET_IDS` | The coordination sheet's id. Requests from any other sheet are refused. |
 | `AUTOMATION_CONTROL_TABS` | Optional; defaults to `Profile Shortlisting - New` |
-| `AUTOMATION_CONCURRENCY` | Optional; defaults to 4 |
+| `AUTOMATION_CONCURRENCY` | Optional; defaults to 5 (lowered automatically under memory pressure) |
 
 ## Troubleshooting
 

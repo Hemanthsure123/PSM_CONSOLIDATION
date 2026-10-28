@@ -204,7 +204,8 @@ export function finishDraft(
   const items: MandatoryItem[] = [];
   let mandatory = "";
   for (const m of kept) {
-    const next = mandatory ? `${mandatory}, ${m.item}` : m.item;
+    // "; " between items: an item can itself be a comma list of alternatives ("Express.js, NestJS or Gin").
+    const next = mandatory ? `${mandatory}; ${m.item}` : m.item;
     if (items.length >= MANDATORY_ITEMS_MAX || next.length > MANDATORY_MAX) {
       dropped.push(`${m.item} — over the ${MANDATORY_ITEMS_MAX}-item / ${MANDATORY_MAX}-character limit`);
       continue;

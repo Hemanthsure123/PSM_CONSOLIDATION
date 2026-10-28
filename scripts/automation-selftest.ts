@@ -11,9 +11,13 @@ import "./server-only-shim";
 import { detectDomainColumns } from "@/lib/domain-columns";
 import { dsaGatesActive } from "@/lib/dsa-scoring";
 import { destinationTabName, dsaGatesOf, githubScopeOf, istDate, parseInstructions, profilesRequiredOf, resolveTabs } from "@/lib/automation/instructions";
-import { columnLetter, cellText, deliveredBefore, deliveryTable, mergeHeaders, sheetRows } from "@/lib/automation/delivery-rules";
+import { KEY_COLUMNS, cellText, columnLetter, deliveredKeys, deliveryTable, planHeaders, rowKey, sheetRows, unscoredRow } from "@/lib/automation/delivery-rules";
+import { contenders, scoreBounds, shortlistFinal, waveOf } from "@/lib/automation/ranking-bounds";
+import { adaptiveConcurrency } from "@/lib/automation/load";
+import { buildJdTechSpec, mandatoryTechsAbsent, splitMandatoryItems } from "@/lib/github-analysis";
+import type { InternalStanding } from "@/lib/pool/types";
 import { jobVerdict, reviewFlags } from "@/lib/automation/validation";
-import { detailsText } from "@/lib/automation/sheet-text";
+import { detailsLink, detailsText } from "@/lib/automation/sheet-text";
 import type { AutomationPlan } from "@/lib/automation/types";
 import type { DomainCandidate, DomainCandidateOutcome, DomainReportResult } from "@/lib/types";
 
@@ -171,36 +175,102 @@ const planOf = (o: Partial<AutomationPlan> = {}): AutomationPlan => ({
   check("verdict: shortfall / unscored / flagged / fallback → AWAITING_REVIEW with every reason", v.status === "awaiting_review" && v.reasons.length === 4, v);
 }
 
-// ── Delivery ─────────────────────────────────────────────────────────────────
+// ── Delivery: complete screening, mobile number as the key ───────────────────
 {
   const report: DomainReportResult = {
     link: "",
     storage: "local",
     shortlisted: 1,
     considered: 2,
-    candidates: [base({ id: "u1", signals: ["Shortlisted at rank 1 of 1"] }), base({ id: "u2", name: "Bala", rank: 0, shortlisted: false, outcomeReason: "Domain fit 40 is below the 55 bar", priority: 0 })],
+    candidates: [
+      base({ id: "9876543210", phone: "+91 98765 43210", signals: ["Shortlisted at rank 1 of 1"] }),
+      base({ id: "u2", name: "Bala", phone: "9123456780", rank: 0, shortlisted: false, outcomeReason: "Domain fit 40 is below the 55 bar", priority: 0 }),
+    ],
     excluded: { mandatory: 0, leetcode: 0, dsa: 0, commits: 0, experience: 0, presentation: 0 },
     limitedToTopN: true,
     reportSkipped: true,
   };
-  const t = deliveryTable(report, planOf(), {
+  const ctx = {
     jobId: "11111111-2222-3333-4444-555555555555",
-    deliveredAt: "28 Oct 2026, 15:00 IST",
-    sourceTabOf: (id) => (id === "u1" ? "Edge Applied" : ""),
-    flagsOf: (id) => (id === "u1" ? ["Borderline domain fit (57, bar 55)"] : []),
-  });
-  check("only the shortlist is delivered", t.rows.length === 1 && t.rows[0].Name === "Asha", t.rows.length);
-  check("job columns first", t.headers.slice(0, 5).join("|") === "Job ID|Delivered At|Source Tab|Review Flags|Rank", t.headers.slice(0, 6));
-  check("row carries job, source tab and flags", t.rows[0]["Job ID"].startsWith("11111111") && t.rows[0]["Source Tab"] === "Edge Applied" && t.rows[0]["Review Flags"] === "• Borderline domain fit (57, bar 55)");
-  check("Signals and internal columns present", t.headers.includes("Signals") && t.headers.includes("Internal Standing"));
+    deliveredAt: "29 Oct 2026, 15:00 IST",
+    sourceTabOf: (id: string) => (id === "9876543210" ? "Edge Applied" : "Academy Applied"),
+    flagsOf: (id: string) => (id === "9876543210" ? ["Borderline domain fit (57, bar 55)"] : []),
+    unscored: [unscoredRow({ ...base({ id: "9000000001", name: "Cara" }), phone: "9000000001" }, "error", "Couldn't download the resume", null, "Edge Applied")],
+  };
+  const t = deliveryTable(report, planOf(), ctx);
+  check("key columns first, mobile number before the name", t.headers.slice(0, 9).join("|") === KEY_COLUMNS.join("|"), t.headers.slice(0, 9));
+  check("no separate Phone column", !t.headers.includes("Phone"));
+  check("complete screening: shortlist, then the rest, then unscreened", t.rows.map((r) => r.Status).join("|") === "Shortlisted|Not shortlisted|Could not be evaluated", t.rows.map((r) => r.Status));
+  check("mobile numbers as 10 digits", t.rows.map((r) => r["Mobile Number"]).join("|") === "9876543210|9123456780|9000000001", t.rows.map((r) => r["Mobile Number"]));
+  check("rows carry source tab, flags and Signals", t.rows[0]["Source Tab"] === "Edge Applied" && t.rows[0]["Review Flags"] === "• Borderline domain fit (57, bar 55)" && t.rows[2]["Source Tab"] === "Edge Applied" && t.rows[2].Signals.includes("Could not be evaluated"));
+  const s = deliveryTable(report, planOf(), ctx, "shortlist");
+  check("the early delivery is the shortlist alone", s.rows.length === 1 && s.rows[0].Name === "Asha");
 
-  const merged = mergeHeaders(["Job ID", "Rank", "", "Old Column", "", ""], ["Job ID", "Rank", "Name", "Signals"]);
-  check("existing headers kept in place, new ones appended", merged.headers.join("|") === "Job ID|Rank||Old Column|Name|Signals" && merged.added.join("|") === "Name|Signals", merged);
-  const rows = sheetRows(["Name", "", "Rank"], [{ Name: "Asha", Rank: "1" }]);
-  check("rows follow the tab's header order (blank header = blank cell)", JSON.stringify(rows) === JSON.stringify([["Asha", "", "1"]]));
-  check("re-delivery detected by Job ID", deliveredBefore(["a", "11111111-2222-3333-4444-555555555555", "b"], "11111111-2222-3333-4444-555555555555") === 1 && deliveredBefore([], "x") === 0);
+  // An older tab: key columns inserted in place, others appended; nothing moves under existing data.
+  const old = ["Job ID", "Delivered At", "Source Tab", "Review Flags", "Rank", "Name", "Status", "Domain Score"];
+  const p = planHeaders(old, t.headers);
+  check("missing key columns are inserted at their place", p.headers.slice(0, 5).join("|") === "Job ID|Delivered At|Mobile Number|Source Tab|Review Flags" && p.inserts[0] === 2, p);
+  check("other new columns are appended at the end", p.appended.includes("Signals") && p.headers.indexOf("Signals") > p.headers.indexOf("Domain Score"));
+  check("an empty tab gets the full header", planHeaders([], t.headers).headers.join("|") === t.headers.join("|"));
+
+  // Idempotency by mobile number.
+  const headers = p.headers;
+  const written = sheetRows(headers, s.rows);
+  const keys = deliveredKeys(headers, written, ctx.jobId);
+  check("rows already written for this job are recognised by mobile number", keys.has("m:9876543210") && keys.size === 1, [...keys]);
+  check("…and skipped on the full delivery", t.rows.filter((r) => !keys.has(rowKey(r))).length === 2);
+  check("another job's rows don't count", deliveredKeys(headers, written, "other-job").size === 0);
+  check("row key falls back to user id, then tab + name", rowKey({ "Mobile Number": "", "User ID": "ABC-1" }) === "u:abc-1" && rowKey({ "Source Tab": "T", Name: "N" }) === "r:T|N");
   check("column letters", columnLetter(1) === "A" && columnLetter(26) === "Z" && columnLetter(27) === "AA" && columnLetter(37) === "AK");
   check("cells capped under the Sheets limit", cellText("x".repeat(60_000)).length === 45_000 && cellText(null) === "");
+}
+
+// ── Ranking bounds: who can still reach the top N ────────────────────────────
+{
+  const tier = (t: 1 | 2 | 3): InternalStanding => ({ tier: t, label: `T${t}`, product: "edge2", score: 50, eligible: true, matchedBy: "phone", standings: [] });
+  const cfg = { topN: 2, useGithub: true, useDsa: false, mandatoryActive: true, dsaGates: { minSolved: 0, minContests: 0, minScore: 0, minRating: { leetcode: 0, codeforces: 0, codechef: 0 } } };
+  const c = (id: string, fit: number, t: 1 | 2 | 3 | null, o: Partial<DomainCandidateOutcome> = {}) => base({ id, domainScore: fit, internal: t ? tier(t) : null, ...o });
+  const pool = [c("a", 90, 1), c("b", 80, 1), c("c", 75, 1), c("d", 55, 1), c("e", 95, 2), c("x", 99, null), c("m", 95, 1, { meetsMandatory: false })];
+  const g = contenders(pool, cfg, "github");
+  // K = 2nd at the lowest = b (80). Contenders in tier 1 with max ≥ 80: a, b, c (75+20), not d (55+20 = 75).
+  check("contenders: within reach of the N-th place", [...g].sort().join() === "a,b,c", [...g]);
+  check("a lower stage or external can't overtake, whatever their fit", !g.has("e") && !g.has("x"));
+  check("a candidate missing a must-have is never a contender", !g.has("m"));
+  check("bounds before GitHub: up to +20", scoreBounds(c("q", 70, 1), cfg, "github").max === 90 && scoreBounds(c("q", 70, 1), cfg, "github").min === 70);
+  const after = c("r", 70, 1, { githubStatus: "checked", githubScore: 50, githubTopRepos: [{ name: "x", url: "u", matchPct: 80, techs: [] }] } as Partial<DomainCandidateOutcome>);
+  const rb = scoreBounds(after, cfg, "review");
+  check("bounds before the code review: 40% of GitHub up to +60", rb.min === 70 + 4 && rb.max === 70 + 16, rb);
+  check("GitHub off: no spread", scoreBounds(c("q", 70, 1), { ...cfg, useGithub: false }, "github").max === 70);
+  check("fewer than N clear: everyone is a contender", contenders([c("a", 90, 1)], { ...cfg, topN: 5 }, "github").size === 1);
+
+  // The shortlist is final once nobody unscreened can enter it.
+  const screenedTop = [c("a", 90, 1), c("b", 80, 1)];
+  check("final: N TR-2 fits, only TR-1 / external left", shortlistFinal(screenedTop, [tier(2), tier(3), null], cfg));
+  check("not final while a TR-2 is unscreened", !shortlistFinal(screenedTop, [tier(1)], cfg));
+  check("not final with fewer than N cleared", !shortlistFinal([c("a", 90, 1)], [tier(2)], cfg));
+  check("waves: TR-2, TR-1, assessment, then everyone else", waveOf(tier(1)) === 0 && waveOf(tier(3)) === 2 && waveOf(null) === 3);
+}
+
+// ── "X or Y" must-haves (GitHub) ─────────────────────────────────────────────
+{
+  const stan = "Node.js or Golang APIs; MongoDB or MySQL; RESTful APIs with Express.js, NestJS, Gin or Fiber; JWT authentication";
+  const groups = buildJdTechSpec(stan, "", { modelledOnly: true }).mandatoryGroups ?? [];
+  check("alternatives are one requirement each", JSON.stringify(groups) === JSON.stringify([["Node.js / Express", "Go"], ["SQL", "MongoDB"], ["REST APIs"]]), groups);
+  const legacy = buildJdTechSpec(stan.replace(/; /g, ", "), "", { modelledOnly: true }).mandatoryGroups;
+  check("the same groups from a comma-joined text", JSON.stringify(legacy) === JSON.stringify(groups), legacy);
+  check("a plain list stays separate requirements", JSON.stringify(buildJdTechSpec("React, Node.js, MongoDB", "", { modelledOnly: true }).mandatoryGroups) === JSON.stringify([["React"], ["Node.js / Express"], ["MongoDB"]]));
+  check("'Java/Kotlin and Spring Boot' = (Java or Kotlin) + Spring Boot", JSON.stringify(splitMandatoryItems("Java/Kotlin and Spring Boot").map((i) => i.alternatives)) === "[true,false]");
+  check("a Go resume isn't failed on an Express alternative", mandatoryTechsAbsent(stan, "Built REST APIs in Go with Gin and MySQL, JWT auth").length === 0);
+  check("a plain must-have the resume never names is still caught", mandatoryTechsAbsent("React, Node.js", "Built a React app with Firebase").join() === "Node.js / Express");
+}
+
+// ── Free-plan back-pressure ──────────────────────────────────────────────────
+{
+  const MB = 1024 * 1024;
+  check("full width with memory to spare", adaptiveConcurrency(5, 8, 200 * MB) === 5);
+  check("halved when memory is high", adaptiveConcurrency(5, 8, 400 * MB) === 2);
+  check("one at a time near the limit", adaptiveConcurrency(5, 8, 460 * MB) === 1);
+  check("never above the maximum", adaptiveConcurrency(20, 8, 100 * MB) === 8);
 }
 
 // ── Status text ──────────────────────────────────────────────────────────────
@@ -209,32 +279,32 @@ const planOf = (o: Partial<AutomationPlan> = {}): AutomationPlan => ({
   const at = new Date("2026-10-28T09:30:00Z");
   const pending = detailsText({ jobId: id, status: "pending", step: "queued", progress: {}, result: null, error: null, queueAhead: 2, at });
   check("pending: queue position, IST time, job id last", pending === `Queued behind 2 jobs · 15:00 IST · job ${id}`, pending);
-  const proc = detailsText({ jobId: id, status: "processing", step: "screening", progress: { read: 389, screened: 120, matches: 14 }, result: null, error: null, at });
-  check("processing: counts", proc.startsWith("Screening resumes 120 / 389 · 14 domain matches"), proc);
-  const done = detailsText({
-    jobId: id,
-    status: "awaiting_review",
-    step: "done",
-    progress: {},
-    error: null,
-    at,
-    result: {
-      destinationTab: "psm_final_shortlisted_2026-10-28",
-      destinationUrl: "",
-      sourceTitle: "Uni Cards || Internal",
-      shortlisted: 4,
-      requested: 5,
-      read: 389,
-      scored: 371,
-      notResumes: 3,
-      unscored: 15,
-      duplicates: 12,
-      flagged: 1,
-      reviewReasons: ["only 4 of 5 cleared every requirement"],
-      rowsWritten: 4,
-    },
-  });
-  check("finished: where, counts and the review reason", done.startsWith("4 of 5 shortlisted → psm_final_shortlisted_2026-10-28 (Uni Cards || Internal) · 389 read · 371 scored · 3 not resumes · 12 duplicates merged · Review: only 4 of 5"), done);
+  const proc = detailsText({ jobId: id, status: "processing", step: "screening", progress: { read: 111, screened: 40, matches: 30, mustHaves: 20 }, result: null, error: null, at });
+  check("processing: fit and must-haves counted apart", proc.startsWith("Screening resumes 40 / 111 · 30 fit the domain · 20 meet every must-have"), proc);
+  const early = { read: 111, screened: 60, matches: 50, mustHaves: 30, shortlistTab: "psm_final_shortlisted_2026-10-29", shortlistUrl: "https://docs.google.com/x#gid=1", shortlistCount: 10 };
+  const ready = detailsText({ jobId: id, status: "processing", step: "screening", progress: early, result: null, error: null, at });
+  check("shortlist ready while the rest is screened", ready.startsWith("Shortlist ready (10) → psm_final_shortlisted_2026-10-29 · Completing the full screening 60 / 111"), ready);
+  const link = detailsLink(ready, { progress: early, result: null });
+  check("the tab name is the link", Boolean(link) && ready.slice(link!.start, link!.end) === "psm_final_shortlisted_2026-10-29" && link!.url.endsWith("#gid=1"));
+  const result = {
+    destinationTab: "psm_final_shortlisted_2026-10-29",
+    destinationUrl: "https://docs.google.com/x#gid=1",
+    sourceTitle: "Stan || Internal",
+    shortlisted: 10,
+    requested: 10,
+    read: 111,
+    scored: 111,
+    notResumes: 0,
+    unscored: 0,
+    duplicates: 1,
+    flagged: 0,
+    reviewReasons: [],
+    rowsWritten: 111,
+    complete: true,
+  };
+  const done = detailsText({ jobId: id, status: "completed", step: "done", progress: {}, error: null, at, result });
+  check("finished: shortlist and the complete ranking", done.startsWith("10 of 10 shortlisted, all 111 candidates ranked → psm_final_shortlisted_2026-10-29 (Stan || Internal) · 111 read · 111 scored · 1 duplicates merged"), done);
+  check("no link before anything is delivered", detailsLink(proc, { progress: {}, result: null }) === null);
   const fail = detailsText({ jobId: id, status: "failed", step: "planning", progress: {}, result: null, error: 'Tab "X" not found', at });
   check("failed: the reason", fail.startsWith('Failed: Tab "X" not found') && fail.endsWith(`job ${id}`));
 }

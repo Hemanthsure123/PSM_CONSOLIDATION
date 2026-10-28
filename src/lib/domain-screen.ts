@@ -409,6 +409,7 @@ export async function inspectDomainGithub(
         user: user.toLowerCase(),
         repos: [...new Set(input.githubRepos.map((r) => r.trim().toLowerCase().replace(/\/+$/, "").replace(/\.git$/, "")))].sort(),
         mandatory: [...spec.mandatory].sort(),
+        groups: (spec.mandatoryGroups ?? []).map((g) => [...g].sort().join("|")).sort(),
         goodToHave: [...spec.goodToHave].sort(),
       })
     : null;

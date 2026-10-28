@@ -10,6 +10,8 @@ import { getSheets } from "@/lib/sheets";
 import { withSheetsRetry } from "@/lib/automation/control-sheet";
 import { JobError } from "@/lib/automation/errors";
 import { candidateCount, insertCandidates, loadCandidates, logEvent, saveScreening, type CandidateCheckpoint } from "@/lib/automation/store";
+import { adaptiveConcurrency } from "@/lib/automation/load";
+import { waveOf } from "@/lib/automation/ranking-bounds";
 import type { RunContext } from "@/lib/automation/context";
 import type { CandidateStanding, InternalStanding } from "@/lib/pool/types";
 import type { DomainCandidateRow } from "@/lib/types";
@@ -32,7 +34,8 @@ const RETRY_DELAYS_MS = [60_000, 3 * 60_000, 10 * 60_000, 30 * 60_000];
 /** Stop retrying passing failures this long after the job started (the rest are reported as unscored). */
 export const SCREEN_DEADLINE_MS = 12 * 3600_000;
 
-const concurrency = () => Math.min(8, Math.max(1, Number(process.env.AUTOMATION_CONCURRENCY) || 4));
+/** Resumes screened at once: AUTOMATION_CONCURRENCY (default 5), fewer while memory is tight. */
+const concurrency = () => adaptiveConcurrency(Number(process.env.AUTOMATION_CONCURRENCY) || 5, 8);
 
 /** Read the tabs into checkpoints (first run of the job only). */
 export async function readCandidates(ctx: RunContext): Promise<void> {
@@ -57,13 +60,15 @@ export async function readCandidates(ctx: RunContext): Promise<void> {
       }
       const key = `${tab.name}!${sheetRow}`;
       const userId = get(r, idx.idColumn);
+      const phone = get(r, idx.phoneColumn);
       rows.push({
         key,
         tab: tab.name,
         sheetRow,
         row: {
-          id: userId || key,
-          phone: get(r, idx.phoneColumn),
+          // The candidate's key: the mobile number, else the user id, else the sheet row.
+          id: normalisePhone(phone) ?? (userId || key),
+          phone,
           userId,
           name: get(r, idx.nameColumn),
           resumeUrl,
@@ -138,8 +143,12 @@ async function screenOne(cp: CandidateCheckpoint, ctx: RunContext): Promise<Scre
   ]);
 }
 
-/** Screen every candidate still to do; returns when none is left to try (or the deadline passed). */
-export async function screenCandidates(ctx: RunContext): Promise<void> {
+/**
+ * Screen every candidate still to do, one wave at a time — TR-2 first, then TR-1, assessment,
+ * everyone else — calling `afterWave` after each (the orchestrator delivers the shortlist as soon
+ * as it is final). Returns when none is left to try, or the retry deadline passed.
+ */
+export async function screenCandidates(ctx: RunContext, afterWave: () => Promise<void> = async () => undefined): Promise<void> {
   const deadline = new Date(ctx.job.startedAt ?? ctx.job.createdAt).getTime() + SCREEN_DEADLINE_MS;
   for (;;) {
     const all = await loadCandidates(ctx.job.id);
@@ -148,21 +157,27 @@ export async function screenCandidates(ctx: RunContext): Promise<void> {
       read: live.length,
       screened: live.filter((c) => c.state === "screened" || c.state === "invalid" || (c.state === "error" && !c.retryable)).length,
       matches: live.filter((c) => c.state === "screened" && c.candidate && c.candidate.domainScore >= shortlistBar({ ...c.candidate, internal: c.internal })).length,
+      mustHaves: live.filter(
+        (c) => c.state === "screened" && c.candidate && c.candidate.meetsMandatory && c.candidate.domainScore >= shortlistBar({ ...c.candidate, internal: c.internal }),
+      ).length,
     });
     const now = Date.now();
     const due = live.filter((c) => c.state === "pending" || (c.state === "error" && c.retryable && (!c.nextTryAt || Date.parse(c.nextTryAt) <= now)));
     const later = live.filter((c) => c.state === "error" && c.retryable && c.nextTryAt && Date.parse(c.nextTryAt) > now);
     await ctx.beat("screening", counts(), true);
     if (!due.length) {
+      await afterWave();
       if (!later.length || now > deadline) return;
       const next = Math.min(...later.map((c) => Date.parse(c.nextTryAt!)));
       await ctx.wait("screening", Math.min(Math.max(next - now, 5_000), deadline - now), { note: `${later.length} to retry` });
       continue;
     }
-    // Every checkpoint write is awaited before the next pass reads them back.
+    // The best wave still to do (by internal stage); every checkpoint write is awaited before the next pass reads them back.
+    const wave = Math.min(...due.map((c) => waveOf(c.internal)));
+    const batch = due.filter((c) => waveOf(c.internal) === wave);
     const saves: Promise<unknown>[] = [];
     await runQueue<CandidateCheckpoint, ScreenOut>({
-      items: due,
+      items: batch,
       concurrency,
       stopped: () => ctx.stopped,
       run: (cp) => screenOne(cp, ctx),
@@ -194,5 +209,6 @@ export async function screenCandidates(ctx: RunContext): Promise<void> {
     });
     await Promise.all(saves);
     if (ctx.stopped) return;
+    await afterWave();
   }
 }

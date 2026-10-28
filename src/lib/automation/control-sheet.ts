@@ -1,7 +1,7 @@
 import "server-only";
 import { getSheetsWriter } from "@/lib/sheets";
 import { columnLetter } from "@/lib/automation/delivery-rules";
-import { detailsText, statusLabel, type DetailsInput } from "@/lib/automation/sheet-text";
+import { detailsLink, detailsText, statusLabel, type DetailsInput } from "@/lib/automation/sheet-text";
 import type { ControlRequest } from "@/lib/automation/types";
 
 /**
@@ -19,6 +19,8 @@ export const CONTROL_HEADERS = {
 } as const;
 
 interface Layout {
+  /** The control tab's sheet id (for cell formatting: the link in Automation Details). */
+  sheetId: number;
   headerRow: number;
   /** 1-based columns (0 = not found). */
   instructions: number;
@@ -40,13 +42,18 @@ export async function controlLayout(spreadsheetId: string, tab: string, fresh = 
   const key = `${spreadsheetId}|${tab}`;
   const hit = layoutCache.get(key);
   if (hit && !fresh && Date.now() - hit.at < 5 * 60_000) return hit.layout;
-  const res = await getSheetsWriter().spreadsheets.values.get({ spreadsheetId, range: `${q(tab)}!1:6` });
+  const [res, meta] = await Promise.all([
+    getSheetsWriter().spreadsheets.values.get({ spreadsheetId, range: `${q(tab)}!1:6` }),
+    getSheetsWriter().spreadsheets.get({ spreadsheetId, fields: "sheets.properties(sheetId,title)" }),
+  ]);
   const rows = (res.data.values ?? []) as unknown[][];
+  const sheetId = (meta.data.sheets ?? []).find((t) => t.properties?.title === tab)?.properties?.sheetId ?? 0;
   const idx = rows.findIndex((r) => r.some((c) => squeeze(c) === squeeze(CONTROL_HEADERS.instructions)));
   if (idx < 0) throw new Error(`The "${tab}" tab has no "${CONTROL_HEADERS.instructions}" column — run setup in the sheet's Apps Script.`);
   const head = rows[idx].map(squeeze);
   const find = (re: RegExp) => head.findIndex((h) => re.test(h)) + 1;
   const layout: Layout = {
+    sheetId,
     headerRow: idx + 1,
     instructions: head.indexOf(squeeze(CONTROL_HEADERS.instructions)) + 1,
     trigger: head.indexOf(squeeze(CONTROL_HEADERS.trigger)) + 1,
@@ -127,14 +134,30 @@ export async function writeControlStatus(
       console.warn(`[automation] job ${job.id}: its control row wasn't found — status not written.`);
       return false;
     }
+    const text = detailsText({ ...details, jobId: job.id });
+    const link = detailsLink(text, details);
+    // Status as a plain value; Details as rich text, so the delivered tab's name is a link to it.
+    const runs = link
+      ? [
+          ...(link.start > 0 ? [{ startIndex: 0, format: {} }] : []),
+          { startIndex: link.start, format: { link: { uri: link.url }, underline: true } },
+          ...(link.end < text.length ? [{ startIndex: link.end, format: {} }] : []),
+        ]
+      : [];
+    const cell = (col: number) => ({ sheetId: layout.sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: col - 1, endColumnIndex: col });
     await withSheetsRetry(() =>
-      sheets.spreadsheets.values.batchUpdate({
+      sheets.spreadsheets.batchUpdate({
         spreadsheetId: job.spreadsheetId,
         requestBody: {
-          valueInputOption: "RAW",
-          data: [
-            { range: `${q(job.controlTab)}!${columnLetter(layout.status)}${row}`, values: [[statusLabel(details.status)]] },
-            { range: `${q(job.controlTab)}!${columnLetter(layout.details)}${row}`, values: [[detailsText({ ...details, jobId: job.id })]] },
+          requests: [
+            { updateCells: { range: cell(layout.status), rows: [{ values: [{ userEnteredValue: { stringValue: statusLabel(details.status) } }] }], fields: "userEnteredValue" } },
+            {
+              updateCells: {
+                range: cell(layout.details),
+                rows: [{ values: [{ userEnteredValue: { stringValue: text }, textFormatRuns: runs }] }],
+                fields: "userEnteredValue,textFormatRuns",
+              },
+            },
           ],
         },
       }),

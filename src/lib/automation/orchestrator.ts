@@ -3,16 +3,23 @@ import { writeControlStatus } from "@/lib/automation/control-sheet";
 import { LeaseLostError, RunContext } from "@/lib/automation/context";
 import { deliver, validate } from "@/lib/automation/delivery";
 import { isRetryable, JobError, messageOf } from "@/lib/automation/errors";
-import { evaluateGithub, evaluateReviews } from "@/lib/automation/evaluation";
+import { boundsOf, evaluateGithub, evaluateReviews, noteUninspected } from "@/lib/automation/evaluation";
 import { planJob } from "@/lib/automation/planner";
 import { readCandidates, screenCandidates } from "@/lib/automation/screening";
-import { finishJob, heartbeat, logEvent, releaseForRetry, savePlan, saveResult, type JobRow } from "@/lib/automation/store";
+import { finishJob, heartbeat, loadCandidates, logEvent, releaseForRetry, savePlan, saveResult, type JobRow } from "@/lib/automation/store";
+import { shortlistFinal } from "@/lib/automation/ranking-bounds";
 import { JOB_STEPS, type AutomationPlan, type JobProgress, type JobStep } from "@/lib/automation/types";
 
 /**
  * The orchestrator — runs one job's agents in order and owns every decision about the job:
  *
  *   planning → screening → evaluating → validating → delivering → done
+ *
+ * Fastest shortlist first: screening runs by internal stage (TR-2, TR-1, assessment, others), and
+ * after each wave the orchestrator checks whether the top N is already final (nobody left
+ * unscreened can enter it — ranking-bounds.ts). If so it checks GitHub and reviews code for the
+ * contenders only, validates and delivers the shortlist right away, then finishes the complete
+ * screening and writes everyone else below it.
  *
  * The step is the checkpoint: a job taken up again (after a restart, a deploy, a passing
  * failure) skips finished steps, and inside a step the per-candidate checkpoints skip finished
@@ -56,6 +63,28 @@ function sheetUpdater(job: JobRow) {
   };
 }
 
+/**
+ * After each screening wave: when the shortlist can no longer change, deliver it now (once).
+ * The rest of the screening continues afterwards.
+ */
+async function deliverShortlistEarly(ctx: RunContext, sheet: ReturnType<typeof sheetUpdater>): Promise<void> {
+  const bounds = boundsOf(ctx);
+  if (!bounds || ctx.progress.shortlistUrl) return;
+  const all = (await loadCandidates(ctx.job.id)).filter((c) => c.state !== "duplicate");
+  const screenedNow = all.filter((c) => c.state === "screened" && c.candidate).map((c) => ({ ...c.candidate!, internal: c.internal }));
+  const unscreened = all.filter((c) => c.state === "pending" || (c.state === "error" && c.retryable)).map((c) => c.internal);
+  if (!unscreened.length || !shortlistFinal(screenedNow, unscreened, bounds)) return;
+  await logEvent(ctx.job.id, "evaluating", "info", `The top ${bounds.topN} can't change any more (${unscreened.length} still to screen rank below it) — delivering the shortlist now.`);
+  await ctx.beat("evaluating", { note: "shortlist is final — checking its GitHub" }, true);
+  await sheet.now("evaluating", ctx.progress);
+  await evaluateGithub(ctx);
+  await evaluateReviews(ctx);
+  const validated = await validate(ctx, false);
+  const result = await deliver(ctx, validated, "shortlist");
+  await ctx.beat("screening", { shortlistTab: result.destinationTab, shortlistUrl: result.destinationUrl, shortlistCount: result.shortlisted, note: undefined }, true);
+  await sheet.now("screening", ctx.progress);
+}
+
 export async function runJob(job: JobRow, owner: string): Promise<void> {
   if (job.attempts > MAX_ATTEMPTS) {
     const error = `Stopped after ${MAX_ATTEMPTS} attempts. Last error: ${job.error ?? "unknown"}`;
@@ -87,20 +116,23 @@ export async function runJob(job: JobRow, owner: string): Promise<void> {
       await ctx.beat(step, { note: undefined }, true);
     }
 
-    // 2. Screening agent.
+    // 2. Screening agent — wave by wave, with the shortlist delivered as soon as it is final.
     if (stepIndex(step) <= stepIndex("screening")) {
       await readCandidates(ctx);
-      await screenCandidates(ctx);
+      await screenCandidates(ctx, () => deliverShortlistEarly(ctx, sheet));
       if (ctx.stopped) throw new LeaseLostError();
       step = "evaluating";
       await ctx.beat(step, {}, true);
       await sheet.now(step, ctx.progress);
     }
 
-    // 3. Evaluation agent.
+    // 3. Evaluation agent: the contenders (if the shortlist went out early, already done), and with
+    //    "(all candidates)" everyone else's GitHub too.
     if (stepIndex(step) <= stepIndex("evaluating")) {
       await evaluateGithub(ctx);
       await evaluateReviews(ctx);
+      if (ctx.plan.github === "all") await evaluateGithub(ctx, true);
+      await noteUninspected(ctx);
       if (ctx.stopped) throw new LeaseLostError();
       step = "validating";
       await ctx.beat(step, {}, true);
@@ -111,7 +143,7 @@ export async function runJob(job: JobRow, owner: string): Promise<void> {
     step = "delivering";
     await ctx.beat(step, {}, true);
     await sheet.now(step, ctx.progress);
-    const result = await deliver(ctx, validated);
+    const result = await deliver(ctx, validated, "all");
     await saveResult(job.id, owner, result);
     sheet.stop();
     const finished = await finishJob(job.id, owner, validated.status, null);

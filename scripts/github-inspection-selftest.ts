@@ -527,7 +527,8 @@ users.set("mixed", {
     ],
   ];
   for (const [m, d, want] of briefs) {
-    const got = spec(m, d);
+    const { mandatory, goodToHave } = spec(m, d);
+    const got = { mandatory, goodToHave };
     ok(`original-tech brief unchanged: ${d.slice(0, 30)}`, same(got, want), { got, want });
   }
 

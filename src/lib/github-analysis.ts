@@ -109,7 +109,7 @@ const COMMITS_PER_REPO = 100;
  * Version of the inspection logic. Part of every cached inspection's key: bump it whenever
  * scoring, the technology catalogue or what is read changes, so no stale result is reused.
  */
-export const GITHUB_ANALYSIS_VERSION = "2026-10-18.1";
+export const GITHUB_ANALYSIS_VERSION = "2026-10-29.1";
 
 /** The strongest quotable proof behind one proven technology. */
 export interface TechProof {
@@ -138,6 +138,12 @@ export interface TechGap {
 export interface JdTechSpec {
   /** Technologies the JD marks mandatory — each one gates the 100-point ceiling. */
   mandatory: string[];
+  /**
+   * The mandatory technologies as requirements: one group per requirement, met when ANY
+   * technology in it is proven ("Node.js or Golang" → [Node.js / Express, Go]). Absent =
+   * every mandatory technology is its own requirement.
+   */
+  mandatoryGroups?: string[][];
   /** Technologies the JD mentions as desirable — weighted, never gating. */
   goodToHave: string[];
 }
@@ -1586,7 +1592,7 @@ const wordIn = (def: TechDef, text: string): boolean => (def.wordNames ?? []).so
 export function buildJdTechSpec(
   mandatoryText: string,
   domainText: string,
-  opts: { modelledOnly?: boolean } = {},
+  opts: { modelledOnly?: boolean; noGroups?: boolean } = {},
 ): JdTechSpec {
   const mand = (mandatoryText ?? "").toLowerCase();
   const dom = (domainText ?? "").toLowerCase();
@@ -1613,9 +1619,11 @@ export function buildJdTechSpec(
     (inMandatory ? mandatory : goodToHave).push(def.label);
   }
 
+  const mandatoryGroups = opts.noGroups ? undefined : requirementGroups(mandatoryText ?? "", mandatory);
+
   // Anything in the mandatory field we could not model still deserves a (weak) slot —
   // otherwise a JD naming an in-house tool would score as if it named nothing.
-  if (opts.modelledOnly) return { mandatory, goodToHave };
+  if (opts.modelledOnly) return { mandatory, goodToHave, mandatoryGroups };
   for (const token of tokenizeJd(mand)) {
     if (TECH_INDEX.has(canon(token))) continue;
     const key = canon(token);
@@ -1624,7 +1632,55 @@ export function buildJdTechSpec(
     mandatory.push(token);
   }
 
-  return { mandatory, goodToHave };
+  return { mandatory, goodToHave, mandatoryGroups };
+}
+
+/**
+ * The mandatory field as separate requirements, read the way a person reads it:
+ *  - items are split on new lines, ";", "•" and "|", then on "and" / "&";
+ *  - an item with "or" or a slash offers alternatives ("Node.js or Golang", "MongoDB/MySQL");
+ *  - in a comma list, short bare names before an "or" belong to it ("NestJS, Gin or Fiber"
+ *    = one requirement), anything else is its own requirement ("React, Node.js" = two).
+ */
+export function splitMandatoryItems(text: string): { text: string; alternatives: boolean }[] {
+  const out: { text: string; alternatives: boolean }[] = [];
+  const isAlt = (t: string) => /\bor\b|\s\/\s|[a-z0-9.+#]\/[a-z]/i.test(t);
+  const bare = (t: string) => !isAlt(t) && t.split(/\s+/).filter(Boolean).length <= 2;
+  for (const line of (text ?? "").split(/[\n;•|]+/)) {
+    for (const part of line.split(/\band\b|&/i)) {
+      const segments = part.split(",").map((x) => x.trim()).filter(Boolean);
+      let buffer: string[] = [];
+      for (const seg of segments) {
+        if (isAlt(seg)) {
+          out.push({ text: [...buffer, seg].join(", "), alternatives: true });
+          buffer = [];
+        } else if (bare(seg)) {
+          buffer.push(seg);
+        } else {
+          buffer.forEach((b) => out.push({ text: b, alternatives: false }));
+          buffer = [];
+          out.push({ text: seg, alternatives: false });
+        }
+      }
+      buffer.forEach((b) => out.push({ text: b, alternatives: false }));
+    }
+  }
+  return out;
+}
+
+/** Requirement groups (labels) for the mandatory technologies: one group per alternatives item, else one per tech. */
+function requirementGroups(mandatoryText: string, mandatory: string[]): string[][] {
+  const groups: string[][] = [];
+  const placed = new Set<string>();
+  for (const item of splitMandatoryItems(mandatoryText)) {
+    const labels = buildJdTechSpec(item.text, "", { modelledOnly: true, noGroups: true }).mandatory.filter((l) => mandatory.includes(l) && !placed.has(l));
+    if (!labels.length) continue;
+    labels.forEach((l) => placed.add(l));
+    if (item.alternatives) groups.push(labels);
+    else labels.forEach((l) => groups.push([l]));
+  }
+  for (const l of mandatory) if (!placed.has(l)) groups.push([l]);
+  return groups;
 }
 
 /**
@@ -1641,9 +1697,11 @@ export function mandatoryTechsAbsent(mandatoryText: string, resumeText: string):
   const ctx = nameCtx(resumeText);
   if (!ctx.squeezed) return [];
   const missing = new Set<string>();
-  for (const clause of (mandatoryText ?? "").split(/[,;\n•|]+|\band\b|&/i)) {
-    if (/\bor\b|\//i.test(clause)) continue;
-    for (const label of buildJdTechSpec(clause, "", { modelledOnly: true }).mandatory) {
+  // A line that offers alternatives anywhere ("REST APIs with Express.js, NestJS, Gin or Fiber")
+  // is left to the model as a whole — "Express.js" there is one option, not a requirement.
+  const plainLines = (mandatoryText ?? "").split(/[\n;•|]+/).filter((line) => !/\bor\b|\//i.test(line));
+  for (const item of splitMandatoryItems(plainLines.join("\n"))) {
+    for (const label of buildJdTechSpec(item.text, "", { modelledOnly: true, noGroups: true }).mandatory) {
       const def = TECHS.find((t) => t.label === label);
       if (def && !namesTech(def, ctx)) missing.add(label);
     }
@@ -2510,12 +2568,13 @@ function provesDomain(confs: TechConf[], core: Set<string>): boolean {
  * technology can never be bought back by good-to-haves. 0 when the domain names no
  * technology this module models.
  */
-function domainScore(confs: TechConf[], core: Set<string>, depth: number): number {
+function domainScore(confs: TechConf[], core: Set<string>, depth: number, groups: string[][] = []): number {
   if (confs.length === 0) return 0;
   const credit = (t: TechConf) => (core.has(t.def.key) ? t.conf : t.def.generic ? t.conf * GENERIC_DISCOUNT : 0);
   const best = confs.reduce((m, t) => Math.max(m, credit(t)), 0);
 
-  const mandatory = confs.filter((t) => t.mandatory);
+  // One entry per requirement: "Node.js or Go" counts once, at its best-proven member.
+  const mandatory = requirementConfs(confs, groups);
   const mcov = mandatory.length ? mandatory.reduce((s, t) => s + t.conf, 0) / mandatory.length : 0;
   const strength = mandatory.length ? 0.5 * best + 0.5 * mcov : best;
 
@@ -2537,6 +2596,23 @@ function domainScore(confs: TechConf[], core: Set<string>, depth: number): numbe
   if (!confs.some((t) => t.hard && t.conf > 0)) score = Math.min(score, META_ONLY_SCORE_CAP);
   const ceiling = 100 - mandatory.reduce((s, t) => s + ceilingPenalty(t.conf), 0);
   return clamp100(Math.min(score, ceiling));
+}
+
+/**
+ * The mandatory technologies as requirements (group keys from mandatoryGroups): each group
+ * stands for its best-proven member; a mandatory tech in no group is its own requirement.
+ */
+function requirementConfs(confs: TechConf[], groups: string[][]): TechConf[] {
+  const mandatory = confs.filter((t) => t.mandatory);
+  const out: TechConf[] = [];
+  const grouped = new Set<string>();
+  for (const keys of groups) {
+    const members = mandatory.filter((t) => keys.includes(t.def.key));
+    if (!members.length) continue;
+    members.forEach((m) => grouped.add(m.def.key));
+    out.push(members.reduce((a, b) => (b.conf > a.conf ? b : a)));
+  }
+  return [...out, ...mandatory.filter((t) => !grouped.has(t.def.key))];
 }
 
 /** Code size → 0-1: about 40 KB of hand-written source (a notebook counts ~3 KB) is a full project. */
@@ -3015,6 +3091,7 @@ async function analyzeRepo(
   goodToHave: TechDef[],
   core: Set<string>,
   budget: CallBudget,
+  groups: string[][] = [],
 ): Promise<RepoOutcome | null> {
   const description = meta.description ?? "";
   const base: RepoAnalysis = {
@@ -3086,7 +3163,7 @@ async function analyzeRepo(
   base.evidence = evidence.slice(0, 12);
 
   const substance = substanceOf(corpus);
-  base.matchPct = domainScore(confs, core, substance);
+  base.matchPct = domainScore(confs, core, substance, groups);
   base.relevant = provesDomain(confs, core);
 
   // 3) Commit audit — one page, no pagination. Also yields the candidate's newest own commit.
@@ -3155,6 +3232,8 @@ export async function analyzeGithubProfile(
 
   const mandatory = (jd?.mandatory ?? []).map(resolveTech);
   const goodToHave = (jd?.goodToHave ?? []).map(resolveTech).filter((g) => !mandatory.some((m) => m.key === g.key));
+  // Requirement groups as catalogue keys ("Node.js or Go" is met by either).
+  const groups = (jd?.mandatoryGroups ?? []).map((labels) => labels.map((l) => resolveTech(l).key)).filter((g) => g.length > 1);
   const core = coreKeys(mandatory, goodToHave);
   const assessable = mandatory.length + goodToHave.length > 0;
   const rankTerms = [...mandatory, ...goodToHave].flatMap((d) => [d.label.toLowerCase(), ...d.aliases]);
@@ -3230,7 +3309,7 @@ export async function analyzeGithubProfile(
       await mapPool(selected, REPO_CONCURRENCY, async (meta) => {
         const owner = meta.owner?.login ?? meta.full_name.split("/")[0] ?? username;
         try {
-          return await analyzeRepo(meta, owner, username, token, mandatory, goodToHave, core, budget);
+          return await analyzeRepo(meta, owner, username, token, mandatory, goodToHave, core, budget, groups);
         } catch (err) {
           console.warn("[github-analysis] repo failed:", meta.full_name, err instanceof Error ? err.message : err);
           return null;
@@ -3266,7 +3345,7 @@ export async function analyzeGithubProfile(
     const substance = relevant.reduce((m, o) => Math.max(m, o.substance), 0);
     const depth = 0.6 * projects + 0.25 * recency + 0.15 * substance;
 
-    const overallMatchPct = assessable ? domainScore(rolled, core, depth) : 0;
+    const overallMatchPct = assessable ? domainScore(rolled, core, depth, groups) : 0;
 
     // Technologies the profile genuinely proves — domain ones first, then plain languages.
     const proven = (t: TechConf) => t.hard && t.conf >= HIT_CONF;
@@ -3288,17 +3367,26 @@ export async function analyzeGithubProfile(
         : null;
     };
     const techEvidence = provenRolled.map((t) => bestProof(t.def)).filter((e): e is TechProof => e !== null);
-    const mandatoryGaps: TechGap[] = rolled
-      .filter((t) => t.mandatory && !proven(t))
-      .map((t) => {
-        const proof = bestProof(t.def);
-        return {
-          tech: t.def.label,
-          reason: t.conf <= 0 ? "none" : !t.hard ? "readme-only" : "weak",
-          confidence: Math.round(t.conf * 100),
-          detail: proof ? `${proof.detail} (${proof.repo})` : "",
-        };
+    // One gap per unmet requirement: "Node.js or Go" is met when either is proven.
+    const requirementOf = (t: TechConf) => groups.find((g) => g.includes(t.def.key)) ?? [t.def.key];
+    const seenGroups = new Set<string>();
+    const mandatoryGaps: TechGap[] = [];
+    for (const t of rolled.filter((x) => x.mandatory)) {
+      const keys = requirementOf(t);
+      const id = keys.join("|");
+      if (seenGroups.has(id)) continue;
+      seenGroups.add(id);
+      const members = rolled.filter((x) => x.mandatory && keys.includes(x.def.key));
+      if (members.some(proven)) continue;
+      const bestMember = members.reduce((a, b) => (b.conf > a.conf ? b : a));
+      const proof = bestProof(bestMember.def);
+      mandatoryGaps.push({
+        tech: members.map((m) => m.def.label).join(" or "),
+        reason: bestMember.conf <= 0 ? "none" : !bestMember.hard ? "readme-only" : "weak",
+        confidence: Math.round(bestMember.conf * 100),
+        detail: proof ? `${proof.detail} (${proof.repo})` : "",
       });
+    }
 
     // Newest own commit to a domain-relevant repo.
     let lastDomainCommit: DomainCommit | null = null;
