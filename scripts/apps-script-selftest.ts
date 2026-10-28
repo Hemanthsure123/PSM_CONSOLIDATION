@@ -150,9 +150,12 @@ function makeWorld(opts: { server: (method: string, path: string, body: Record<s
     console,
   };
   vm.createContext(ctx);
+  const mocks = new Set(Object.keys(ctx));
   vm.runInContext(readFileSync(join(process.cwd(), "integrations/google-sheets/psm-automation.gs"), "utf8"), ctx);
+  // What the script itself defines at the top level (shared with every other file in the Apps Script project).
+  const globals = Object.fromEntries(Object.keys(ctx).filter((k) => !mocks.has(k)).map((k) => [k, true]));
   const fn = (name: string) => (ctx as unknown as Record<string, (...a: unknown[]) => unknown>)[name];
-  return { sheet, calls, triggers, toasts, fn };
+  return { sheet, calls, triggers, toasts, fn, globals };
 }
 
 const ok202 = (method: string, path: string) =>
@@ -161,23 +164,24 @@ const ok202 = (method: string, path: string) =>
 // ── setup ────────────────────────────────────────────────────────────────────
 {
   const w = makeWorld({ server: ok202 });
-  w.fn("setup")();
+  w.fn("psmAutomationSetup")();
   const head = w.sheet.grid[1];
   check("setup adds the four columns after the last header", head[15] === "Screening Instructions" && head[16] === "Trigger" && head[17] === "Automation Status" && head[18] === "Automation Details", head.slice(14));
-  check("setup installs the edit and sweep triggers", w.triggers.map((t) => t.fn).sort().join() === "onEditTrigger,sweep", w.triggers);
-  w.fn("setup")();
+  check("setup installs the edit and sweep triggers", w.triggers.map((t) => t.fn).sort().join() === "psmAutomationOnEdit,psmAutomationSweep", w.triggers);
+  w.fn("psmAutomationSetup")();
   check("running setup again changes nothing (no duplicate columns or triggers)", w.sheet.grid[1].length === 19 && w.triggers.length === 2);
+  check("every global the script defines is psm-prefixed (no clash with other scripts)", Object.keys(w.globals).every((k) => /^(psm|PSM_)/.test(k)), Object.keys(w.globals));
   check("the instructions header explains the format", (w.sheet.notes.get("2:16") ?? "").includes("Subsheets:"));
 }
 
 // ── start ────────────────────────────────────────────────────────────────────
 const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
   w.sheet.set(row, 17, value);
-  w.fn("onEditTrigger")({ range: w.sheet.getRange(row, 17) });
+  w.fn("psmAutomationOnEdit")({ range: w.sheet.getRange(row, 17) });
 };
 {
   const w = makeWorld({ server: ok202 });
-  w.fn("setup")();
+  w.fn("psmAutomationSetup")();
   w.sheet.set(3, 16, "Subsheets: Edge Applied\nFocus: Flutter");
   edit(w, 3, "Start ");
   const post = w.calls.find((c) => c.method === "post");
@@ -199,7 +203,7 @@ const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
 
   w.sheet.set(4, 16, "Subsheets: Edge Applied\nFocus: Java");
   w.sheet.set(3, 3, "edited product");
-  w.fn("onEditTrigger")({ range: w.sheet.getRange(3, 3) });
+  w.fn("psmAutomationOnEdit")({ range: w.sheet.getRange(3, 3) });
   check("edits in other columns are ignored", w.calls.length === before);
 }
 
@@ -209,14 +213,14 @@ const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
     server: (m, p) =>
       p === "/api/health" ? { code: 200, body: {} } : m === "post" ? { code: 409, body: { error: "busy", job: { status: "PROCESSING", details: "Screening 3 / 9 · job J" } } } : { code: 200, body: {} },
   });
-  w.fn("setup")();
+  w.fn("psmAutomationSetup")();
   w.sheet.set(3, 16, "Subsheets: Edge Applied\nFocus: Flutter");
   edit(w, 3, "start");
   check("409: the running job's status is shown", w.sheet.cell(3, 18) === "PROCESSING" && String(w.sheet.cell(3, 19)).includes("Screening 3 / 9"));
 }
 {
   const w = makeWorld({ server: (m, p) => (p === "/api/health" ? { code: 200, body: {} } : { code: 422, body: { error: "Row 3's Trigger says \"x\", not \"start\"" } }) });
-  w.fn("setup")();
+  w.fn("psmAutomationSetup")();
   w.sheet.set(3, 16, "Subsheets: Edge Applied\nFocus: Flutter");
   edit(w, 3, "start");
   check("4xx: FAILED with the app's reason", w.sheet.cell(3, 18) === "FAILED" && String(w.sheet.cell(3, 19)).includes("not \"start\""));
@@ -224,13 +228,13 @@ const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
 {
   let up = false;
   const w = makeWorld({ server: (m, p) => (!up ? "down" : ok202(m, p)) });
-  w.fn("setup")();
+  w.fn("psmAutomationSetup")();
   w.sheet.set(3, 16, "Subsheets: Edge Applied\nFocus: Flutter");
   edit(w, 3, "start");
   const requestId = String(w.sheet.cell(3, 19)).match(/request (\S+)/)?.[1];
   check("app down: the row stays PENDING with its request id", w.sheet.cell(3, 18) === "PENDING" && Boolean(requestId) && !w.calls.some((c) => c.method === "post"));
   up = true;
-  w.fn("sweep")();
+  w.fn("psmAutomationSweep")();
   const post = w.calls.find((c) => c.method === "post");
   check("the sweep sends it once the app is up — same request id (no duplicate job)", post?.body?.requestId === requestId, post);
 }
@@ -246,10 +250,10 @@ const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
           ? { code: 200, body: { job: { status: "COMPLETED", details: `5 shortlisted → psm_final_shortlisted_2026-10-28 · job ${job}` } } }
           : { code: 404, body: {} },
   });
-  w.fn("setup")();
+  w.fn("psmAutomationSetup")();
   w.sheet.set(3, 18, "PROCESSING");
   w.sheet.set(3, 19, `Screening 3 / 9 · job ${job}`);
-  w.fn("sweep")();
+  w.fn("psmAutomationSweep")();
   check("sweep checks running jobs and catches up a finished one", w.sheet.cell(3, 18) === "COMPLETED" && String(w.sheet.cell(3, 19)).startsWith("5 shortlisted"));
 }
 {
@@ -260,10 +264,10 @@ const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
       return { code: 200, body: {} };
     },
   });
-  w.fn("setup")();
+  w.fn("psmAutomationSetup")();
   woke = 0;
   w.sheet.set(3, 18, "COMPLETED");
-  w.fn("sweep")();
+  w.fn("psmAutomationSweep")();
   check("an idle sheet never wakes the app", woke === 0 && w.calls.length === 0);
 }
 

@@ -88,11 +88,15 @@ Someone with edit access to the coordination sheet does this once.
 1. **Share the sheets with the app.** The service account is `<the GCP_SERVICE_ACCOUNT_CLIENT_EMAIL in .env.local>`.
    - It needs **Editor** access on the coordination sheet, to write status.
    - It also needs Editor access on each company's Internal Sheets spreadsheet, to write the shortlist tab. It already has this on most of them. A sheet it can only read fails at delivery with a message saying so.
-2. **Open Extensions → Apps Script.** Replace the contents of `Code.gs` with [`integrations/google-sheets/psm-automation.gs`](../integrations/google-sheets/psm-automation.gs), then save.
+2. **Open Extensions → Apps Script and add the script as a new file.**
+   - Next to **Files**, click **+** → **Script** and name it `psm-automation`.
+   - Paste in the whole of [`integrations/google-sheets/psm-automation.gs`](../integrations/google-sheets/psm-automation.gs), then save (Ctrl+S).
+   - Leave the project's other files as they are. Every name in this script starts with `psm`, so it can't clash with existing scripts.
+   - In a brand-new project the only file is an empty `Code.gs`; you can paste into that instead.
 3. **Add two script properties** under Project Settings (gear icon) → Script properties:
    - `APP_URL`: `https://psm-placements.onrender.com`
    - `AUTOMATION_TOKEN`: the value of `AUTOMATION_TOKEN` in `.env.local` (the same value is set on Render).
-4. **Run `setup` once.** In the editor, pick `setup` and click Run, then allow the permissions it asks for: the spreadsheet, external requests, and triggers. It does four things:
+4. **Run `psmAutomationSetup` once.** In the toolbar's function list, pick `psmAutomationSetup` and click Run, then allow the permissions it asks for: the spreadsheet, external requests, and triggers. It does four things:
    - adds the four columns;
    - adds a `start` drop-down to Trigger;
    - installs an on-edit trigger and a 5-minute check;
