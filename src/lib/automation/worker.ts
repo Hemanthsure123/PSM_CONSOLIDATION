@@ -2,7 +2,7 @@ import "server-only";
 import { randomUUID } from "node:crypto";
 import { databaseConfigured } from "@/lib/db/client";
 import { runJob } from "@/lib/automation/orchestrator";
-import { claimJob, pruneOldCheckpoints } from "@/lib/automation/store";
+import { claimJob, pruneOldCheckpoints, releaseOwnInstanceLeases } from "@/lib/automation/store";
 
 /**
  * The background worker, inside the web server process (one instance). It takes jobs from the
@@ -68,7 +68,11 @@ export function startWorker(): void {
   g.__automationWorker.timer = setInterval(() => void tick(), TICK_MS);
   console.log(`[automation] worker started (${g.__automationWorker.owner}).`);
   void pruneOldCheckpoints();
-  setTimeout(() => void tick(), 3_000);
+  // A job this instance held before a restart is continued now, not after its lease runs out.
+  void releaseOwnInstanceLeases(g.__automationWorker.owner)
+    .then((n) => n && console.log(`[automation] took back ${n} job(s) held before the restart.`))
+    .catch(() => undefined)
+    .finally(() => setTimeout(() => void tick(), 1_000));
 }
 
 /** Look for work now (a new job was just queued, or someone checked on one). */

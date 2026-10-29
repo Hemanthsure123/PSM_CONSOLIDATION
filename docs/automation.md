@@ -153,7 +153,7 @@ Sheet: "start" ──onEdit──▶ Apps Script ──wake /api/health──▶
 The **orchestrator** (`orchestrator.ts`) runs the agents in order and decides retries and the final status; agents never set the status themselves. The same scoring code as the Domain shortlisting screen does the work, so a job and a manual run judge candidates the same way.
 
 **Reliability.**
-- **Durable jobs.** A job is a database row with a step checkpoint and per-candidate checkpoints. After a restart, deploy or crash, the worker takes it up again: when its 3-minute lease expires, on server start, or when someone checks on it. Finished candidates are never screened again.
+- **Durable jobs.** A job is a database row with a step checkpoint and per-candidate checkpoints. After a restart, deploy or crash, the worker takes it up again. If the same server restarted, it does so at once on start; otherwise when its 3-minute lease expires, or when someone checks on it. Finished candidates are never screened again.
 - **Idempotency.**
   - The same request id always maps to the same job.
   - Each row can have only one active job.
@@ -195,7 +195,7 @@ The self-tests are `scripts/automation-selftest.ts` (instructions, columns, flag
 |---|---|
 | **Stage-first screening and an early shortlist** | The shortlist is delivered as soon as it can't change, before the rest of the sheet is screened |
 | **GitHub and code review only for contenders** | Only candidates who can still reach the top N are inspected. The test uses exact score bounds:<br>• domain fit, plus DSA, plus up to 20 points for GitHub;<br>• the code review can move the GitHub part only within known limits.<br>Anyone who would rank below the N-th candidate even at their best is skipped. A top-10 run inspects about 10–20 profiles instead of every domain fit, and the shortlist is identical to inspecting everyone.<br>With `GitHub: (all candidates)`, everyone else's GitHub is read after the shortlist is out. |
-| **Memory-aware parallelism** | 5 resumes, 4 GitHub profiles and 3 code reviews run at once, scaled down while memory is high |
+| **Memory- and CPU-aware parallelism** | 5 resumes, 4 GitHub profiles and 3 code reviews run at once. That is halved while memory is high or the server is busy (event-loop delay over 300 ms), and drops to one at a time above 450 MB or 1 s of delay. On the free plan's 0.1 CPU, parsing many resumes at once would otherwise make even `/api/health` miss Render's 5-second health check, and Render would restart the server mid-job. |
 | **Nothing done twice** | Inspections and reviews are cached for 24 h, and a restarted job skips finished candidates |
 
 **"X or Y" must-haves.** A must-have such as "Node.js or Golang" or "MongoDB or MySQL" is met when any one alternative is proven. This applies to:

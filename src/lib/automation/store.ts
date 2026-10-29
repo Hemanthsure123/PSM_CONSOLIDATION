@@ -174,6 +174,23 @@ export async function claimJob(owner: string): Promise<JobRow | null> {
   return rows[0] ? toJob(rows[0]) : null;
 }
 
+/**
+ * On boot: jobs this same instance held before it restarted (a crash, a failed health check)
+ * are taken back at once instead of after the lease runs out. Owners are
+ * "<instance>:<pid>:<random>", one worker process per instance, so a lease from this instance
+ * but another process can only belong to the process that died. Other instances' leases (a
+ * deploy starting a new instance next to the old one) are left alone.
+ */
+export async function releaseOwnInstanceLeases(owner: string): Promise<number> {
+  const instance = owner.split(":")[0];
+  const rows = await query(
+    `update automation.jobs set lease_until = now(), updated_at = now()
+      where status = 'processing' and lease_owner like $1 and lease_owner <> $2 and lease_until > now() returning id`,
+    [`${instance.replace(/[%_]/g, "")}:%`, owner],
+  );
+  return rows.length;
+}
+
 /** Extend the lease (and save progress). False = the lease was lost: stop working on the job. */
 export async function heartbeat(jobId: string, owner: string, patch: { step?: JobStep; progress?: JobProgress } = {}): Promise<boolean> {
   const rows = await query(

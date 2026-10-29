@@ -271,6 +271,9 @@ const planOf = (o: Partial<AutomationPlan> = {}): AutomationPlan => ({
   check("halved when memory is high", adaptiveConcurrency(5, 8, 400 * MB) === 2);
   check("one at a time near the limit", adaptiveConcurrency(5, 8, 460 * MB) === 1);
   check("never above the maximum", adaptiveConcurrency(20, 8, 100 * MB) === 8);
+  check("halved while the event loop lags (CPU starved)", adaptiveConcurrency(5, 8, 200 * MB, 400) === 2);
+  check("one at a time when the event loop lags badly", adaptiveConcurrency(5, 8, 200 * MB, 1_500) === 1);
+  check("full width when the loop is responsive", adaptiveConcurrency(5, 8, 200 * MB, 20) === 5);
 }
 
 // ── Status text ──────────────────────────────────────────────────────────────
