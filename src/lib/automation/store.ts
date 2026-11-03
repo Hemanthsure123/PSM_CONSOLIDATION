@@ -247,6 +247,42 @@ export async function getJob(id: string): Promise<JobRow | null> {
   return rows[0] ? toJob(rows[0]) : null;
 }
 
+/** Check whether a stop was requested by the user during a run. */
+export async function checkJobStopRequested(jobId: string): Promise<boolean> {
+  const rows = await query<{ stop: boolean }>(
+    `select coalesce((progress->>'stopRequested')::boolean, false) as stop from automation.jobs where id = $1`,
+    [jobId],
+  );
+  return Boolean(rows[0]?.stop);
+}
+
+/** Flag an active or pending job to stop early, delivering whatever has been screened. */
+export async function requestStopJob(params: {
+  jobId?: string;
+  spreadsheetId?: string;
+  controlTab?: string;
+  controlRow?: number;
+}): Promise<JobRow | null> {
+  let queryText = "";
+  let args: unknown[] = [];
+  if (params.jobId) {
+    queryText = `update automation.jobs
+      set progress = jsonb_set(progress, '{stopRequested}', 'true'::jsonb), updated_at = now()
+      where id = $1 returning *`;
+    args = [params.jobId];
+  } else if (params.spreadsheetId && params.controlTab && params.controlRow) {
+    queryText = `update automation.jobs
+      set progress = jsonb_set(progress, '{stopRequested}', 'true'::jsonb), updated_at = now()
+      where spreadsheet_id = $1 and control_tab = $2 and control_row = $3 and status in ('pending', 'processing')
+      returning *`;
+    args = [params.spreadsheetId, params.controlTab, params.controlRow];
+  } else {
+    return null;
+  }
+  const rows = await query(queryText, args);
+  return rows[0] ? toJob(rows[0]) : null;
+}
+
 export async function listJobs(limit = 20): Promise<JobRow[]> {
   return (await query(`select * from automation.jobs order by created_at desc limit $1`, [Math.min(Math.max(limit, 1), 100)])).map(toJob);
 }

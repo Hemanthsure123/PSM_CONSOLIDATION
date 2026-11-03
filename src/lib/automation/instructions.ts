@@ -21,7 +21,7 @@ const SEP = /\r?\n|\s+(?:->|→|=>)\s+|\s+\|\s+/;
 const BULLET = /^\s*(?:[-*•●▪➤→>]+|\d{1,2}[.)])\s*/;
 const LABEL_SEP = String.raw`\s*(?:[:=]|[-–—](?=\s))\s*`;
 
-const LABELS: { key: "tabs" | "focus" | "github" | "dsa" | "top" | "sheet"; re: RegExp }[] = [
+const LABELS: { key: "tabs" | "focus" | "github" | "dsa" | "top" | "sheet" | "experience"; re: RegExp }[] = [
   // A spreadsheet link first, so "Sheet: <link>" isn't read as a tab list.
   { key: "sheet", re: /^(?:sheet|spreadsheet|source\s*sheet|internal\s*sheets?)\s*[:=\-–—]\s*(https?:\/\/docs\.google\.com\/spreadsheets\S+)/i },
   { key: "tabs", re: new RegExp(String.raw`^(?:sub\s*-?\s*sheets?|sheets?\s*(?:names?|to\s*screen)?|tabs?(?:\s*names?)?|source(?:\s*tabs?)?|screen\s*tabs?)${LABEL_SEP}(.+)$`, "i") },
@@ -29,6 +29,7 @@ const LABELS: { key: "tabs" | "focus" | "github" | "dsa" | "top" | "sheet"; re: 
   { key: "github", re: /^(?:git\s*hub)(?:\s*inspection|\s*screening|\s*check)?\s*[:=\-–—]?\s*(.*)$/i },
   { key: "dsa", re: /^(?:dsa|coding\s*profiles?|competitive\s*programming)(?:\s*screening|\s*check)?\s*[:=\-–—]?\s*(.*)$/i },
   { key: "top", re: /^(?:top|shortlist(?:\s*count)?|profiles?(?:\s*required)?)\s*[:=\-–—]?\s*(\d{1,3})\s*(?:profiles?|candidates?)?\s*$/i },
+  { key: "experience", re: /^(?:experience(?:\s*in\s*domain)?|domain\s*experience)\s*[:=\-–—]?\s*(.*)$/i },
 ];
 
 const OFF = /\b(?:no|off|skip|none|false|disable[d]?|not\s+needed|don'?t)\b/i;
@@ -108,6 +109,11 @@ export function parseInstructions(cell: string): ParsedInstructions {
       case "top":
         out.topN = clampTop(Number(hit.m![1]));
         break;
+      case "experience":
+        if (value && !OFF.test(value) && !/not\s*req/i.test(value)) {
+          out.requireExperience = true;
+        }
+        break;
       case "sheet":
         out.sheetUrl = sheet?.[0] ?? null;
         break;
@@ -168,6 +174,14 @@ export function resolveTabs(
     if (i >= 0) {
       wanted = splitTabList(rest[i]);
       rest = rest.filter((_, j) => j !== i);
+    }
+  }
+  // If still not specified, check if common candidate subsheets exist in available tabs
+  if (!wanted.length) {
+    const defaultTabs = ["Edge Applied", "Academy Applied", "External Applied", "All Applied"];
+    const matched = defaultTabs.filter((d) => byNorm.has(norm(d)));
+    if (matched.length > 0) {
+      wanted = matched;
     }
   }
   const tabs: string[] = [];

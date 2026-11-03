@@ -126,12 +126,17 @@ export async function runJob(job: JobRow, owner: string): Promise<void> {
       await sheet.now(step, ctx.progress);
     }
 
+    const stoppedEarly = ctx.stopRequested || (await ctx.checkStopRequested());
+    if (stoppedEarly) {
+      await logEvent(ctx.job.id, "evaluating", "info", "Stop requested by user — preparing delivery of candidates screened so far.");
+    }
+
     // 3. Evaluation agent: the contenders (if the shortlist went out early, already done), and with
     //    "(all candidates)" everyone else's GitHub too.
     if (stepIndex(step) <= stepIndex("evaluating")) {
       await evaluateGithub(ctx);
       await evaluateReviews(ctx);
-      if (ctx.plan.github === "all") await evaluateGithub(ctx, true);
+      if (ctx.plan.github === "all" && !stoppedEarly) await evaluateGithub(ctx, true);
       await noteUninspected(ctx);
       if (ctx.stopped) throw new LeaseLostError();
       step = "validating";
@@ -147,8 +152,15 @@ export async function runJob(job: JobRow, owner: string): Promise<void> {
     await saveResult(job.id, owner, result);
     sheet.stop();
     const finished = await finishJob(job.id, owner, validated.status, null);
-    await logEvent(job.id, "done", "info", `Finished: ${validated.status}.`);
-    await writeControlStatus(job, { status: validated.status, step: "done", progress: ctx.progress, result, error: null });
+    const finalNote = stoppedEarly ? `Stopped early by user · delivered ${validated.report.candidates.length} profiles screened` : undefined;
+    await logEvent(job.id, "done", "info", `Finished: ${validated.status}${stoppedEarly ? " (stopped early by user)" : ""}.`);
+    await writeControlStatus(job, {
+      status: validated.status,
+      step: "done",
+      progress: { ...ctx.progress, note: finalNote },
+      result,
+      error: null,
+    });
     if (!finished) console.warn(`[automation] job ${job.id}: finished, but the lease had moved on.`);
   } catch (err) {
     sheet.stop();

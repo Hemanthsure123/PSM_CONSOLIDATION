@@ -77,7 +77,7 @@ export async function validate(ctx: RunContext, final = true): Promise<Validated
     dsaGates: ctx.plan.dsa.gates,
     minCommits: 0,
     mandatoryActive: ctx.plan.mandatory.trim().length > 0,
-    requireExperience: false,
+    requireExperience: Boolean(ctx.plan.requireExperience),
     checkPresentation: false,
     minPresentation: 0,
     poolChecked: true,

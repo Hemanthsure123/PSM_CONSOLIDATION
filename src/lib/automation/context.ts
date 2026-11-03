@@ -1,5 +1,5 @@
 import "server-only";
-import { heartbeat } from "@/lib/automation/store";
+import { checkJobStopRequested, heartbeat } from "@/lib/automation/store";
 import type { JobRow } from "@/lib/automation/store";
 import type { AutomationPlan, JobProgress, JobStep } from "@/lib/automation/types";
 
@@ -18,6 +18,7 @@ export class LeaseLostError extends Error {
  */
 export class RunContext {
   progress: JobProgress = {};
+  stopRequested = false;
   private lastBeat = 0;
   private lost = false;
 
@@ -28,10 +29,21 @@ export class RunContext {
     private readonly onProgress: (step: JobStep, progress: JobProgress) => void,
   ) {
     this.progress = { ...job.progress };
+    this.stopRequested = Boolean(job.progress?.stopRequested);
   }
 
   get stopped() {
     return this.lost;
+  }
+
+  /** Check whether user requested to stop this job early. */
+  async checkStopRequested(): Promise<boolean> {
+    if (this.stopRequested) return true;
+    const isStopped = await checkJobStopRequested(this.job.id);
+    if (isStopped) {
+      this.stopRequested = true;
+    }
+    return this.stopRequested;
   }
 
   /** Save progress (at most every 15 s unless forced) and keep the lease. */

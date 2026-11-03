@@ -48,8 +48,72 @@ const STAGE_TEXT: Record<1 | 2 | 3 | 4, string> = { 1: "TR-2 cleared / top level
 
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1).trimEnd()}…` : s);
 
+export function candidateKeywordSignals(c: DomainCandidateOutcome, ctx: SignalsContext): string {
+  const keywords: string[] = [];
+
+  // 1. Resume (always present for screened candidates)
+  keywords.push("Resume");
+
+  // 2. GitHub (if inspected and has active presence/repos)
+  if (ctx.githubChecked && (c.githubStatus === "checked" || c.githubScore > 0 || (c.githubRepos && c.githubRepos.length > 0))) {
+    keywords.push("GitHub");
+  }
+
+  // 3. DSA (clean keywords with platform in brackets: solved, rating, contests)
+  if (ctx.useDsa) {
+    const platforms: string[] = [];
+    if (c.dsa) {
+      for (const { key, label } of DSA_PLATFORMS) {
+        const p = c.dsa[key];
+        if (p && p.found === true) {
+          const stats: string[] = [];
+          if (typeof p.solved === "number" && p.solved > 0) stats.push(`${p.solved} solved`);
+          const r = bestRating(p);
+          if (r && r > 0) stats.push(`rating ${r}`);
+          if (typeof p.contests === "number" && p.contests > 0) stats.push(`${p.contests} contests`);
+          if (stats.length) {
+            platforms.push(`${label} (${stats.join(", ")})`);
+          } else {
+            platforms.push(label);
+          }
+        }
+      }
+    }
+    if (platforms.length) {
+      keywords.push(`DSA (${platforms.join("; ")})`);
+    } else if (c.leetcodeSolved > 0 || c.codeforcesSolved > 0) {
+      const parts: string[] = [];
+      if (c.leetcodeSolved > 0) parts.push(`LeetCode (${c.leetcodeSolved} solved)`);
+      if (c.codeforcesSolved > 0) parts.push(`Codeforces (${c.codeforcesSolved} solved)`);
+      keywords.push(`DSA (${parts.join("; ")})`);
+    }
+  }
+
+  // 4. Internal Assessments (tier and badge)
+  const internal = c.internal;
+  if (isAssessed(internal)) {
+    const stage = STAGE_TEXT[internal.tier] ?? "Assessed";
+    const label = internal.label ? ` - ${internal.label}` : "";
+    keywords.push(`Internal Assessments (${stage}${label})`);
+  } else if (internal) {
+    keywords.push(`Internal Assessments (${(internal as InternalStanding).label})`);
+  }
+
+  // 5. Good Achievements
+  if (c.domainScore >= 80 || c.rank === 1 || (c.priority === 1 && c.domainScore >= 70)) {
+    keywords.push("Good Achievements");
+  }
+
+  // 6. Domain Experience
+  if (c.hasDomainExperience && c.experience) {
+    keywords.push(`Domain Experience (${clip(c.experience, 50)})`);
+  }
+
+  return keywords.join(", ");
+}
+
 export function candidateSignals(c: DomainCandidateOutcome, ctx: SignalsContext): string[] {
-  const out: string[] = [];
+  const out: string[] = [candidateKeywordSignals(c, ctx)];
   const parts = rankParts(c, ctx.useGithub, ctx.checkPresentation, ctx.useDsa);
   const prio = c.priority && c.priority > 0 ? PRIORITY_TEXT[c.priority as 1 | 2 | 3] : "";
 

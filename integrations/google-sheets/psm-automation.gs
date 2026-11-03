@@ -20,6 +20,9 @@
 var PSM_CONTROL_TAB = 'Profile Shortlisting - New';
 var PSM_HEADERS = {
   instructions: 'Screening Instructions',
+  github: 'Github',
+  dsa: 'DSA',
+  experience: 'Experience in Screening Domain',
   trigger: 'Trigger',
   status: 'Automation Status',
   details: 'Automation Details',
@@ -43,7 +46,7 @@ function psmAutomationSetup() {
   var width = Math.max(sheet.getLastColumn(), 1);
   var head = sheet.getRange(headerRow, 1, 1, width).getValues()[0].map(psmClean_);
   var last = psmLastNonEmpty_(head);
-  ['instructions', 'trigger', 'status', 'details'].forEach(function (key) {
+  ['instructions', 'github', 'dsa', 'experience', 'trigger', 'status', 'details'].forEach(function (key) {
     if (head.indexOf(psmClean_(PSM_HEADERS[key])) >= 0) return;
     last += 1;
     if (last > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), last - sheet.getMaxColumns());
@@ -52,12 +55,56 @@ function psmAutomationSetup() {
   });
   var cols = psmColumns_(sheet);
   sheet.getRange(cols.headerRow, cols.instructions).setNote(
-    'One item per line, for example:\nSubsheets: Edge Applied, Academy Applied\nFocus: Flutter developers who shipped apps\nGitHub: (domain-fit candidates)   or (all candidates) / no\nDSA: yes   or no / CF 1400 / 300 solved\nTop: 10   (optional; else No. of Profiles Required)'
+    'Screening focus criteria goes here (e.g. "Flutter developers who shipped apps; Firebase is a must").\nYou can also specify "Subsheets: Edge Applied, Academy Applied" if needed.'
   );
-  sheet.getRange(cols.headerRow, cols.trigger).setNote('Type start to run the shortlisting for this row. Type start again later to re-run it.');
-  var rule = SpreadsheetApp.newDataValidation().requireValueInList(['start'], true).setAllowInvalid(true).build();
-  sheet.getRange(cols.headerRow + 1, cols.trigger, Math.max(sheet.getMaxRows() - cols.headerRow, 1), 1).setDataValidation(rule);
-  sheet.getRange(cols.headerRow + 1, cols.details, Math.max(sheet.getMaxRows() - cols.headerRow, 1), 1).setWrap(true);
+  if (cols.github) sheet.getRange(cols.headerRow, cols.github).setNote('Select GitHub screening scope and code review option.');
+  if (cols.dsa) sheet.getRange(cols.headerRow, cols.dsa).setNote('Select or type DSA cutoff (e.g. "300 solved", "CF 1400 / 300 solved", "Yes", or "Off").');
+  if (cols.experience) sheet.getRange(cols.headerRow, cols.experience).setNote('Domain experience requirement (e.g. "Required", "Not required", or "1+ years").');
+  sheet.getRange(cols.headerRow, cols.trigger).setNote('Select "start" to run the shortlisting for this row, or "stop" to halt and immediately deliver whatever candidates have been screened so far.');
+
+  var maxRows = Math.max(sheet.getMaxRows() - cols.headerRow, 1);
+
+  // Trigger dropdown: start, stop
+  var triggerRule = SpreadsheetApp.newDataValidation().requireValueInList(['start', 'stop'], true).setAllowInvalid(true).build();
+  sheet.getRange(cols.headerRow + 1, cols.trigger, maxRows, 1).setDataValidation(triggerRule);
+
+  // Github dropdown
+  if (cols.github) {
+    var githubRule = SpreadsheetApp.newDataValidation().requireValueInList([
+      'Domain-fit candidates (with review)',
+      'Domain-fit candidates (no review)',
+      'All candidates (with review)',
+      'All candidates (no review)',
+      'Off'
+    ], true).setAllowInvalid(true).build();
+    sheet.getRange(cols.headerRow + 1, cols.github, maxRows, 1).setDataValidation(githubRule);
+  }
+
+  // DSA dropdown
+  if (cols.dsa) {
+    var dsaRule = SpreadsheetApp.newDataValidation().requireValueInList([
+      'Off',
+      'Yes',
+      '300+ solved',
+      '500+ solved',
+      'CF 1400 / 300 solved',
+      'LC 1600'
+    ], true).setAllowInvalid(true).build();
+    sheet.getRange(cols.headerRow + 1, cols.dsa, maxRows, 1).setDataValidation(dsaRule);
+  }
+
+  // Experience dropdown
+  if (cols.experience) {
+    var expRule = SpreadsheetApp.newDataValidation().requireValueInList([
+      'Not required',
+      'Required',
+      '1+ years',
+      '2+ years'
+    ], true).setAllowInvalid(true).build();
+    sheet.getRange(cols.headerRow + 1, cols.experience, maxRows, 1).setDataValidation(expRule);
+  }
+
+  sheet.getRange(cols.headerRow + 1, cols.details, maxRows, 1).setWrap(true);
 
   ScriptApp.getProjectTriggers().forEach(function (t) {
     var fn = t.getHandlerFunction();
@@ -94,9 +141,20 @@ function psmAutomationOnEdit(e) {
     var statuses = sheet.getRange(r0, cols.status, n, 1).getValues();
     var instructions = sheet.getRange(r0, cols.instructions, n, 1).getValues();
     for (var i = 0; i < n; i++) {
-      if (psmClean_(triggers[i][0]) !== 'start') continue;
+      var triggerVal = psmClean_(triggers[i][0]);
       var row = r0 + i;
       var status = String(statuses[i][0]).trim().toUpperCase();
+
+      if (triggerVal === 'stop') {
+        if (PSM_ACTIVE.indexOf(status) < 0) {
+          SpreadsheetApp.getActive().toast('Row ' + row + ' is not currently running.', 'PSM automation', 5);
+          continue;
+        }
+        psmSubmitStop_(sheet, cols, row);
+        continue;
+      }
+
+      if (triggerVal !== 'start') continue;
       if (PSM_ACTIVE.indexOf(status) >= 0) {
         SpreadsheetApp.getActive().toast('Row ' + row + ' is already running — this start was ignored.', 'PSM automation', 6);
         continue;
@@ -180,6 +238,21 @@ function psmSubmit_(sheet, cols, row, requestId) {
     return false;
   }
   return false; // 5xx / network: stays PENDING, the sweep tries again
+}
+
+/** Request the app to stop screening and immediately deliver whatever candidates are screened so far. */
+function psmSubmitStop_(sheet, cols, row) {
+  var res = psmApi_('post', '/api/automation/jobs/stop', {
+    spreadsheetId: SpreadsheetApp.getActiveSpreadsheet().getId(),
+    sheetName: PSM_CONTROL_TAB,
+    row: row,
+  });
+  if (res.code === 200 || res.code === 202) {
+    SpreadsheetApp.getActive().toast('Row ' + row + ': Stop requested. Finalizing and delivering screened profiles...', 'PSM automation', 6);
+    return true;
+  }
+  SpreadsheetApp.getActive().toast('Row ' + row + ': ' + ((res.body && res.body.error) || 'Failed to stop job.'), 'PSM automation', 6);
+  return false;
 }
 
 /** Poll the open health endpoint until the app answers (a sleeping instance takes about a minute). */
@@ -269,6 +342,9 @@ function psmColumns_(sheet) {
   var out = {
     headerRow: headerRow,
     instructions: col(PSM_HEADERS.instructions),
+    github: col(PSM_HEADERS.github),
+    dsa: col(PSM_HEADERS.dsa),
+    experience: col(PSM_HEADERS.experience),
     trigger: col(PSM_HEADERS.trigger),
     status: col(PSM_HEADERS.status),
     details: col(PSM_HEADERS.details),

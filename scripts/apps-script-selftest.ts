@@ -166,28 +166,31 @@ const ok202 = (method: string, path: string) =>
   const w = makeWorld({ server: ok202 });
   w.fn("psmAutomationSetup")();
   const head = w.sheet.grid[1];
-  check("setup adds the four columns after the last header", head[15] === "Screening Instructions" && head[16] === "Trigger" && head[17] === "Automation Status" && head[18] === "Automation Details", head.slice(14));
+  const cols = w.fn("psmColumns_")(w.sheet);
+  check("setup adds the columns after the last header", Boolean(cols.instructions && cols.github && cols.dsa && cols.experience && cols.trigger && cols.status && cols.details), head.slice(14));
   check("setup installs the edit and sweep triggers", w.triggers.map((t) => t.fn).sort().join() === "psmAutomationOnEdit,psmAutomationSweep", w.triggers);
   w.fn("psmAutomationSetup")();
-  check("running setup again changes nothing (no duplicate columns or triggers)", w.sheet.grid[1].length === 19 && w.triggers.length === 2);
+  check("running setup again changes nothing (no duplicate columns or triggers)", w.sheet.grid[1].length === 22 && w.triggers.length === 2);
   check("every global the script defines is psm-prefixed (no clash with other scripts)", Object.keys(w.globals).every((k) => /^(psm|PSM_)/.test(k)), Object.keys(w.globals));
-  check("the instructions header explains the format", (w.sheet.notes.get("2:16") ?? "").includes("Subsheets:"));
+  check("the instructions header explains the format", (w.sheet.notes.get(`2:${cols.instructions}`) ?? "").includes("Screening focus"));
 }
 
 // ── start ────────────────────────────────────────────────────────────────────
 const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
-  w.sheet.set(row, 17, value);
-  w.fn("psmAutomationOnEdit")({ range: w.sheet.getRange(row, 17) });
+  const cols = w.fn("psmColumns_")(w.sheet);
+  w.sheet.set(row, cols.trigger, value);
+  w.fn("psmAutomationOnEdit")({ range: w.sheet.getRange(row, cols.trigger) });
 };
 {
   const w = makeWorld({ server: ok202 });
   w.fn("psmAutomationSetup")();
-  w.sheet.set(3, 16, "Subsheets: Edge Applied\nFocus: Flutter");
+  const cols = w.fn("psmColumns_")(w.sheet);
+  w.sheet.set(3, cols.instructions, "Subsheets: Edge Applied\nFocus: Flutter");
   edit(w, 3, "Start ");
   const post = w.calls.find((c) => c.method === "post");
   check("'Start ' (any case, spaces) is sent", Boolean(post) && post!.body!.row === 3 && post!.body!.sheetName === "Profile Shortlisting - New" && post!.body!.spreadsheetId === "CONTROL_ID", w.calls);
   check("with the token and a request id", post?.auth === "Bearer tok-123" && /^[0-9a-f-]{36}$/.test(String(post?.body?.requestId)));
-  check("the row shows PENDING with the request id", w.sheet.cell(3, 18) === "PENDING" && String(w.sheet.cell(3, 19)).includes(`request ${post?.body?.requestId}`));
+  check("the row shows PENDING with the request id", w.sheet.cell(3, cols.status) === "PENDING" && String(w.sheet.cell(3, cols.details)).includes(`request ${post?.body?.requestId}`));
   check("no candidate data is sent", !JSON.stringify(post?.body).includes("Flutter"));
 
   const before = w.calls.length;
@@ -199,9 +202,9 @@ const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
   check("other values never start anything", w.calls.length === before);
 
   edit(w, 4, "start");
-  check("no instructions → FAILED with what to do, nothing sent", w.sheet.cell(4, 18) === "FAILED" && String(w.sheet.cell(4, 19)).includes("Add Screening Instructions") && w.calls.length === before);
+  check("no instructions → FAILED with what to do, nothing sent", w.sheet.cell(4, cols.status) === "FAILED" && String(w.sheet.cell(4, cols.details)).includes("Add Screening Instructions") && w.calls.length === before);
 
-  w.sheet.set(4, 16, "Subsheets: Edge Applied\nFocus: Java");
+  w.sheet.set(4, cols.instructions, "Subsheets: Edge Applied\nFocus: Java");
   w.sheet.set(3, 3, "edited product");
   w.fn("psmAutomationOnEdit")({ range: w.sheet.getRange(3, 3) });
   check("edits in other columns are ignored", w.calls.length === before);
@@ -214,25 +217,28 @@ const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
       p === "/api/health" ? { code: 200, body: {} } : m === "post" ? { code: 409, body: { error: "busy", job: { status: "PROCESSING", details: "Screening 3 / 9 · job J" } } } : { code: 200, body: {} },
   });
   w.fn("psmAutomationSetup")();
-  w.sheet.set(3, 16, "Subsheets: Edge Applied\nFocus: Flutter");
+  const cols = w.fn("psmColumns_")(w.sheet);
+  w.sheet.set(3, cols.instructions, "Subsheets: Edge Applied\nFocus: Flutter");
   edit(w, 3, "start");
-  check("409: the running job's status is shown", w.sheet.cell(3, 18) === "PROCESSING" && String(w.sheet.cell(3, 19)).includes("Screening 3 / 9"));
+  check("409: the running job's status is shown", w.sheet.cell(3, cols.status) === "PROCESSING" && String(w.sheet.cell(3, cols.details)).includes("Screening 3 / 9"));
 }
 {
   const w = makeWorld({ server: (m, p) => (p === "/api/health" ? { code: 200, body: {} } : { code: 422, body: { error: "Row 3's Trigger says \"x\", not \"start\"" } }) });
   w.fn("psmAutomationSetup")();
-  w.sheet.set(3, 16, "Subsheets: Edge Applied\nFocus: Flutter");
+  const cols = w.fn("psmColumns_")(w.sheet);
+  w.sheet.set(3, cols.instructions, "Subsheets: Edge Applied\nFocus: Flutter");
   edit(w, 3, "start");
-  check("4xx: FAILED with the app's reason", w.sheet.cell(3, 18) === "FAILED" && String(w.sheet.cell(3, 19)).includes("not \"start\""));
+  check("4xx: FAILED with the app's reason", w.sheet.cell(3, cols.status) === "FAILED" && String(w.sheet.cell(3, cols.details)).includes("not \"start\""));
 }
 {
   let up = false;
   const w = makeWorld({ server: (m, p) => (!up ? "down" : ok202(m, p)) });
   w.fn("psmAutomationSetup")();
-  w.sheet.set(3, 16, "Subsheets: Edge Applied\nFocus: Flutter");
+  const cols = w.fn("psmColumns_")(w.sheet);
+  w.sheet.set(3, cols.instructions, "Subsheets: Edge Applied\nFocus: Flutter");
   edit(w, 3, "start");
-  const requestId = String(w.sheet.cell(3, 19)).match(/request (\S+)/)?.[1];
-  check("app down: the row stays PENDING with its request id", w.sheet.cell(3, 18) === "PENDING" && Boolean(requestId) && !w.calls.some((c) => c.method === "post"));
+  const requestId = String(w.sheet.cell(3, cols.details)).match(/request (\S+)/)?.[1];
+  check("app down: the row stays PENDING with its request id", w.sheet.cell(3, cols.status) === "PENDING" && Boolean(requestId) && !w.calls.some((c) => c.method === "post"));
   up = true;
   w.fn("psmAutomationSweep")();
   const post = w.calls.find((c) => c.method === "post");
@@ -251,10 +257,21 @@ const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
           : { code: 404, body: {} },
   });
   w.fn("psmAutomationSetup")();
-  w.sheet.set(3, 18, "PROCESSING");
-  w.sheet.set(3, 19, `Screening 3 / 9 · job ${job}`);
+  const cols = w.fn("psmColumns_")(w.sheet);
+  w.sheet.set(3, cols.status, "PROCESSING");
+  w.sheet.set(3, cols.details, `Screening 3 / 9 · job ${job}`);
   w.fn("psmAutomationSweep")();
-  check("sweep checks running jobs and catches up a finished one", w.sheet.cell(3, 18) === "COMPLETED" && String(w.sheet.cell(3, 19)).startsWith("5 shortlisted"));
+  check("sweep checks running jobs and catches up a finished one", w.sheet.cell(3, cols.status) === "COMPLETED" && String(w.sheet.cell(3, cols.details)).startsWith("5 shortlisted"));
+}
+{
+  const w = makeWorld({ server: ok202 });
+  w.fn("psmAutomationSetup")();
+  const cols = w.fn("psmColumns_")(w.sheet);
+  w.sheet.set(3, cols.instructions, "Subsheets: Edge Applied\nFocus: Flutter");
+  w.sheet.set(3, cols.status, "PROCESSING");
+  edit(w, 3, "stop");
+  const stopPost = w.calls.find((c) => c.method === "post" && c.path === "/api/automation/jobs/stop");
+  check("stop trigger sends stop request to server", Boolean(stopPost) && stopPost!.body!.row === 3);
 }
 {
   let woke = 0;
@@ -265,8 +282,9 @@ const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
     },
   });
   w.fn("psmAutomationSetup")();
+  const cols = w.fn("psmColumns_")(w.sheet);
   woke = 0;
-  w.sheet.set(3, 18, "COMPLETED");
+  w.sheet.set(3, cols.status, "COMPLETED");
   w.fn("psmAutomationSweep")();
   check("an idle sheet never wakes the app", woke === 0 && w.calls.length === 0);
 }

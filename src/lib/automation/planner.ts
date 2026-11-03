@@ -135,5 +135,6 @@ export async function planJob(input: { instructions: string; internalSheetUrl: s
     topN,
     topNSource,
     notes,
+    requireExperience: Boolean(parsed.requireExperience),
   };
 }

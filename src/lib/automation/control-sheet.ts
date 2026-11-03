@@ -13,6 +13,9 @@ import type { ControlRequest } from "@/lib/automation/types";
 
 export const CONTROL_HEADERS = {
   instructions: "Screening Instructions",
+  github: "Github",
+  dsa: "DSA",
+  experience: "Experience in Screening Domain",
   trigger: "Trigger",
   status: "Automation Status",
   details: "Automation Details",
@@ -24,6 +27,9 @@ interface Layout {
   headerRow: number;
   /** 1-based columns (0 = not found). */
   instructions: number;
+  github: number;
+  dsa: number;
+  experience: number;
   trigger: number;
   status: number;
   details: number;
@@ -56,6 +62,9 @@ export async function controlLayout(spreadsheetId: string, tab: string, fresh = 
     sheetId,
     headerRow: idx + 1,
     instructions: head.indexOf(squeeze(CONTROL_HEADERS.instructions)) + 1,
+    github: find(/^git\s*hub/),
+    dsa: find(/^dsa/),
+    experience: find(/experience.*(?:domain|screening)/),
     trigger: head.indexOf(squeeze(CONTROL_HEADERS.trigger)) + 1,
     status: head.indexOf(squeeze(CONTROL_HEADERS.status)) + 1,
     details: head.indexOf(squeeze(CONTROL_HEADERS.details)) + 1,
@@ -77,11 +86,27 @@ export async function readControlRequest(spreadsheetId: string, tab: string, row
   const res = await getSheetsWriter().spreadsheets.values.get({ spreadsheetId, range: `${q(tab)}!${row}:${row}` });
   const cells = ((res.data.values ?? [])[0] ?? []) as unknown[];
   const at = (col: number) => (col ? String(cells[col - 1] ?? "").trim() : "");
+  const instructions = at(layout.instructions);
+  const github = at(layout.github);
+  const dsa = at(layout.dsa);
+  const experience = at(layout.experience);
+
+  // Combine discrete columns if set and not already explicitly inside instructions
+  const extraLines: string[] = [];
+  if (github && !/git\s*hub/i.test(instructions)) extraLines.push(`GitHub: ${github}`);
+  if (dsa && !/\bdsa\b|leetcode|codeforces|codechef/i.test(instructions)) extraLines.push(`DSA: ${dsa}`);
+  if (experience && !/experience/i.test(instructions)) extraLines.push(`Experience in domain: ${experience}`);
+
+  const combinedInstructions = [instructions, ...extraLines].filter(Boolean).join("\n");
+
   return {
     spreadsheetId,
     sheetName: tab,
     row,
-    instructions: at(layout.instructions),
+    instructions: combinedInstructions,
+    github,
+    dsa,
+    experience,
     trigger: at(layout.trigger),
     internalSheetUrl: at(layout.internalSheet),
     profilesRequired: at(layout.profilesRequired),

@@ -151,6 +151,10 @@ async function screenOne(cp: CandidateCheckpoint, ctx: RunContext): Promise<Scre
 export async function screenCandidates(ctx: RunContext, afterWave: () => Promise<void> = async () => undefined): Promise<void> {
   const deadline = new Date(ctx.job.startedAt ?? ctx.job.createdAt).getTime() + SCREEN_DEADLINE_MS;
   for (;;) {
+    if (await ctx.checkStopRequested()) {
+      await logEvent(ctx.job.id, "screening", "info", "Stop requested by user — halting remaining candidate screening.");
+      return;
+    }
     const all = await loadCandidates(ctx.job.id);
     const live = all.filter((c) => c.state !== "duplicate");
     const counts = () => ({

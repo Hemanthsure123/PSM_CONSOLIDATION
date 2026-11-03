@@ -41,6 +41,7 @@ export interface ParsedInstructions {
   topN: number | null;
   /** A spreadsheet link in the instructions (overrides the row's Internal Sheets link). */
   sheetUrl: string | null;
+  requireExperience?: boolean;
 }
 
 export interface PlanTab {
@@ -73,6 +74,7 @@ export interface AutomationPlan {
   topNSource: "instructions" | "profiles-required" | "none";
   /** Assumptions the planner made, shown in the job's details. */
   notes: string[];
+  requireExperience?: boolean;
 }
 
 /** One control-row request, as the server read it from the sheet. */
@@ -87,6 +89,9 @@ export interface ControlRequest {
   /** The row's "No. of Profiles Required" ("" when blank). */
   profilesRequired: string;
   companyName: string;
+  github?: string;
+  dsa?: string;
+  experience?: string;
 }
 
 export interface JobProgress {
@@ -97,6 +102,7 @@ export interface JobProgress {
   matches?: number;
   /** Cleared the bar AND showed every must-have. */
   mustHaves?: number;
+  stopRequested?: boolean;
   /** The shortlist was delivered before the full screening finished. */
   shortlistTab?: string;
   shortlistUrl?: string;

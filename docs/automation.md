@@ -12,14 +12,17 @@ Nobody has to open the app.
 
 ## What you add to the sheet
 
-The coordination sheet is "Edge Team PC || PSM Task Coordination", tab **Profile Shortlisting - New**. The setup script adds four columns at the end of the header row:
+The coordination sheet is "Edge Team PC || PSM Task Coordination", tab **Profile Shortlisting - New**. The setup script and layout uses columns AK to AQ:
 
 | Column | Who fills it | What it holds |
 |---|---|---|
-| **Screening Instructions** | You | What to screen, in plain text (format below) |
-| **Trigger** | You | `start` runs the row. Any other value does nothing. |
+| **Screening Instructions** | You | What to screen / Focus (plain text role criteria, e.g. "Flutter developers who shipped apps; Firebase is a must") |
+| **Github** | You (dropdown) | `Domain-fit candidates (with review)`, `Domain-fit candidates (no review)`, `All candidates (with review)`, `All candidates (no review)`, or `Off` |
+| **DSA** | You (dropdown / text) | `Off`, `Yes`, `300+ solved`, `500+ solved`, `CF 1400 / 300 solved`, `LC 1600` (or custom cutoffs) |
+| **Experience in Screening Domain** | You (dropdown) | `Not required`, `Required`, `1+ years`, `2+ years` |
+| **Trigger** | You (dropdown) | `start` runs the automation for this row. `stop` halts screening immediately and delivers whatever candidates have been screened so far. |
 | **Automation Status** | The app | `PENDING`, `PROCESSING`, `COMPLETED`, `AWAITING_REVIEW` or `FAILED` |
-| **Automation Details** | The app | Progress, then the result or the reason it failed, and the job id |
+| **Automation Details** | The app | Progress, then a clickable link to the delivered `psm_final_shortlisted_<date>` tab |
 
 The app also reads two columns that every row already has:
 - **Internal Sheets**: the link to the candidates' spreadsheet.
