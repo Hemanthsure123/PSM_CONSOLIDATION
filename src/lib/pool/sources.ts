@@ -15,7 +15,7 @@ export interface PoolSource {
 const DEFAULTS: Record<Product, PoolSource> = {
   edge2: {
     spreadsheetId: "1Mql2SPPBKcHaAuC7Y9gjJxMw1G--dcuPjySLgj_IDSg",
-    tab: "Assessment Cleared- 2027 Pool",
+    tab: "Assessment Cleared- 2027 Pooll",
     referenceTab: "All Assessment Cleared PII DATA - 2027",
   },
   edge1: { spreadsheetId: "15jQ2GDNF6a6omHS4jSiMC8xo2ZkdJqQbqWA9M8ovc2Y", tab: "Sheet2" },

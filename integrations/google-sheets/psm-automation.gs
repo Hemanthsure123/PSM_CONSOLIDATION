@@ -19,6 +19,7 @@
 
 var PSM_CONTROL_TAB = 'Profile Shortlisting - New';
 var PSM_HEADERS = {
+  subsheets: 'Subsheets',
   instructions: 'Screening Instructions',
   github: 'Github',
   dsa: 'DSA',
@@ -46,7 +47,7 @@ function psmAutomationSetup() {
   var width = Math.max(sheet.getLastColumn(), 1);
   var head = sheet.getRange(headerRow, 1, 1, width).getValues()[0].map(psmClean_);
   var last = psmLastNonEmpty_(head);
-  ['instructions', 'github', 'dsa', 'experience', 'trigger', 'status', 'details'].forEach(function (key) {
+  ['subsheets', 'instructions', 'github', 'dsa', 'experience', 'trigger', 'status', 'details'].forEach(function (key) {
     if (head.indexOf(psmClean_(PSM_HEADERS[key])) >= 0) return;
     last += 1;
     if (last > sheet.getMaxColumns()) sheet.insertColumnsAfter(sheet.getMaxColumns(), last - sheet.getMaxColumns());
@@ -54,8 +55,11 @@ function psmAutomationSetup() {
     head[last - 1] = psmClean_(PSM_HEADERS[key]);
   });
   var cols = psmColumns_(sheet);
+  if (cols.subsheets) {
+    sheet.getRange(cols.headerRow, cols.subsheets).setNote('Subsheets to screen, separated by commas (e.g. "Total Applications, Academy Applied"). If blank, defaults to standard applicant tabs.');
+  }
   sheet.getRange(cols.headerRow, cols.instructions).setNote(
-    'Screening focus criteria goes here (e.g. "Flutter developers who shipped apps; Firebase is a must").\nYou can also specify "Subsheets: Edge Applied, Academy Applied" if needed.'
+    'Screening focus criteria goes here (e.g. "Flutter developers who shipped apps; Firebase is a must").'
   );
   if (cols.github) sheet.getRange(cols.headerRow, cols.github).setNote('Select GitHub screening scope and code review option.');
   if (cols.dsa) sheet.getRange(cols.headerRow, cols.dsa).setNote('Select or type DSA cutoff (e.g. "300 solved", "CF 1400 / 300 solved", "Yes", or "Off").');
@@ -341,6 +345,7 @@ function psmColumns_(sheet) {
   };
   var out = {
     headerRow: headerRow,
+    subsheets: col(PSM_HEADERS.subsheets),
     instructions: col(PSM_HEADERS.instructions),
     github: col(PSM_HEADERS.github),
     dsa: col(PSM_HEADERS.dsa),

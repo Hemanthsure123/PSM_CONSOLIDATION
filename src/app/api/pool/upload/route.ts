@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { databaseConfigured } from "@/lib/db/client";
-import { detectProduct } from "@/lib/pool/parse";
+import { detectProduct, parsePool } from "@/lib/pool/parse";
 import { syncPool } from "@/lib/pool/sync";
 import { PRODUCTS, PRODUCT_LABEL, type Product } from "@/lib/pool/types";
 import { parseCsv } from "@/lib/utils";
@@ -40,10 +40,20 @@ export async function POST(req: Request) {
   }
 
   const table = parseCsv((await file.text()).replace(/^﻿/, ""));
-  const detected = detectProduct(table);
+  let detected = detectProduct(table);
   const asked = String(form.get("product") ?? "auto");
   if (asked !== "auto" && !PRODUCTS.includes(asked as Product)) {
     return NextResponse.json({ error: `Unknown product "${asked}".` }, { status: 400 });
+  }
+  if (!detected && asked !== "auto") {
+    try {
+      const parsed = parsePool(asked as Product, table);
+      if (parsed.records.length > 0) {
+        detected = asked as Product;
+      }
+    } catch {
+      // ignore
+    }
   }
   if (!detected) {
     return NextResponse.json(

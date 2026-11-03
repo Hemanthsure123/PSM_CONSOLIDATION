@@ -154,7 +154,7 @@ function makeWorld(opts: { server: (method: string, path: string, body: Record<s
   vm.runInContext(readFileSync(join(process.cwd(), "integrations/google-sheets/psm-automation.gs"), "utf8"), ctx);
   // What the script itself defines at the top level (shared with every other file in the Apps Script project).
   const globals = Object.fromEntries(Object.keys(ctx).filter((k) => !mocks.has(k)).map((k) => [k, true]));
-  const fn = (name: string) => (ctx as unknown as Record<string, (...a: unknown[]) => unknown>)[name];
+  const fn = (name: string) => (ctx as unknown as Record<string, (...a: unknown[]) => any>)[name];
   return { sheet, calls, triggers, toasts, fn, globals };
 }
 
@@ -170,7 +170,7 @@ const ok202 = (method: string, path: string) =>
   check("setup adds the columns after the last header", Boolean(cols.instructions && cols.github && cols.dsa && cols.experience && cols.trigger && cols.status && cols.details), head.slice(14));
   check("setup installs the edit and sweep triggers", w.triggers.map((t) => t.fn).sort().join() === "psmAutomationOnEdit,psmAutomationSweep", w.triggers);
   w.fn("psmAutomationSetup")();
-  check("running setup again changes nothing (no duplicate columns or triggers)", w.sheet.grid[1].length === 22 && w.triggers.length === 2);
+  check("running setup again changes nothing (no duplicate columns or triggers)", w.sheet.grid[1].length === 23 && w.triggers.length === 2);
   check("every global the script defines is psm-prefixed (no clash with other scripts)", Object.keys(w.globals).every((k) => /^(psm|PSM_)/.test(k)), Object.keys(w.globals));
   check("the instructions header explains the format", (w.sheet.notes.get(`2:${cols.instructions}`) ?? "").includes("Screening focus"));
 }

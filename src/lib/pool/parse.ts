@@ -60,9 +60,16 @@ function col(header: string[], ...names: string[]): number {
   return header.findIndex((h) => want.includes(squeeze(String(h ?? ""))));
 }
 
-/** The first row (within the top 5) that holds every one of `names`. */
-function findHeader(table: Table, names: string[]): number {
-  for (let i = 0; i < Math.min(5, table.length); i++) if (names.every((n) => col(table[i], n) >= 0)) return i;
+/** The first row (within the top 5) that holds every one of `names`. Each item can be a single name or an array of alternative names. */
+function findHeader(table: Table, names: (string | string[])[]): number {
+  for (let i = 0; i < Math.min(5, table.length); i++) {
+    const row = table[i];
+    const match = names.every((n) => {
+      const candidates = Array.isArray(n) ? n : [n];
+      return col(row, ...candidates) >= 0;
+    });
+    if (match) return i;
+  }
   return -1;
 }
 
@@ -140,20 +147,33 @@ export function parseResumeReference(table: Table): { byPhone: Map<string, strin
 }
 
 export function parseEdge2(table: Table, reference?: ReturnType<typeof parseResumeReference>): ParsedPool<Edge2Record> {
-  const required = ["Candidate Stage", "phone"];
-  const h = findHeader(table, required);
-  if (h < 0) return { product: "edge2", records: [], rowsRead: 0, missingColumns: required.filter((n) => !table.slice(0, 5).some((r) => col(r, n) >= 0)), issues: [] };
+  const stageCandidates = ["Candidate Stage", "FINAL STAGE", "currentStage", "Stage"];
+  const idOrPhoneCandidates = ["phone", "Phone Number", "mobile", "Mobile Number", "bqCandidateId", "User ID", "userId", "Candidate ID"];
+  const h = findHeader(table, [stageCandidates, idOrPhoneCandidates]);
+  if (h < 0) {
+    const missing: string[] = [];
+    if (!stageCandidates.some((c) => table.slice(0, 5).some((r) => col(r, c) >= 0))) missing.push("Candidate Stage");
+    if (!idOrPhoneCandidates.some((c) => table.slice(0, 5).some((r) => col(r, c) >= 0))) missing.push("phone");
+    return {
+      product: "edge2",
+      records: [],
+      rowsRead: 0,
+      missingColumns: missing.length ? missing : ["Candidate Stage", "phone"],
+      issues: [],
+    };
+  }
   const head = table[h];
   const i = {
-    stage: col(head, "Candidate Stage"),
-    phone: col(head, "phone"),
-    userId: col(head, "bqCandidateId", "User ID", "userId"),
-    name: col(head, "name"),
-    offline: col(head, "offlineOverallScore"),
-    dsa: col(head, "dsaCodingScore"),
+    stage: col(head, "Candidate Stage", "FINAL STAGE", "currentStage", "Stage"),
+    currentStage: col(head, "currentStage", "Stage"),
+    phone: col(head, "phone", "Phone Number", "mobile", "Mobile Number", "Contact Number"),
+    userId: col(head, "bqCandidateId", "User ID", "userId", "id", "Candidate ID"),
+    name: col(head, "name", "Candidate Name", "studentName", "Name"),
+    offline: col(head, "offlineOverallScore", "overallScore", "offlineScore"),
+    dsa: col(head, "dsaCodingScore", "offlineDataStructuresScore"),
     cs: col(head, "csFundamentalsScore"),
     sqlMcq: col(head, "sqlMcqScore"),
-    sqlCoding: col(head, "sqlCodingScore"),
+    sqlCoding: col(head, "sqlCodingScore", "offlineSqlScore"),
     selfIntro: col(head, "tr1SelfIntroRating"),
     dsaOverall: col(head, "tr1DsaOverallRating"),
     problemSolving: col(head, "tr1ProblemSolvingAbility"),
@@ -181,7 +201,7 @@ export function parseEdge2(table: Table, reference?: ReturnType<typeof parseResu
     const phone = normalisePhone(phoneRaw);
     const userId = normaliseUserId(cell(r, i.userId));
     issues.push(...identityIssues(row, phoneRaw, phone));
-    const stage = cell(r, i.stage);
+    const stage = cell(r, i.stage) || (i.currentStage >= 0 ? cell(r, i.currentStage) : "");
     if (!stage) {
       issues.push({ row, problem: "No Candidate Stage — skipped" });
       return;
@@ -401,8 +421,22 @@ export function parseAcademy(table: Table): ParsedPool<AcademyRecord> {
 
 /** Which product a CSV belongs to, from its headers (null = not a pool sheet). */
 export function detectProduct(table: Table): Product | null {
-  if (findHeader(table, ["Candidate Stage", "phone"]) >= 0) return "edge2";
-  if (findHeader(table, ["User ID", "Assesment Selection Status"]) >= 0) return "edge1";
+  if (
+    findHeader(table, [
+      ["Candidate Stage", "FINAL STAGE", "currentStage", "Stage"],
+      ["phone", "Phone Number", "mobile", "Mobile Number", "bqCandidateId", "User ID", "userId", "Candidate ID"],
+    ]) >= 0
+  ) {
+    return "edge2";
+  }
+  if (
+    findHeader(table, [
+      ["User ID", "uid", "Candidate ID"],
+      ["Assesment Selection Status", "Assessment Selection Status", "Candidate Status"],
+    ]) >= 0
+  ) {
+    return "edge1";
+  }
   if (academyHeader(table) >= 0) return "academy";
   return null;
 }

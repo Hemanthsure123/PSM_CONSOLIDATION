@@ -12,6 +12,7 @@ import type { ControlRequest } from "@/lib/automation/types";
  */
 
 export const CONTROL_HEADERS = {
+  subsheets: "Subsheets",
   instructions: "Screening Instructions",
   github: "Github",
   dsa: "DSA",
@@ -26,6 +27,7 @@ interface Layout {
   sheetId: number;
   headerRow: number;
   /** 1-based columns (0 = not found). */
+  subsheets: number;
   instructions: number;
   github: number;
   dsa: number;
@@ -61,6 +63,7 @@ export async function controlLayout(spreadsheetId: string, tab: string, fresh = 
   const layout: Layout = {
     sheetId,
     headerRow: idx + 1,
+    subsheets: find(/^sub\s*-?\s*sheets?/i),
     instructions: head.indexOf(squeeze(CONTROL_HEADERS.instructions)) + 1,
     github: find(/^git\s*hub/),
     dsa: find(/^dsa/),
@@ -86,6 +89,7 @@ export async function readControlRequest(spreadsheetId: string, tab: string, row
   const res = await getSheetsWriter().spreadsheets.values.get({ spreadsheetId, range: `${q(tab)}!${row}:${row}` });
   const cells = ((res.data.values ?? [])[0] ?? []) as unknown[];
   const at = (col: number) => (col ? String(cells[col - 1] ?? "").trim() : "");
+  const subsheets = at(layout.subsheets);
   const instructions = at(layout.instructions);
   const github = at(layout.github);
   const dsa = at(layout.dsa);
@@ -93,17 +97,19 @@ export async function readControlRequest(spreadsheetId: string, tab: string, row
 
   // Combine discrete columns if set and not already explicitly inside instructions
   const extraLines: string[] = [];
+  if (subsheets && !/sub\s*-?\s*sheets?/i.test(instructions)) extraLines.push(`Subsheets: ${subsheets}`);
   if (github && !/git\s*hub/i.test(instructions)) extraLines.push(`GitHub: ${github}`);
   if (dsa && !/\bdsa\b|leetcode|codeforces|codechef/i.test(instructions)) extraLines.push(`DSA: ${dsa}`);
   if (experience && !/experience/i.test(instructions)) extraLines.push(`Experience in domain: ${experience}`);
 
-  const combinedInstructions = [instructions, ...extraLines].filter(Boolean).join("\n");
+  const combinedInstructions = [...extraLines, instructions].filter(Boolean).join("\n");
 
   return {
     spreadsheetId,
     sheetName: tab,
     row,
     instructions: combinedInstructions,
+    subsheets,
     github,
     dsa,
     experience,

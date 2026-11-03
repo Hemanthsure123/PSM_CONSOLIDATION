@@ -89,6 +89,7 @@ export interface ControlRequest {
   /** The row's "No. of Profiles Required" ("" when blank). */
   profilesRequired: string;
   companyName: string;
+  subsheets?: string;
   github?: string;
   dsa?: string;
   experience?: string;
