@@ -40,33 +40,25 @@ export async function POST(req: Request) {
   }
 
   const table = parseCsv((await file.text()).replace(/^﻿/, ""));
-  let detected = detectProduct(table);
+  const detected = detectProduct(table);
   const asked = String(form.get("product") ?? "auto");
   if (asked !== "auto" && !PRODUCTS.includes(asked as Product)) {
     return NextResponse.json({ error: `Unknown product "${asked}".` }, { status: 400 });
   }
-  if (!detected && asked !== "auto") {
-    try {
-      const parsed = parsePool(asked as Product, table);
-      if (parsed.records.length > 0) {
-        detected = asked as Product;
-      }
-    } catch {
-      // ignore
-    }
-  }
-  if (!detected) {
+  const targetProduct: Product | null = asked !== "auto" ? (asked as Product) : detected;
+  if (!targetProduct) {
     return NextResponse.json(
-      { error: "This CSV doesn't look like an Edge 1.0, Edge 2.0 or Academy pool sheet — its header row has none of their key columns." },
+      { error: "Could not auto-detect which product this CSV belongs to. Please select Edge 2.0, Edge 1.0, or Academy from the product selector above." },
       { status: 422 },
     );
   }
-  if (asked !== "auto" && asked !== detected) {
+  const parsed = parsePool(targetProduct, table);
+  if (parsed.missingColumns.length > 0) {
     return NextResponse.json(
-      { error: `This CSV looks like ${PRODUCT_LABEL[detected]}'s sheet, not ${PRODUCT_LABEL[asked as Product]}'s. Pick ${PRODUCT_LABEL[detected]} or "Detect the product from the headers".` },
+      { error: `This CSV is missing required columns for ${PRODUCT_LABEL[targetProduct]}: ${parsed.missingColumns.join(", ")}.` },
       { status: 422 },
     );
   }
-  const result = await syncPool(detected, { mode: "csv", fileName: file.name.slice(0, 200), table }, "dashboard-upload");
+  const result = await syncPool(targetProduct, { mode: "csv", fileName: file.name.slice(0, 200), table }, "dashboard-upload");
   return NextResponse.json({ result }, { status: result.ok ? 200 : 422 });
 }

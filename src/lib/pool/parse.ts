@@ -60,9 +60,9 @@ function col(header: string[], ...names: string[]): number {
   return header.findIndex((h) => want.includes(squeeze(String(h ?? ""))));
 }
 
-/** The first row (within the top 5) that holds every one of `names`. Each item can be a single name or an array of alternative names. */
+/** The first row (within the top 15) that holds every one of `names`. Each item can be a single name or an array of alternative names. */
 function findHeader(table: Table, names: (string | string[])[]): number {
-  for (let i = 0; i < Math.min(5, table.length); i++) {
+  for (let i = 0; i < Math.min(15, table.length); i++) {
     const row = table[i];
     const match = names.every((n) => {
       const candidates = Array.isArray(n) ? n : [n];
@@ -148,17 +148,14 @@ export function parseResumeReference(table: Table): { byPhone: Map<string, strin
 
 export function parseEdge2(table: Table, reference?: ReturnType<typeof parseResumeReference>): ParsedPool<Edge2Record> {
   const stageCandidates = ["Candidate Stage", "FINAL STAGE", "currentStage", "Stage"];
-  const idOrPhoneCandidates = ["phone", "Phone Number", "mobile", "Mobile Number", "bqCandidateId", "User ID", "userId", "Candidate ID"];
-  const h = findHeader(table, [stageCandidates, idOrPhoneCandidates]);
+  const idOrPhoneCandidates = ["phone", "Phone Number", "mobile", "Mobile Number", "Contact Number", "bqCandidateId", "User ID", "userId", "Candidate ID", "email", "Email", "name", "Candidate Name"];
+  const h = findHeader(table, [stageCandidates]);
   if (h < 0) {
-    const missing: string[] = [];
-    if (!stageCandidates.some((c) => table.slice(0, 5).some((r) => col(r, c) >= 0))) missing.push("Candidate Stage");
-    if (!idOrPhoneCandidates.some((c) => table.slice(0, 5).some((r) => col(r, c) >= 0))) missing.push("phone");
     return {
       product: "edge2",
       records: [],
       rowsRead: 0,
-      missingColumns: missing.length ? missing : ["Candidate Stage", "phone"],
+      missingColumns: ["Candidate Stage"],
       issues: [],
     };
   }
@@ -424,14 +421,14 @@ export function detectProduct(table: Table): Product | null {
   if (
     findHeader(table, [
       ["Candidate Stage", "FINAL STAGE", "currentStage", "Stage"],
-      ["phone", "Phone Number", "mobile", "Mobile Number", "bqCandidateId", "User ID", "userId", "Candidate ID"],
-    ]) >= 0
+    ]) >= 0 ||
+    findHeader(table, [["bqCandidateId"]]) >= 0 ||
+    findHeader(table, [["offlineOverallScore", "offlineDataStructuresScore"]]) >= 0
   ) {
     return "edge2";
   }
   if (
     findHeader(table, [
-      ["User ID", "uid", "Candidate ID"],
       ["Assesment Selection Status", "Assessment Selection Status", "Candidate Status"],
     ]) >= 0
   ) {
