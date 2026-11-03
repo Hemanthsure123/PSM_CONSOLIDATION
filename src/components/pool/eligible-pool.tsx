@@ -17,6 +17,7 @@ import { Progress } from "@/components/ui/progress";
 import { NativeSelect } from "@/components/ui/select";
 import { Stat, StatGrid } from "@/components/ui/stat";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { AssessmentScores } from "@/components/pool/assessment-scores";
 import { CountBar, ORDINAL, PRODUCT_COLOR, SERIES_NEUTRAL, StackedBars, StageFunnel } from "@/components/pool/pool-charts";
 import { SHORTLIST_ORDER, TIER_RULES } from "@/components/pool/pool-rules";
 import { fetchPoolSummary, syncPoolProduct, uploadPoolCsv } from "@/lib/pool/client";
@@ -392,6 +393,8 @@ export function EligiblePool() {
           </div>
         </div>
       </Panel>
+
+      <AssessmentScores />
 
       <Panel
         title="Keep the pool up to date"

@@ -21,12 +21,13 @@ import type { AcademyRecord, Edge1Record, Edge2Record, ParseIssue, PoolRecord, P
  * Bulk statements (unnest of arrays) keep it to a handful of round trips per sync.
  */
 
-const SYNC_LOCK = 74_210_002;
+/** Held by every product sync and every marks import, so two never interleave. */
+export const SYNC_LOCK = 74_210_002;
 const MAX_LOGGED_ISSUES = 200;
 
 export type SyncInput = { mode: "sheet" } | { mode: "csv"; fileName: string; table: Table };
 
-async function readTab(spreadsheetId: string, tab: string): Promise<Table> {
+export async function readTab(spreadsheetId: string, tab: string): Promise<Table> {
   const res = await getSheets().spreadsheets.values.get({
     spreadsheetId,
     range: `'${tab.replace(/'/g, "''")}'`,

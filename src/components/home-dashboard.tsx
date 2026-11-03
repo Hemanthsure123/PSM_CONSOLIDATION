@@ -10,6 +10,7 @@ import {
   Code2,
   FileCode2,
   FileSpreadsheet,
+  FolderKanban,
   GraduationCap,
   Layers,
   LayoutDashboard,
@@ -111,19 +112,20 @@ function plural(n: number, one: string, many: string): string {
 }
 
 /** The dashboard shows one category of saved work at a time. */
-type DashTab = "companies" | "screenings" | "evaluations" | "analyses";
+type DashTab = "screenings" | "evaluations" | "companies" | "analyses";
 
 const TABS: { id: DashTab; label: string }[] = [
-  { id: "companies", label: "Companies" },
-  { id: "screenings", label: "Screenings" },
-  { id: "evaluations", label: "Evaluations" },
-  { id: "analyses", label: "Analyses & benchmarks" },
+  { id: "screenings", label: "Screening" },
+  { id: "evaluations", label: "Evaluation" },
+  { id: "companies", label: "Sample profiles" },
+  { id: "analyses", label: "Benchmarks" },
 ];
 
 export function HomeDashboard({
   onNew,
   onAnalyze,
   onDsa,
+  onProjects,
   onDomain,
   onPool,
   onAssignment,
@@ -287,15 +289,11 @@ export function HomeDashboard({
     );
   }
 
-  // Nothing saved anywhere yet: offer the three most common starting points.
+  // Nothing saved anywhere yet: offer the core starting points.
   if (
-    companies.length === 0 &&
-    analyses.length === 0 &&
     dsaRuns.length === 0 &&
     assignmentRuns.length === 0 &&
     experienceRuns.length === 0 &&
-    qaRuns.length === 0 &&
-    zgRuns.length === 0 &&
     benchmarkRuns.length === 0 &&
     bucketingRuns.length === 0 &&
     academyRuns.length === 0 &&
@@ -307,17 +305,17 @@ export function HomeDashboard({
         <EmptyState
           icon={<LayoutDashboard />}
           title="Nothing saved yet"
-          description="Company sheets you build and the runs you save from every tool appear here. Start with one of these, or pick any tool from the sidebar."
+          description="Runs you save from screening and evaluation tools appear here. Start with one of these, or pick any tool from the sidebar."
           action={
             <>
-              <Button onClick={onNew}>
-                <FileSpreadsheet /> Build company sheet
-              </Button>
-              <Button variant="outline" onClick={onDomain}>
+              <Button onClick={onDomain}>
                 <Target /> Domain shortlisting
               </Button>
-              <Button variant="outline" onClick={onAnalyze}>
-                <BarChart3 /> Analyze company sheet
+              <Button variant="outline" onClick={() => onBucketing()}>
+                <Layers /> Candidate bucketing
+              </Button>
+              <Button variant="outline" onClick={() => onAssignment()}>
+                <FileCode2 /> Assignment evaluation
               </Button>
             </>
           }
@@ -327,12 +325,12 @@ export function HomeDashboard({
   }
 
   const counts: Record<DashTab, number> = {
-    companies: companies.length + showcaseRuns.length,
-    screenings: qaRuns.length + zgRuns.length + bucketingRuns.length + academyRuns.length,
+    screenings: bucketingRuns.length + academyRuns.length,
     evaluations: assignmentRuns.length + experienceRuns.length + dsaRuns.length,
-    analyses: analyses.length + benchmarkRuns.length,
+    companies: showcaseRuns.length,
+    analyses: benchmarkRuns.length,
   };
-  const activeTab: DashTab = tab ?? TABS.find((t) => counts[t.id] > 0)?.id ?? "companies";
+  const activeTab: DashTab = tab ?? TABS.find((t) => counts[t.id] > 0)?.id ?? "screenings";
 
   return (
     <div>
@@ -350,85 +348,32 @@ export function HomeDashboard({
         aria-labelledby={`dashboard-tab-${activeTab}`}
         className="space-y-10 pt-6"
       >
-        {activeTab === "companies" ? (
-          <>
-            {companies.length > 0 ? (
-              // Combined totals and source split across every saved company.
-              <div className="grid gap-4 lg:grid-cols-[minmax(0,2fr)_minmax(0,3fr)] lg:gap-6">
-                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-1 lg:grid-rows-3">
-                  <Stat icon={<Building2 />} label="Companies" value={companies.length} />
-                  <Stat icon={<Send />} label="Candidates sent" value={agg.total} />
-                  <Stat icon={<Sparkles />} label="Reports generated" value={agg.reports} />
-                </div>
-                <Panel title="Source split" description="Candidates sent from each source, across all companies.">
-                  <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-center">
-                    <DonutChart data={toSlices(agg.buckets)} total={agg.total} />
-                    <div className="w-full min-w-0 flex-1 sm:max-w-sm">
-                      <Legend data={toSlices(agg.buckets)} total={agg.total} />
-                    </div>
-                  </div>
-                </Panel>
-              </div>
-            ) : null}
-
-            <RunGroup
-              icon={<FileSpreadsheet />}
-              title="Company sheets"
-              count={companies.length}
-              newLabel="Build company sheet"
-              onNew={onNew}
-              emptyText="No company sheets saved yet."
-            >
-              {companies.map((c) => (
-                <CompanyCard key={c.id} company={c} onDelete={() => remove(c.id)} onOpen={() => setSelectedId(c.id)} />
-              ))}
-            </RunGroup>
-
-            {/* Saved Sample profiles runs — click to reopen / continue / reload the sheet / download. */}
-            <RunGroup
-              icon={<Star />}
-              title="Sample profiles"
-              count={showcaseRuns.length}
-              newLabel="New sample profiles"
-              onNew={() => onShowcase()}
-              emptyText="No sample-profile runs saved yet."
-            >
-              {showcaseRuns.map((r) => (
-                <ShowcaseCard key={r.id} run={r} onDelete={() => removeShowcase(r.id)} onOpen={() => onShowcase(r.id)} />
-              ))}
-            </RunGroup>
-          </>
-        ) : null}
-
         {activeTab === "screenings" ? (
           <>
-            {/* Saved QA screening runs — click to reopen / resume / add a batch / export. */}
-            <RunGroup
-              icon={<ClipboardCheck />}
-              title="QA screenings"
-              count={qaRuns.length}
-              newLabel="New QA screening"
-              onNew={() => onQa()}
-              emptyText="No QA screenings saved yet."
-            >
-              {qaRuns.map((r) => (
-                <QaCard key={r.id} run={r} onDelete={() => removeQa(r.id)} onOpen={() => onQa(r.id)} />
-              ))}
-            </RunGroup>
-
-            {/* Saved Zaggle SDE 1 screening runs — click to reopen / resume / add a batch / export. */}
-            <RunGroup
-              icon={<Building2 />}
-              title="Zaggle SDE 1 screenings"
-              count={zgRuns.length}
-              newLabel="New Zaggle screening"
-              onNew={() => onZaggle()}
-              emptyText="No Zaggle SDE 1 screenings saved yet."
-            >
-              {zgRuns.map((r) => (
-                <ZgCard key={r.id} run={r} onDelete={() => removeZg(r.id)} onOpen={() => onZaggle(r.id)} />
-              ))}
-            </RunGroup>
+            {/* Domain shortlisting */}
+            <div className="rounded-xl border bg-card p-5 shadow-surface transition-colors">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-3.5">
+                  <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border bg-muted/60 text-primary">
+                    <Target className="h-5 w-5" />
+                  </span>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="font-display text-[16px] font-semibold text-foreground">Domain shortlisting</h3>
+                      <Badge variant="outline" className="border-primary/20 bg-primary/5 text-[11px] font-medium text-primary">
+                        Core screening
+                      </Badge>
+                    </div>
+                    <p className="mt-1 max-w-[70ch] text-[13px] text-muted-foreground">
+                      Rank a sheet's candidates for one domain, backed by their resume, GitHub and DSA profiles.
+                    </p>
+                  </div>
+                </div>
+                <Button onClick={onDomain} className="shrink-0 gap-2">
+                  <Target className="h-4 w-4" /> Start domain shortlisting
+                </Button>
+              </div>
+            </div>
 
             {/* Saved candidate-bucketing runs — click to reopen / resume / add a batch / export. */}
             <RunGroup
@@ -503,25 +448,49 @@ export function HomeDashboard({
                 <DsaCard key={d.id} run={d} onDelete={() => removeDsa(d.id)} onOpen={() => setOpenDsaId(d.id)} />
               ))}
             </RunGroup>
+
+            {/* Projects consolidation */}
+            <div className="rounded-xl border bg-card p-5 shadow-surface transition-colors">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                <div className="flex items-start gap-3.5">
+                  <span className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border bg-muted/60 text-primary">
+                    <FolderKanban className="h-5 w-5" />
+                  </span>
+                  <div>
+                    <h3 className="font-display text-[16px] font-semibold text-foreground">Projects consolidation</h3>
+                    <p className="mt-1 max-w-[70ch] text-[13px] text-muted-foreground">
+                      The strongest real-world projects across all candidate resumes.
+                    </p>
+                  </div>
+                </div>
+                <Button variant="outline" onClick={onProjects} className="shrink-0 gap-2">
+                  <FolderKanban className="h-4 w-4" /> Open projects consolidation
+                </Button>
+              </div>
+            </div>
+          </>
+        ) : null}
+
+        {activeTab === "companies" ? (
+          <>
+            {/* Saved Sample profiles runs — click to reopen / continue / reload the sheet / download. */}
+            <RunGroup
+              icon={<Star />}
+              title="Sample profiles"
+              count={showcaseRuns.length}
+              newLabel="New sample profiles"
+              onNew={() => onShowcase()}
+              emptyText="No sample-profile runs saved yet."
+            >
+              {showcaseRuns.map((r) => (
+                <ShowcaseCard key={r.id} run={r} onDelete={() => removeShowcase(r.id)} onOpen={() => onShowcase(r.id)} />
+              ))}
+            </RunGroup>
           </>
         ) : null}
 
         {activeTab === "analyses" ? (
           <>
-            {/* Saved company-sheet funnel analyses. */}
-            <RunGroup
-              icon={<BarChart3 />}
-              title="Company sheet funnels"
-              count={analyses.length}
-              newLabel="Analyze company sheet"
-              onNew={onAnalyze}
-              emptyText="No company sheet analyses saved yet."
-            >
-              {analyses.map((a) => (
-                <AnalysisCard key={a.id} analysis={a} onDelete={() => removeAnalysis(a.id)} onOpen={() => setOpenAnalysisId(a.id)} />
-              ))}
-            </RunGroup>
-
             {/* Saved benchmark-projects runs — click to reopen / resume / add resumes / export. */}
             <RunGroup
               icon={<Award />}

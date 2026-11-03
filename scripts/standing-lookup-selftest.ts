@@ -3,30 +3,43 @@
  *   npx tsx scripts/standing-lookup-selftest.ts
  *
  * Covers reading the paste (UUIDs, phone formats, two ids on a line, headers, blank lines,
- * repeats, the row cap), the requirements (which products they need, each item's wording,
- * skipping items with no result, catalogue order), the rows (matched by phone or UUID, UUID
- * filled from the pool, external, not eligible, unrecognised, blank), the columns, the
- * summary, the clipboard formats, and that the three standing columns match Domain
- * shortlisting's CSV exactly.
+ * repeats, the row cap), the requirements (groups, the data they need, renamed keys, each text
+ * item's wording, skipping items with no result, catalogue order), the rows (matched by phone or
+ * UUID, UUID filled from the pool, external, not eligible, unrecognised, blank), the columns, the
+ * summary, the clipboard formats, that the three standing columns match Domain shortlisting's
+ * CSV exactly, and the marks: always columns of their own — "name (max)" with the marks alone,
+ * verdict / date / recording beside them; best / latest / all attempts (per exam date, per
+ * interview attempt); a duplicated interview counted once; the pool sheet filling in.
  */
 import "./server-only-shim";
 import {
+  ASSESSED_ONLY,
+  DEFAULT_LOOKUP_OPTIONS,
   MAX_LOOKUP_ROWS,
-  REQUIREMENTS,
+  PICKABLE,
+  chooseAttempts,
   classifyCell,
   cleanRequirementKeys,
+  includesNeeded,
   internalColumns,
   lookupRows,
   lookupTable,
+  markAttempts,
+  markKeys,
   parseLookupInput,
+  picksAttempts,
+  picksInterviews,
+  picksMarks,
   productsNeeded,
   requirementLines,
   summarise,
+  textKeys,
   toHtmlTable,
   toTsv,
   type LookupData,
 } from "@/lib/pool/lookup";
 import { standingFor } from "@/lib/pool/match";
+import type { AssessmentScore } from "@/lib/pool/scores/catalogue";
 import type { AcademyRecord, CandidateStanding, Edge1Record, Edge2Record } from "@/lib/pool/types";
 
 let failed = 0;
@@ -159,32 +172,31 @@ const data: LookupData = {
 };
 
 // ── Requirements ─────────────────────────────────────────────────────────────
-check("keys are unique", new Set(REQUIREMENTS.map((r) => r.key)).size === REQUIREMENTS.length);
-check("no products for standing-only items", productsNeeded(["name", "other-products", "internal-score"]).length === 0);
-check("products in a fixed order", productsNeeded(["academy.yog", "edge1.tr1", "edge2.tr1"]).join() === "edge2,edge1,academy");
+check("keys are unique", new Set(PICKABLE.map((r) => r.key)).size === PICKABLE.length);
+check("every group has items", ["candidate", "exams", "competency", "bucket", "academy", "edge2", "edge1"].every((g) => PICKABLE.some((r) => r.group === g)));
+check("no data for standing-only items", includesNeeded(["name", "other-products", "internal-score"]).length === 0);
+check("products in a fixed order", productsNeeded(["academy.preference", "edge1.tr1", "edge2.tr2"]).join() === "edge2,edge1,academy");
+check("marks read the marks and the Academy record; profile items the profile", includesNeeded(["marks.dsa_offline", "college"]).join() === "academy,scores,profile");
 check("stale keys dropped, catalogue order", cleanRequirementKeys(["edge1.tr2", "gone", "name"]).join() === "name,edge1.tr2");
+check("renamed keys keep working", cleanRequirementKeys(["academy.yog", "academy.competency.dsa", "academy.old-bucket"]).join() === "yog,marks.old_offline,marks.dsa_interview");
+check("the old Bucket interviews item became every bucket round", cleanRequirementKeys(["academy.interviews"]).join() === "marks.bucket_a_tr1,marks.bucket_a_tr2,marks.bucket_b_tr1,marks.bucket_b_tr2,marks.bucket_c_tr1");
+check("marks / interviews / attempts detected", picksMarks(["marks.bucket_b_tr1"]) && picksInterviews(["marks.bucket_b_tr1"]) && !picksInterviews(["marks.dsa_offline"]) && !picksAttempts(["edge2.assessment"]) && !picksMarks(["college", "edge2.tr2"]));
+check("text and mark keys split", textKeys(["edge2.assessment", "name", "marks.dsa_offline"]).join() === "name" && markKeys(["edge2.assessment", "name", "marks.dsa_offline"]).join() === "marks.dsa_offline,edge2.assessment");
 {
-  const all = REQUIREMENTS.map((r) => r.key);
+  const all = PICKABLE.map((r) => r.key);
   const lines = requirementLines({ standing: mirat, records: { edge2, academy } }, all);
   const want = [
     "Name: Mirat Parmar",
+    "Year of graduation: 2025",
+    "Resume: https://example.com/mirat.pdf",
     "Also: Academy · Bucket A TR-1 Strong hire",
     "Score within stage: 93/100",
-    "Resume: https://example.com/mirat.pdf",
-    "Edge 2.0 stage: TR2 CLEARED",
-    "Edge 2.0 assessment: Offline 112.5/160 · DSA coding 86/120 · CS fundamentals 26.5/40 · SQL MCQ 12/15",
-    "Edge 2.0 TR-1: Overall technical 78/100 · DSA 8/10 · Problem solving 7.5/10 · Coding 8/10 · Debugging 7/10 · Self intro 7/10",
-    "Edge 2.0 TR-2: MERN Strong hire · GenAI Rejected",
-    "Academy interviews: Bucket A TR-1 Strong Hire (78) · Bucket A TR-2 Not cleared",
-    "Academy DSA competency: Below L1",
-    "Academy Frontend competency: L4 · 82/100 · Strong · Cleared",
-    "Academy old assessment: Bucket B",
-    "Academy DSA offline: 27th Sep - Cleared",
     "Academy active pool: Yes",
     "Academy preference: Frontend",
-    "Academy YOG: 2025",
+    "Edge 2.0 stage: TR2 CLEARED",
+    "Edge 2.0 TR-2: MERN Strong hire · GenAI Rejected",
   ];
-  check("every item worded, missing ones skipped (no Edge 1.0, no backend / SE, no placement)", JSON.stringify(lines) === JSON.stringify(want), lines);
+  check("text items worded, marks never in the cell, missing ones skipped", JSON.stringify(lines) === JSON.stringify(want), lines);
   const picked = requirementLines({ standing: uday, records: { edge1 } }, ["edge2.tr2", "edge1.tr1", "edge1.tr2", "other-products"]);
   check("only picked items with a result", JSON.stringify(picked) === JSON.stringify(["Edge 1.0 TR-1: Medium Hire", "Edge 1.0 TR-2: Rejected"]), picked);
 }
@@ -201,16 +213,138 @@ check("stale keys dropped, catalogue order", cleanRequirementKeys(["edge1.tr2", 
   check("not eligible says so", tier4.status === "not-eligible" && tier4.cells["Internal Standing"] === "Edge 1.0 · Assessment not cleared (not eligible)" && tier4.cells["Internal Stage"] === "Not eligible");
   check("unknown id is external", external.status === "external" && external.cells["Internal Standing"] === "External" && !external.cells["Internal Stage"]);
   check("unrecognised line flagged", junk.status === "unrecognised" && junk.cells["Internal Standing"] === "Not a UUID or phone number");
+  check("job eligibility: the pool's eligible / not cleared / unknown", byUuid.eligibility === "eligible" && byPhone.eligibility === "eligible" && tier4.eligibility === "not-eligible" && external.eligibility === null && junk.eligibility === null);
 
-  const t = lookupTable(rows, { phoneColumn: input.counts.phones > 0, requirements: true });
-  check("columns", t.headers.join("|") === "UUID|Phone|Internal Standing|Internal Stage|Internal Product|Requirements", t.headers);
+  const t = lookupTable(rows, { phoneColumn: input.counts.phones > 0, keys: ["edge2.tr2", "edge1.tr1"] });
+  check("columns", t.headers.join("|") === "UUID|Phone|Internal Standing|Internal Stage|Internal Product|Job Eligibility|Requirements", t.headers);
+  check("Job Eligibility column", t.rows.map((r) => r["Job Eligibility"]).join("|") === "Eligible|Eligible||Not eligible||", t.rows.map((r) => r["Job Eligibility"]));
   check("one output row per pasted row", t.rows.length === rows.length);
-  check("no phone column for a UUID-only paste", lookupTable(lookupRows(parseLookupInput(U1), data, []), { phoneColumn: false, requirements: false }).headers.join("|") === "UUID|Internal Standing|Internal Stage|Internal Product");
+  check("no phone column for a UUID-only paste", lookupTable(lookupRows(parseLookupInput(U1), data, []), { phoneColumn: false, keys: [] }).headers.join("|") === "UUID|Internal Standing|Internal Stage|Internal Product|Job Eligibility");
   const multi = lookupRows(parseLookupInput(U1), data, ["edge2.stage", "edge2.tr2"]);
-  check("Requirements is one column, one line per item", lookupTable(multi, { phoneColumn: false, requirements: true }).rows[0].Requirements === "Edge 2.0 stage: TR2 CLEARED\nEdge 2.0 TR-2: MERN Strong hire · GenAI Rejected");
+  check("Requirements is one column, one line per item", lookupTable(multi, { phoneColumn: false, keys: ["edge2.stage", "edge2.tr2"] }).rows[0].Requirements === "Edge 2.0 stage: TR2 CLEARED\nEdge 2.0 TR-2: MERN Strong hire · GenAI Rejected");
+  const each = lookupTable(multi, { phoneColumn: false, keys: ["name", "edge2.stage"], options: { ...DEFAULT_LOOKUP_OPTIONS, layout: "columns" } });
+  check("…or a column each", each.headers.slice(5).join("|") === "Name|Edge 2.0 stage" && each.rows[0]["Edge 2.0 stage"] === "TR2 CLEARED", each.headers);
 
   const s = summarise(rows);
-  check("summary", JSON.stringify(s) === JSON.stringify({ looked: 4, internal: 2, byTier: { 1: 1, 2: 1, 3: 0 }, notEligible: 1, external: 1, unrecognised: 1, byProduct: { edge2: 1, edge1: 1, academy: 0 } }), s);
+  check("summary", JSON.stringify(s) === JSON.stringify({ looked: 4, internal: 2, byTier: { 1: 1, 2: 1, 3: 0 }, notEligible: 1, assessedOnly: 0, external: 1, unrecognised: 1, byProduct: { edge2: 1, edge1: 1, academy: 0 } }), s);
+}
+
+// ── Marks: columns of their own ─────────────────────────────────────────────
+{
+  const sc = (
+    assessment: AssessmentScore["assessment"],
+    score: number,
+    maxScore: number,
+    takenOn: string | null,
+    result: string,
+    sourceKey: string,
+    attempt = "1",
+    recordingUrl: string | null = null,
+  ): AssessmentScore => ({ assessment, score, maxScore, takenOn, result, passed: null, recordingUrl, sourceKey, attempt });
+  const scores = [
+    sc("old_offline", 153.5, 230, null, "Bucket B", "old_offline", "cycle-4"),
+    sc("dsa_offline", 30, 130, "2026-09-27", "Not Qualified", "dsa_offline@2026-09-27"),
+    sc("dsa_offline", 92, 130, "2026-10-11", "Qualified", "dsa_offline@2026-10-11"),
+    sc("dsa_offline", 57, 130, "2026-10-25", "Qualified", "dsa_offline@2026-10-25"),
+    sc("bucket_a_tr1", 65, 100, "2026-02-12", "", "bucket_a_tr1:scheduled", "2026-02-12", "https://drive.google.com/a1"),
+    sc("bucket_b_tr1", 8.5, 15, "2026-03-07", "Moved to TR2", "bucket_b_tr1:audit", "2026-03-07"),
+    sc("bucket_b_tr1", 12.33, 15, "2026-08-21", "Cleared", "bucket_b_tr1:app", "2026-08-21", "https://drive.google.com/b1"),
+    sc("bucket_b_tr1", 12.33, 15, "2026-08-21", "Good – Hire · Cleared", "bucket_b_tr1:audit", "2026-08-21"),
+  ];
+  const d: LookupData = { ...data, scores: { "11": scores } };
+  const rowsFor = (keys: string[]) => lookupRows(parseLookupInput(U1), d, keys);
+  const keys = ["marks.old_offline", "marks.dsa_offline", "marks.frontend_interview", "marks.bucket_a_tr1", "marks.bucket_b_tr1", "marks.bucket_c_tr1", "edge2.assessment"];
+  const rows = rowsFor(keys);
+  const best = lookupTable(rows, { phoneColumn: false, keys });
+  const base = "UUID|Internal Standing|Internal Stage|Internal Product|Job Eligibility";
+  check(
+    "marks: header = name (max), verdict and recording beside it",
+    best.headers.join("|") ===
+      [
+        base,
+        "Old offline assessment (230)",
+        "Old offline assessment – verdict",
+        "DSA offline exam (130)",
+        "DSA offline exam – verdict",
+        "Frontend competency interview (100)",
+        "Frontend competency interview – verdict",
+        "Frontend competency interview – recording",
+        "Bucket A TR-1 (100)",
+        "Bucket A TR-1 – verdict",
+        "Bucket A TR-1 – recording",
+        "Bucket B TR-1 (15)",
+        "Bucket B TR-1 – verdict",
+        "Bucket B TR-1 – recording",
+        "Bucket C TR-1",
+        "Bucket C TR-1 – verdict",
+        "Bucket C TR-1 – recording",
+        "Edge 2.0 offline (160)",
+        "Edge 2.0 DSA coding (120)",
+        "Edge 2.0 CS fundamentals (40)",
+        "Edge 2.0 SQL MCQ (15)",
+        "Edge 2.0 SQL coding (15)",
+      ].join("|"),
+    best.headers,
+  );
+  const v = best.rows[0];
+  check("a marks cell holds only the marks obtained", v["DSA offline exam (130)"] === "92" && v["Old offline assessment (230)"] === "153.5" && v["Edge 2.0 offline (160)"] === "112.5" && v["Edge 2.0 SQL coding (15)"] === "", v);
+  check("verdicts in their own columns", v["DSA offline exam – verdict"] === "Qualified" && v["Old offline assessment – verdict"] === "Bucket B");
+  check("an interview not in the interview sheets: the pool sheet's score and verdict", v["Frontend competency interview (100)"] === "82" && v["Frontend competency interview – verdict"] === "L4 · Strong · Cleared" && v["Frontend competency interview – recording"] === "");
+  check("Bucket A TR-1 without a verdict in its sheet: the pool sheet's", v["Bucket A TR-1 (100)"] === "65" && v["Bucket A TR-1 – verdict"] === "Strong Hire" && v["Bucket A TR-1 – recording"] === "https://drive.google.com/a1");
+  check("the same interview in two sheets counted once, keeping the recording", v["Bucket B TR-1 (15)"] === "12.33" && v["Bucket B TR-1 – verdict"] === "Cleared" && v["Bucket B TR-1 – recording"] === "https://drive.google.com/b1");
+  check("no result = empty cells", v["Bucket C TR-1"] === "" && v["Bucket C TR-1 – verdict"] === "");
+
+  const latest = lookupTable(rows, { phoneColumn: false, keys: ["marks.dsa_offline"], options: { ...DEFAULT_LOOKUP_OPTIONS, attempts: "latest", date: true } });
+  check("latest attempt, with its date", latest.rows[0]["DSA offline exam (130)"] === "57" && latest.rows[0]["DSA offline exam – date"] === "25 Oct 2026", latest.rows[0]);
+  const plain = lookupTable(rows, { phoneColumn: false, keys: ["marks.dsa_offline", "marks.old_offline"], options: { ...DEFAULT_LOOKUP_OPTIONS, verdict: false, date: true } });
+  check("marks alone (verdict off); the old offline assessment's date is its cycle", plain.headers.slice(5).join("|") === "Old offline assessment (230)|Old offline assessment – date|DSA offline exam (130)|DSA offline exam – date" && plain.rows[0]["Old offline assessment – date"] === "Cycle 4", plain.headers);
+
+  const all = lookupTable(rowsFor(["marks.dsa_offline", "marks.bucket_b_tr1"]), { phoneColumn: false, keys: ["marks.dsa_offline", "marks.bucket_b_tr1"], options: { ...DEFAULT_LOOKUP_OPTIONS, attempts: "all", verdict: false, recording: false } });
+  check(
+    "all attempts: an exam per date, an interview per attempt (oldest first)",
+    all.headers.slice(5).join("|") === "DSA offline exam 27 Sep 2026 (130)|DSA offline exam 11 Oct 2026 (130)|DSA offline exam 25 Oct 2026 (130)|Bucket B TR-1 #1 (15)|Bucket B TR-1 #2 (15)",
+    all.headers,
+  );
+  check("…with the marks of each", ["30", "92", "57", "8.5", "12.33"].every((x, i) => all.rows[0][all.headers[5 + i]] === x), all.rows[0]);
+  check("chooseAttempts: a tie goes to the latest", chooseAttempts(markAttempts({ standing: mirat, records: {}, scores: [sc("dsa_offline", 50, 130, "2026-09-27", "", "a"), sc("dsa_offline", 50, 130, "2026-10-25", "", "b")] }, ["marks.dsa_offline"])["marks.dsa_offline"], "best")[0].takenOn === "2026-10-25");
+  const other = lookupTable(lookupRows(parseLookupInput(U1), { ...data, scores: { "11": [sc("dsa_offline", 60, 140, "2026-11-01", "", "x")] } }, ["marks.dsa_offline"]), { phoneColumn: false, keys: ["marks.dsa_offline"] });
+  check("an exam set out of another maximum: that maximum in the header, the cell still only the marks", other.headers.includes("DSA offline exam (140)") && other.rows[0]["DSA offline exam (140)"] === "60", other);
+  const two = `${U1}
+${U2}`;
+  const odd = lookupTable(
+    lookupRows(parseLookupInput(two), { ...data, scores: { "11": [sc("dsa_offline", 60, 140, "2026-11-01", "", "x")], "12": [sc("dsa_offline", 57, 130, "2026-10-25", "", "y")] } }, ["marks.dsa_offline"]),
+    { phoneColumn: false, keys: ["marks.dsa_offline"] },
+  );
+  check("a column mixing maxima keeps the usual one; only the odd mark says its maximum", odd.rows[0]["DSA offline exam (130)"] === "60/140" && odd.rows[1]["DSA offline exam (130)"] === "57", odd.rows);
+  const tag = lookupTable(lookupRows(parseLookupInput(U1), data, ["marks.dsa_offline"]), { phoneColumn: false, keys: ["marks.dsa_offline"] });
+  check("no marks stored: the pool sheet's tag as the verdict, no marks", tag.rows[0]["DSA offline exam (130)"] === "" && tag.rows[0]["DSA offline exam – verdict"] === "27th Sep - Cleared", tag.rows[0]);
+  const mixed = lookupTable(rowsFor(["name", "marks.dsa_offline"]), { phoneColumn: false, keys: ["name", "marks.dsa_offline"] });
+  check("text in Requirements, marks still in columns", mixed.headers.slice(5).join("|") === "Requirements|DSA offline exam (130)|DSA offline exam – verdict" && mixed.rows[0].Requirements === "Name: Mirat Parmar");
+}
+
+// ── Assessed, not in the eligible pool ──────────────────────────────────────
+{
+  const asha = { candidateId: 14, phone: "9000000099", userId: U3, name: "Asha", eligible: false };
+  const marks: AssessmentScore[] = [
+    { assessment: "dsa_offline", score: 41, maxScore: 130, takenOn: "2026-10-25", result: "Not Qualified", passed: false, recordingUrl: null, sourceKey: "dsa_offline@2026-10-25", attempt: "1" },
+  ];
+  const d: LookupData = { ...data, assessed: { [`u:${U3}`]: asha, "p:9000000099": asha }, scores: { "14": marks } };
+  const keys = ["name", "internal-score", "other-products", "marks.dsa_offline"];
+  const rows = lookupRows(parseLookupInput([U3, "9000000099", U1].join("\n")), d, keys);
+  const [byId, byPhone, pool] = rows;
+  check(
+    "assessed outside the pool: their own standing text, Not eligible, no stage or product",
+    byId.status === "assessed" && byId.eligibility === "not-eligible" && byId.cells["Internal Standing"] === ASSESSED_ONLY && !byId.cells["Internal Stage"] && !byId.cells["Internal Product"],
+    byId,
+  );
+  check("…matched by phone too, the UUID filled in", byPhone.status === "assessed" && byPhone.uuid === U3, byPhone);
+  check("…their name and marks; no stage score or other products", byId.requirements.join("|") === "Name: Asha" && byId.marks["marks.dsa_offline"]?.[0]?.score === 41, byId);
+  check("a pool person is still matched first", pool.status === "internal" && pool.eligibility === "eligible");
+  const t = lookupTable(rows, { phoneColumn: true, keys });
+  check("their row in the table", t.rows[0]["Job Eligibility"] === "Not eligible" && t.rows[0]["DSA offline exam (130)"] === "41" && t.rows[2]["Job Eligibility"] === "Eligible", t.rows[0]);
+  const s = summarise(rows);
+  check("summary counts them apart", s.assessedOnly === 2 && s.internal === 1 && s.external === 0 && s.notEligible === 0, s);
+  check("without the assessed list they are external", lookupRows(parseLookupInput(U3), data, [])[0].status === "external");
 }
 
 // ── Same three columns as Domain shortlisting ────────────────────────────────

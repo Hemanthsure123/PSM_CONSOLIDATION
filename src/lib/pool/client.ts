@@ -1,3 +1,5 @@
+import type { LookupInclude } from "@/lib/pool/lookup";
+import type { AssessmentKey, AssessmentScore, CandidateProfile, EligibilityFilter, PersonRef, ScoreImportResult, ScoresSummary } from "@/lib/pool/scores/catalogue";
 import type { CandidateStanding, PersonRecords, PoolSummary, Product, SyncResult } from "@/lib/pool/types";
 
 /** Browser-side calls to /api/pool/*. Each one resolves to data or a readable error — never throws. */
@@ -38,15 +40,23 @@ export interface StandingLookup {
   /** False when the database isn't set up — everyone is treated as external. */
   configured: boolean;
   standings: Record<string, CandidateStanding>;
+  /** People with marks who aren't in the eligible pool ("p:<phone>" / "u:<userId>"): assessed, not eligible. */
+  assessed: Record<string, PersonRef>;
   /** The assessment records per candidate id, for the products asked for ({} when none). */
   records: Record<string, PersonRecords>;
+  /** Final scores / profiles per candidate id (asked with "scores" / "profile"). */
+  scores?: Record<string, AssessmentScore[]>;
+  profiles?: Record<string, CandidateProfile>;
 }
+
+const obj = <T>(v: unknown): T | undefined => (v && typeof v === "object" ? (v as T) : undefined);
 
 /**
  * Internal standings for a batch of people, by phone first and user id second. `include` adds
- * those products' assessment records (Standing lookup's Requirements).
+ * those products' assessment records, their marks and their profile
+ * (Standing lookup's Requirements).
  */
-export const lookupPoolStandings = (people: { phone?: string; userId?: string }[], include: Product[] = []) =>
+export const lookupPoolStandings = (people: { phone?: string; userId?: string }[], include: LookupInclude[] = []) =>
   call<StandingLookup>(
     "/api/pool/lookup",
     { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(include.length ? { people, include } : { people }) },
@@ -55,7 +65,40 @@ export const lookupPoolStandings = (people: { phone?: string; userId?: string }[
         ? {
             configured: b.configured !== false,
             standings: b.standings as Record<string, CandidateStanding>,
-            records: b.records && typeof b.records === "object" ? (b.records as Record<string, PersonRecords>) : {},
+            assessed: obj<Record<string, PersonRef>>(b.assessed) ?? {},
+            records: obj<Record<string, PersonRecords>>(b.records) ?? {},
+            scores: obj(b.scores),
+            profiles: obj(b.profiles),
           }
         : undefined,
+  );
+
+export const fetchScoresSummary = () => call<ScoresSummary>("/api/pool/scores", undefined, (b) => b.summary as ScoresSummary | undefined);
+
+/**
+ * Import one assessment CSV. A refused import still returns its result (ok=false, error,
+ * needsConfirm when it would remove many stored scores — resend with allowShrink).
+ */
+export function uploadScoresCsv(file: File, opts: { examDate?: string; allowShrink?: boolean } = {}) {
+  const form = new FormData();
+  form.set("file", file);
+  if (opts.examDate) form.set("examDate", opts.examDate);
+  if (opts.allowShrink) form.set("allowShrink", "1");
+  return call<ScoreImportResult>("/api/pool/scores/upload", { method: "POST", body: form }, (b) => b.result as ScoreImportResult | undefined);
+}
+
+/** Refetch one readable assessment tab from Google Sheets. */
+export const syncScoresSheet = (sheet: string, allowShrink = false) =>
+  call<ScoreImportResult>(
+    "/api/pool/scores/sync",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ sheet, allowShrink }) },
+    (b) => b.result as ScoreImportResult | undefined,
+  );
+
+/** Everyone assessed by college / year of graduation / minimum marks / job eligibility (the lookup's Find mode). */
+export const findPoolPeople = (filter: { colleges?: string[]; yogs?: number[]; assessment?: AssessmentKey; minScore?: number; eligibility?: EligibilityFilter }) =>
+  call<{ people: PersonRef[]; total: number; truncated: boolean }>(
+    "/api/pool/find",
+    { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(filter) },
+    (b) => (Array.isArray(b.people) ? { people: b.people as PersonRef[], total: Number(b.total ?? 0), truncated: b.truncated === true } : undefined),
   );

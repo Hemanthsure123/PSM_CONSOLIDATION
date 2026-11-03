@@ -87,6 +87,13 @@ check("academy Bucket A TR-2 cleared → tier 1", sa("a-1").tier === 1);
 check("academy Frontend L4 → tier 1", sa("a-2").tier === 1 && /Frontend L4/.test(sa("a-2").label), sa("a-2").label);
 check("academy Bucket C TR-1 cleared → tier 2", sa("a-3").tier === 2);
 check("academy A TR-1 low hire + DSA exam cleared → tier 3, eligible", sa("a-4").tier === 3 && sa("a-4").eligible);
+{
+  // Oct 2026: the sheet's phone column was renamed "StudentNumber".
+  const renamed = academyTable.map((r, i) => (i === 1 ? r.map((c) => (c === "Number" ? "StudentNumber" : c)) : r));
+  const rn = parseAcademy(renamed);
+  check("academy phone column renamed StudentNumber", rn.records.length === 4 && rn.records[0].phone === "7000000001" && !rn.missingColumns.length, rn.missingColumns);
+  check("detect academy with StudentNumber", detectProduct(renamed) === "academy");
+}
 
 // ── CSV product detection ───────────────────────────────────────────────────
 check("detect edge2", detectProduct(edge2Table) === "edge2");

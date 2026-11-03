@@ -6,6 +6,7 @@ import {
   BarChart3,
   Briefcase,
   Building2,
+  ChevronDown,
   ClipboardCheck,
   Code2,
   Database,
@@ -61,7 +62,7 @@ const VIEWS: Record<View, ViewMeta> = {
   },
   lookup: {
     label: "Standing lookup",
-    description: "Paste UUIDs or phone numbers to get each candidate's internal standing, stage and product from the Edge 2.0, Edge 1.0 and Academy assessments, with any assessment results you pick.",
+    description: "Paste UUIDs or phone numbers — or find everyone from a college, a graduation year or above a mark — to get each candidate's internal standing, stage, product and job eligibility, with the assessment results and final marks you pick.",
     icon: UserSearch,
   },
   wizard: {
@@ -124,13 +125,34 @@ const VIEWS: Record<View, ViewMeta> = {
   },
 };
 
+interface NavSection {
+  group?: string;
+  icon?: LucideIcon;
+  views: View[];
+  collapsible?: boolean;
+}
+
 /** Tools grouped by the job they do in the placement pipeline. */
-const NAV: { group?: string; views: View[] }[] = [
-  { views: ["home", "pool", "lookup"] },
-  { group: "Company sheets", views: ["wizard", "analyze", "showcase"] },
-  { group: "Screening", views: ["domain", "qa", "zaggle", "bucketing", "academy"] },
-  { group: "Evaluation", views: ["assignment", "experience", "dsa", "projects"] },
-  { group: "Reference", views: ["benchmarks"] },
+const NAV: NavSection[] = [
+  { views: ["home", "pool", "lookup", "showcase"] },
+  {
+    group: "Screening",
+    icon: Target,
+    views: ["domain", "bucketing", "academy"],
+    collapsible: true,
+  },
+  {
+    group: "Evaluation",
+    icon: FileCode2,
+    views: ["assignment", "experience", "dsa", "projects"],
+    collapsible: true,
+  },
+  {
+    group: "Reference",
+    icon: Award,
+    views: ["benchmarks"],
+    collapsible: false,
+  },
 ];
 
 export function AppShell() {
@@ -161,6 +183,27 @@ export function AppShell() {
   const [pendingView, setPendingView] = React.useState<View | null>(null);
   const [navOpen, setNavOpen] = React.useState(false);
   const mainRef = React.useRef<HTMLElement>(null);
+
+  const [openSections, setOpenSections] = React.useState<Record<string, boolean>>({
+    Screening: true,
+    Evaluation: true,
+  });
+
+  // Automatically expand group when an inner view is active
+  React.useEffect(() => {
+    for (const section of NAV) {
+      if (section.group && section.views.includes(view)) {
+        setOpenSections((prev) => (prev[section.group!] ? prev : { ...prev, [section.group!]: true }));
+      }
+    }
+  }, [view]);
+
+  const toggleSection = (group: string) => {
+    setOpenSections((prev) => ({
+      ...prev,
+      [group]: !prev[group],
+    }));
+  };
 
   /** Open a tool from the sidebar: a fresh run (saved runs reopen from the dashboard). */
   const openFresh = React.useCallback((v: View) => {
@@ -222,36 +265,81 @@ export function AppShell() {
         </span>
       </button>
 
-      <div className="mt-4 flex-1 space-y-5 overflow-y-auto px-3 pb-6">
-        {NAV.map((section, i) => (
-          <div key={section.group ?? i}>
-            {section.group ? <p className="mb-1 px-2.5 text-xs font-medium text-muted-foreground">{section.group}</p> : null}
-            <ul className="space-y-0.5">
-              {section.views.map((v) => {
-                const item = VIEWS[v];
-                const Icon = item.icon;
-                const active = v === view;
-                return (
-                  <li key={v}>
-                    <button
-                      type="button"
-                      onClick={() => navigate(v)}
-                      aria-current={active ? "page" : undefined}
+      <div className="mt-4 flex-1 space-y-4 overflow-y-auto px-3 pb-6">
+        {NAV.map((section, i) => {
+          const isCollapsible = Boolean(section.group && section.collapsible);
+          const isOpen = section.group ? (openSections[section.group] ?? true) : true;
+          const SectionIcon = section.icon;
+
+          return (
+            <div key={section.group ?? i} className="space-y-1">
+              {section.group ? (
+                isCollapsible ? (
+                  <button
+                    type="button"
+                    onClick={() => toggleSection(section.group!)}
+                    className="group flex w-full items-center justify-between rounded-lg px-2.5 py-1.5 text-left text-xs font-semibold tracking-wider text-muted-foreground uppercase transition-colors hover:bg-muted/60 hover:text-foreground focus-visible:outline-none focus-visible:ring-[2px] focus-visible:ring-primary/25"
+                    aria-expanded={isOpen}
+                  >
+                    <span className="flex items-center gap-2">
+                      {SectionIcon ? (
+                        <SectionIcon className="h-3.5 w-3.5 text-muted-foreground/80 transition-colors group-hover:text-primary" />
+                      ) : null}
+                      <span>{section.group}</span>
+                    </span>
+                    <ChevronDown
                       className={cn(
-                        "group relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/25",
-                        active ? "bg-accent font-medium text-accent-foreground" : "text-[hsl(218_25%_32%)] hover:bg-muted hover:text-foreground",
+                        "h-3.5 w-3.5 text-muted-foreground/70 transition-transform duration-200 group-hover:text-foreground",
+                        !isOpen && "-rotate-90",
                       )}
-                    >
-                      {active ? <span className="absolute -left-3 top-1.5 bottom-1.5 w-[3px] rounded-r-full bg-primary" aria-hidden /> : null}
-                      <Icon className={cn("h-4 w-4 shrink-0", active ? "text-primary" : "text-muted-foreground group-hover:text-foreground")} />
-                      <span className="truncate">{item.label}</span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          </div>
-        ))}
+                    />
+                  </button>
+                ) : (
+                  <p className="flex items-center gap-2 px-2.5 py-1 text-xs font-semibold tracking-wider text-muted-foreground uppercase">
+                    {SectionIcon ? <SectionIcon className="h-3.5 w-3.5 text-muted-foreground/80" /> : null}
+                    <span>{section.group}</span>
+                  </p>
+                )
+              ) : null}
+
+              {isOpen ? (
+                <ul className={cn("space-y-0.5", section.collapsible && "pl-1.5")}>
+                  {section.views.map((v) => {
+                    const item = VIEWS[v];
+                    const Icon = item.icon;
+                    const active = v === view;
+                    return (
+                      <li key={v}>
+                        <button
+                          type="button"
+                          onClick={() => navigate(v)}
+                          aria-current={active ? "page" : undefined}
+                          className={cn(
+                            "group relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-primary/25",
+                            active
+                              ? "bg-accent font-medium text-accent-foreground"
+                              : "text-[hsl(218_25%_32%)] hover:bg-muted hover:text-foreground",
+                          )}
+                        >
+                          {active ? (
+                            <span className="absolute -left-3 top-1.5 bottom-1.5 w-[3px] rounded-r-full bg-primary" aria-hidden />
+                          ) : null}
+                          <Icon
+                            className={cn(
+                              "h-4 w-4 shrink-0 transition-colors",
+                              active ? "text-primary" : "text-muted-foreground group-hover:text-foreground",
+                            )}
+                          />
+                          <span className="truncate">{item.label}</span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              ) : null}
+            </div>
+          );
+        })}
       </div>
     </nav>
   );

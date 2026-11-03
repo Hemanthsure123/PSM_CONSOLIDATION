@@ -39,7 +39,7 @@ export const Panel = React.forwardRef<HTMLElement, PanelProps>(
                 {description ? <p className="mt-0.5 text-[13px] leading-relaxed text-muted-foreground">{description}</p> : null}
               </div>
             </div>
-            {actions ? <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
+            {actions ? <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">{actions}</div> : null}
           </header>
         ) : null}
         <div className={cn(flush ? "" : hasHeader ? "px-5 pb-5" : "p-5", bodyClassName)}>{children}</div>

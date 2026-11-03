@@ -11,7 +11,8 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "npx tsx scripts/db-migrate.ts",
     "db:status": "npx tsx scripts/db-migrate.ts --status",
-    "pool:sync": "npx tsx scripts/pool-sync.ts"
+    "pool:sync": "npx tsx scripts/pool-sync.ts",
+    "scores:import": "npx tsx scripts/scores-import.ts"
   },
   "dependencies": {
     "@google-cloud/bigquery": "^7.9.1",

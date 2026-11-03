@@ -25,13 +25,15 @@ import {
 export type Table = string[][];
 
 const ERROR_CELL = /^#(N\/A|REF!|VALUE!|DIV\/0!|NAME\?|NUM!|NULL!|ERROR!)$/i;
-const cell = (row: string[] | undefined, i: number | undefined): string => {
+/** One cell, whitespace collapsed; spreadsheet error cells (#N/A, #REF! …) and "-" read as empty. */
+export const cell = (row: string[] | undefined, i: number | undefined): string => {
   if (!row || i === undefined || i < 0) return "";
   const v = String(row[i] ?? "").replace(/\s+/g, " ").trim();
   return ERROR_CELL.test(v) || v === "-" ? "" : v;
 };
-const squeeze = (h: string) => h.toLowerCase().replace(/\(.*?\)/g, "").replace(/[^a-z0-9]+/g, "");
-const num = (v: string): number | null => {
+/** A header compared loosely: lower-case, "(…)" dropped, letters and digits only. */
+export const squeeze = (h: string) => h.toLowerCase().replace(/\(.*?\)/g, "").replace(/[^a-z0-9]+/g, "");
+export const num = (v: string): number | null => {
   if (!v) return null;
   const n = Number(v.replace(/,/g, ""));
   return Number.isFinite(n) ? n : null;
@@ -278,9 +280,13 @@ export function parseLevel(raw: string): number | null {
   return m ? Number(m[1]) : null;
 }
 
+/** The Academy sheet's phone column ("Number", renamed "StudentNumber" in Oct 2026). */
+const ACADEMY_PHONE = ["Number", "StudentNumber", "Mobile Number"];
+const academyHeader = (table: Table) => ACADEMY_PHONE.reduce((h, p) => (h >= 0 ? h : findHeader(table, ["UID", p])), -1);
+
 export function parseAcademy(table: Table): ParsedPool<AcademyRecord> {
   const required = ["UID", "Number"];
-  const h = findHeader(table, required);
+  const h = academyHeader(table);
   if (h < 0) return { product: "academy", records: [], rowsRead: 0, missingColumns: required.filter((n) => !table.slice(0, 5).some((r) => col(r, n) >= 0)), issues: [] };
   const head = table[h].map((x) => String(x ?? ""));
   // The competency groups ("Frontend (Last Updated …)", "DSA", …) sit one row above
@@ -299,7 +305,7 @@ export function parseAcademy(table: Table): ParsedPool<AcademyRecord> {
     oldChecks: col(head, "Old Assessment Checks"),
     yog: col(head, "YOG"),
     name: col(head, "Name"),
-    phone: col(head, "Number"),
+    phone: col(head, ...ACADEMY_PHONE),
     placement: head.findIndex((x) => /^previous placement info/i.test(x.trim())),
     preference: col(head, "Student Preference"),
     active: col(head, "Active Pool"),
@@ -397,7 +403,7 @@ export function parseAcademy(table: Table): ParsedPool<AcademyRecord> {
 export function detectProduct(table: Table): Product | null {
   if (findHeader(table, ["Candidate Stage", "phone"]) >= 0) return "edge2";
   if (findHeader(table, ["User ID", "Assesment Selection Status"]) >= 0) return "edge1";
-  if (findHeader(table, ["UID", "Number"]) >= 0) return "academy";
+  if (academyHeader(table) >= 0) return "academy";
   return null;
 }
 

@@ -17,7 +17,7 @@ flowchart LR
     RH["Route handlers /api/*"]
     SA["Server actions"]
     LIB["Server libraries<br/>resume · LLM router · GitHub · DSA · reports"]
-    POOL["Eligible pool<br/>lib/pool: parse · standing · sync · queries"]
+    POOL["Eligible pool + assessment marks<br/>lib/pool: parse · standing · sync · queries · scores/"]
     FC[("Disk cache<br/>.cache/github-inspect · 24 h")]
   end
   PG[("Supabase Postgres<br/>schema placement")]
@@ -54,7 +54,7 @@ flowchart LR
 
 | Store | What | Lifetime | Source of truth? |
 |---|---|---|---|
-| **Postgres (Supabase), schema `placement`** | The eligible pool: internal assessment records for Edge 2.0, Edge 1.0 and Academy, plus the sync log | Permanent | Yes for the app; the Google Sheets stay the upstream source and the pool can be rebuilt from them |
+| **Postgres (Supabase), schema `placement`** | The eligible pool: internal assessment records for Edge 2.0, Edge 1.0 and Academy, plus the sync log; the final score of every Academy exam and interview (with verdict, date and recording) for everyone assessed, their year of graduation / college, and the job-eligibility tag ([`assessment-scores.md`](./assessment-scores.md)) | Permanent | Yes for the app; the Google Sheets and their CSV exports stay the upstream source and both can be rebuilt from them |
 | Browser IndexedDB / localStorage | Saved runs of every tool | Until the user clears site data | Yes, per browser profile |
 | Google Drive | PDF reports | Permanent | Yes |
 | `.cache/github-inspect/` (disk) | GitHub inspections, project reviews, DSA profiles, trust reviews | 24 h | No; it only saves quota |
@@ -144,6 +144,11 @@ erDiagram
 | `academy_rounds` | person × bucket × round | Bucket A/B/C TR-1 and TR-2 score, status and cleared flag (Bucket C has no TR-2, enforced by a check) |
 | `academy_competency` | person × subject | Frontend / DSA / Software / Backend: score, verdict band, clearance, level L1–L5 (0 = below L1) |
 | `sync_runs` | sync | Product, sheet or CSV, status, counts (read / new / updated / unchanged / skipped), the first 200 row issues, error, who triggered it |
+| `assessments` | assessment | The marks catalogue: label, product, usual maximum (migration 004) |
+| `assessment_scores` | person × export × attempt | ONE final score per assessment attempt: score, maximum, date, the sheet's verdict, passed, recording link (migration 005); an export (`source_key`, e.g. `dsa_offline@2026-10-25`) is replaced as a whole on re-import |
+| `candidate_profiles` | person | Year of graduation, college, degree, department, and the rank of the source that wrote them |
+| `score_imports` | marks import | Export, sheet or CSV, status, counts (read / new / updated / unchanged / removed / skipped / people added), row issues, error |
+| `assessed_people` (view) | person the assessments know | Job eligibility (`eligible`, `job_eligibility`: Eligible = in the eligible pool with an eligible standing), pool standing, Academy pool, year / college, score counts (migration 005) |
 | `schema_migrations` | applied migration | Version, checksum, time |
 | `candidate_standing` (materialized view) | person | Best standing across products, plus every product's standing as JSON |
 | `automation.jobs` / `job_requests` / `job_events` / `job_candidates` | sheet-automation run / trigger / event / candidate | Durable jobs with a lease and a step checkpoint, idempotent triggers, the event log, per-candidate checkpoints (migration 003; [`automation.md`](./automation.md)) |
@@ -176,8 +181,11 @@ so changing a rule re-derives every standing on the next sync.
 | `candidate_standing(phone)`, `candidate_standing(user_id)`, both partial `where … is not null` | Domain shortlisting's batch lookup. The planner combines them with a BitmapOr |
 | `sync_runs(product, started_at desc)` | The latest run per product, and the sync history |
 | Primary keys of the record and child tables | Upserts and joins by `candidate_id` |
+| `assessment_scores (candidate_id, source_key, attempt)` primary key | The lookup's marks by candidate id (the leading column) and the import's upsert |
 
-Nothing else is indexed. The product tables hold thousands of rows and are read whole for the dashboard
+Nothing else is indexed. The marks tables follow the same rule: an import reads its own export's rows
+and the college / year filter scans `candidate_profiles` — a few thousand rows each, about a millisecond
+as a sequential scan. The product tables hold thousands of rows and are read whole for the dashboard
 aggregates, so more indexes would only slow the writes. Phone columns are `text` with a
 `CHECK (phone ~ '^[0-9]{10}$')` (migration 002) so that `phone = any($1::text[])` uses the index without
 a cast.
@@ -225,6 +233,9 @@ refuses to run if one does. Every change is a new numbered file.
 |---|---|
 | `001_eligible_pool.sql` | Schema, enums, tables, view, indexes, RLS |
 | `002_phone_text_and_rls.sql` | Phone columns `char(10)` → `text` (index-friendly lookups); RLS on `schema_migrations` |
+| `003_automation.sql` | Schema `automation`: durable jobs for the sheet automation ([`automation.md`](./automation.md)) |
+| `004_assessment_scores.sql` | Assessment marks and profiles: `assessments`, `assessment_scores`, `candidate_profiles`, `score_imports` (RLS on all four) |
+| `005_recordings_and_eligibility.sql` | `assessment_scores.recording_url` (http/https, ≤ 500 chars); the view `assessed_people` with the job-eligibility tag (`security_invoker`) |
 
 ## 4. Keeping the pool current
 
@@ -252,7 +263,7 @@ sequenceDiagram
   |---|---|---|
   | Edge 2.0 | "Assessment Cleared- 2027 Pool" | Reference resume links from "All Assessment Cleared PII DATA - 2027" |
   | Edge 1.0 | "Sheet2" | |
-  | Academy | "> 8LPA Assessed Pool" | |
+  | Academy | "> 8LPA Assessed Pool" | The phone column may be "Number" or "StudentNumber" |
 
 - **Columns are found by header name**, so column order and extra columns don't matter. A missing
   required column fails the sync with its name.
@@ -265,6 +276,10 @@ sequenceDiagram
   - `npm run pool:sync` (all products, or one with `--csv=file`) for a scheduler.
 - **Reference resume links stay reference only.** Domain shortlisting always screens the resume in the
   sheet being shortlisted.
+- **Assessment marks** are imported separately — CSV exports on the Eligible pool screen (or
+  `npm run scores:import`), and the readable tabs by refetch. Each export replaces only its own scores.
+  Everyone assessed keeps their marks; who is eligible for job opportunities follows the pool (the
+  view `assessed_people`); see [`assessment-scores.md`](./assessment-scores.md).
 
 ## 5. Standing rules and the shortlist order
 
@@ -315,7 +330,11 @@ so.
 | `/api/pool/summary` | GET | Counts per product and stage, tracks, buckets, levels, sources, recent syncs |
 | `/api/pool/sync` | POST `{product}` | Refetch one product from its sheet |
 | `/api/pool/upload` | POST multipart `file`, `product` | Upsert a CSV export (`auto` detects the product) |
-| `/api/pool/lookup` | POST `{people:[{phone,userId}], include?}` | Standings for up to 20,000 people (phone first, then user id); `include: ["edge2","edge1","academy"]` adds those products' records per candidate id (Standing lookup) |
+| `/api/pool/lookup` | POST `{people:[{phone,userId}], include?}` | Standings for up to 20,000 people (phone first, then user id); always returns the people with marks outside the pool (`assessed`); `include` adds products' records per candidate id (`"edge2"`, `"edge1"`, `"academy"`), final marks with verdict / date / recording (`"scores"`) and year / college (`"profile"`) (Standing lookup) |
+| `/api/pool/find` | POST `{colleges?, yogs?, assessment?, minScore?, eligibility?}` | Everyone assessed by college (contains, any), year of graduation, minimum marks and job eligibility — the lookup's Find mode |
+| `/api/pool/scores` | GET | Marks, eligible people and recordings per assessment, people with marks (eligible / not), colleges and years, readable tabs, recent imports |
+| `/api/pool/scores/upload` | POST multipart `file`, `examDate?`, `allowShrink?` | Import one assessment CSV (kind read from its headers); 409 when it would remove many stored scores |
+| `/api/pool/scores/sync` | POST `{sheet, allowShrink?}` | Refetch one readable assessment tab |
 | `/api/automation/jobs` | POST / GET | Sheet automation: queue a control row's run (Bearer `AUTOMATION_TOKEN`), list recent jobs |
 | `/api/automation/jobs/<id>` | GET | One job: status, step, progress, result, `?events=1` for its log |
 | `/api/health` | GET | Liveness, the only route open without sign-in; `?db=1` adds a `select 1` shared for 30 s |
@@ -372,7 +391,7 @@ These matter for deployment:
 | `DIRECT_URL` | Session pooler (5432) for migrations |
 | `APP_BASIC_AUTH` | Built-in sign-in, if no host-level sign-in is used |
 | `AUTOMATION_TOKEN`, `AUTOMATION_WORKER=on`, `AUTOMATION_SPREADSHEET_IDS` | The sheet automation's API secret, its background worker, and the sheets allowed to start jobs |
-| `POOL_EDGE2_SHEET` / `_TAB` (and `EDGE1`, `ACADEMY`) | Only if a pool sheet moves |
+| `POOL_EDGE2_SHEET` / `_TAB` (and `EDGE1`, `ACADEMY`), `SCORES_INTERVIEWS_SHEET`, `SCORES_OLD_OFFLINE_SHEET` | Only if a pool or assessment sheet moves |
 | `GITHUB_CACHE_DIR` | A persistent volume path if the host's disk is ephemeral (otherwise the cache just starts empty after a deploy) |
 | Google service account, model keys, `GITHUB_TOKEN` | As for local runs |
 
