@@ -1,6 +1,6 @@
 "use server";
 
-import { getSheets, extractSpreadsheetId } from "@/lib/sheets";
+import { getSheets, extractSpreadsheetId, withSheetsRetry } from "@/lib/sheets";
 import { coerceCell } from "@/lib/utils";
 import type { ActionResult } from "@/lib/types";
 
@@ -26,24 +26,26 @@ export async function previewAcademySheet(url: string): Promise<ActionResult<Aca
   const spreadsheetId = extractSpreadsheetId(url);
   if (!spreadsheetId) return { ok: false, error: "That doesn't look like a Google Sheets link. Paste the full URL." };
   try {
-    const sheets = getSheets();
-    const meta = await sheets.spreadsheets.get({
-      spreadsheetId,
-      fields: "properties.title,sheets.properties(title,gridProperties(rowCount))",
-    });
-    const tabs = (meta.data.sheets ?? []).map((t) => ({ name: t.properties?.title ?? "", rowCount: t.properties?.gridProperties?.rowCount ?? 0 })).filter((t) => t.name);
-    const heads = tabs.length
-      ? await sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges: tabs.map((t) => `${quote(t.name)}!1:4`), valueRenderOption: "FORMATTED_VALUE" })
-      : { data: { valueRanges: [] } };
-    const ranges = heads.data.valueRanges ?? [];
-    return {
-      ok: true,
-      data: {
+    return await withSheetsRetry(async () => {
+      const sheets = getSheets();
+      const meta = await sheets.spreadsheets.get({
         spreadsheetId,
-        title: meta.data.properties?.title ?? "Untitled",
-        tabs: tabs.map((t, i) => ({ ...t, rows: grid(ranges[i]?.values as unknown[][]) })),
-      },
-    };
+        fields: "properties.title,sheets.properties(title,gridProperties(rowCount))",
+      });
+      const tabs = (meta.data.sheets ?? []).map((t) => ({ name: t.properties?.title ?? "", rowCount: t.properties?.gridProperties?.rowCount ?? 0 })).filter((t) => t.name);
+      const heads = tabs.length
+        ? await sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges: tabs.map((t) => `${quote(t.name)}!1:4`), valueRenderOption: "FORMATTED_VALUE" })
+        : { data: { valueRanges: [] } };
+      const ranges = heads.data.valueRanges ?? [];
+      return {
+        ok: true,
+        data: {
+          spreadsheetId,
+          title: meta.data.properties?.title ?? "Untitled",
+          tabs: tabs.map((t, i) => ({ ...t, rows: grid(ranges[i]?.values as unknown[][]) })),
+        },
+      };
+    });
   } catch (err) {
     return { ok: false, error: describe(err) };
   }
@@ -54,16 +56,18 @@ export async function readAcademyTabs(url: string, tabs: string[]): Promise<Acti
   if (!spreadsheetId) return { ok: false, error: "Invalid Google Sheets link." };
   if (!tabs.length) return { ok: true, data: { title: "", grids: [] } };
   try {
-    const sheets = getSheets();
-    const [meta, res] = await Promise.all([
-      sheets.spreadsheets.get({ spreadsheetId, fields: "properties.title" }),
-      sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges: tabs.map(quote), valueRenderOption: "FORMATTED_VALUE" }),
-    ]);
-    const ranges = res.data.valueRanges ?? [];
-    return {
-      ok: true,
-      data: { title: meta.data.properties?.title ?? "Untitled", grids: tabs.map((name, i) => ({ name, values: grid(ranges[i]?.values as unknown[][]) })) },
-    };
+    return await withSheetsRetry(async () => {
+      const sheets = getSheets();
+      const [meta, res] = await Promise.all([
+        sheets.spreadsheets.get({ spreadsheetId, fields: "properties.title" }),
+        sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges: tabs.map(quote), valueRenderOption: "FORMATTED_VALUE" }),
+      ]);
+      const ranges = res.data.valueRanges ?? [];
+      return {
+        ok: true,
+        data: { title: meta.data.properties?.title ?? "Untitled", grids: tabs.map((name, i) => ({ name, values: grid(ranges[i]?.values as unknown[][]) })) },
+      };
+    });
   } catch (err) {
     return { ok: false, error: describe(err) };
   }
@@ -77,5 +81,8 @@ function describe(err: unknown): string {
   }
   if (/not found|404|unable to parse range/i.test(message)) return "Sheet or tab not found — check the link and that the tab still exists.";
   if (/invalid_grant|invalid.?jwt|account not found/i.test(message)) return "Google authentication failed — check the service-account credentials in .env.local.";
+  if (/premature close|econnreset|socket hang up|fetch failed|timeout/i.test(message)) {
+    return "A temporary network glitch occurred while connecting to Google. Please try again in a few moments.";
+  }
   return `Could not read the sheet: ${message}`;
 }

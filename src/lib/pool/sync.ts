@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash } from "node:crypto";
 import type { PoolClient } from "pg";
-import { getSheets } from "@/lib/sheets";
+import { getSheets, withSheetsRetry } from "@/lib/sheets";
 import { query, transaction } from "@/lib/db/client";
 import { parsePool, parseResumeReference, type Table } from "@/lib/pool/parse";
 import { poolSource } from "@/lib/pool/sources";
@@ -28,43 +28,45 @@ const MAX_LOGGED_ISSUES = 200;
 export type SyncInput = { mode: "sheet" } | { mode: "csv"; fileName: string; table: Table };
 
 export async function readTab(spreadsheetId: string, tab: string): Promise<Table> {
-  const sheets = getSheets();
-  try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: `'${tab.replace(/'/g, "''")}'`,
-      valueRenderOption: "FORMATTED_VALUE",
-    });
-    return (res.data.values ?? []).map((r) => r.map((c) => String(c ?? "")));
-  } catch (err) {
-    // If exact tab name fails, check spreadsheet metadata for near matches (e.g. trailing letters, whitespace)
+  return withSheetsRetry(async () => {
+    const sheets = getSheets();
     try {
-      const meta = await sheets.spreadsheets.get({
+      const res = await sheets.spreadsheets.values.get({
         spreadsheetId,
-        fields: "sheets.properties.title",
+        range: `'${tab.replace(/'/g, "''")}'`,
+        valueRenderOption: "FORMATTED_VALUE",
       });
-      const titles = (meta.data.sheets ?? []).map((s) => s.properties?.title).filter((t): t is string => Boolean(t));
-      const targetSqueezed = tab.toLowerCase().replace(/[^a-z0-9]+/g, "");
-      const matched =
-        titles.find((t) => t.toLowerCase().replace(/[^a-z0-9]+/g, "") === targetSqueezed) ||
-        titles.find(
-          (t) =>
-            t.toLowerCase().replace(/[^a-z0-9]+/g, "").includes(targetSqueezed) ||
-            targetSqueezed.includes(t.toLowerCase().replace(/[^a-z0-9]+/g, "")),
-        );
-      if (matched && matched !== tab) {
-        const res2 = await sheets.spreadsheets.values.get({
+      return (res.data.values ?? []).map((r) => r.map((c) => String(c ?? "")));
+    } catch (err) {
+      // If exact tab name fails, check spreadsheet metadata for near matches (e.g. trailing letters, whitespace)
+      try {
+        const meta = await sheets.spreadsheets.get({
           spreadsheetId,
-          range: `'${matched.replace(/'/g, "''")}'`,
-          valueRenderOption: "FORMATTED_VALUE",
+          fields: "sheets.properties.title",
         });
-        return (res2.data.values ?? []).map((r) => r.map((c) => String(c ?? "")));
+        const titles = (meta.data.sheets ?? []).map((s) => s.properties?.title).filter((t): t is string => Boolean(t));
+        const targetSqueezed = tab.toLowerCase().replace(/[^a-z0-9]+/g, "");
+        const matched =
+          titles.find((t) => t.toLowerCase().replace(/[^a-z0-9]+/g, "") === targetSqueezed) ||
+          titles.find(
+            (t) =>
+              t.toLowerCase().replace(/[^a-z0-9]+/g, "").includes(targetSqueezed) ||
+              targetSqueezed.includes(t.toLowerCase().replace(/[^a-z0-9]+/g, "")),
+          );
+        if (matched && matched !== tab) {
+          const res2 = await sheets.spreadsheets.values.get({
+            spreadsheetId,
+            range: `'${matched.replace(/'/g, "''")}'`,
+            valueRenderOption: "FORMATTED_VALUE",
+          });
+          return (res2.data.values ?? []).map((r) => r.map((c) => String(c ?? "")));
+        }
+      } catch {
+        // Ignore fallback error and throw original
       }
-    } catch {
-      // Ignore fallback error and throw original
+      throw err;
     }
-    throw err;
-  }
+  });
 }
 
 const hashOf = (r: PoolRecord) => createHash("sha1").update(JSON.stringify({ v: RULES_VERSION, r })).digest("hex");

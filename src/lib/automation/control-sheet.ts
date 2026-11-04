@@ -124,7 +124,7 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const transient = (err: unknown) => {
   const e = err as { code?: number | string; response?: { status?: number } };
   const status = Number(e.response?.status ?? e.code);
-  return status === 429 || status >= 500 || /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket/i.test(String((err as Error)?.message));
+  return status === 429 || status >= 500 || /ECONNRESET|ETIMEDOUT|ENOTFOUND|socket|premature close|fetch failed/i.test(String((err as Error)?.message));
 };
 
 /** Retry a Sheets call on rate limits / server errors / network blips (3 tries). */

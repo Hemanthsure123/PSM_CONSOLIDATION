@@ -1,6 +1,6 @@
 "use server";
 
-import { getSheets, extractSpreadsheetId } from "@/lib/sheets";
+import { getSheets, extractSpreadsheetId, withSheetsRetry } from "@/lib/sheets";
 import { coerceCell } from "@/lib/utils";
 import type { ActionResult } from "@/lib/types";
 
@@ -40,40 +40,42 @@ export async function listSubsheets(
   }
 
   try {
-    const sheets = getSheets();
-    const meta = await sheets.spreadsheets.get({
-      spreadsheetId,
-      fields: "properties.title,sheets.properties(title,gridProperties(rowCount))",
+    return await withSheetsRetry(async () => {
+      const sheets = getSheets();
+      const meta = await sheets.spreadsheets.get({
+        spreadsheetId,
+        fields: "properties.title,sheets.properties(title,gridProperties(rowCount))",
+      });
+
+      const title = meta.data.properties?.title ?? "Untitled";
+      const tabs = meta.data.sheets ?? [];
+
+      // Batch-read just the first row of every tab to get headers.
+      const ranges = tabs
+        .map((t) => t.properties?.title)
+        .filter((t): t is string => Boolean(t))
+        .map((t) => `'${t.replace(/'/g, "''")}'!1:1`);
+
+      const headerRes = ranges.length
+        ? await sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges })
+        : { data: { valueRanges: [] } };
+
+      // valueRanges come back in the same order as the requested ranges (which is
+      // tab order, since every tab has a title).
+      const valueRanges = headerRes.data.valueRanges ?? [];
+      const subsheets: SubsheetMeta[] = tabs.map((t, i) => {
+        const name = t.properties?.title ?? `Sheet${i + 1}`;
+        const headers = (valueRanges[i]?.values?.[0] ?? []).map((c) => coerceCell(c));
+        const totalRows = t.properties?.gridProperties?.rowCount ?? 0;
+        return {
+          name,
+          headers: headers.filter((h) => h !== ""),
+          rowCount: Math.max(0, totalRows - 1),
+        };
+      });
+
+      return { ok: true, data: { spreadsheetId, title, subsheets } };
     });
-
-    const title = meta.data.properties?.title ?? "Untitled";
-    const tabs = meta.data.sheets ?? [];
-
-    // Batch-read just the first row of every tab to get headers.
-    const ranges = tabs
-      .map((t) => t.properties?.title)
-      .filter((t): t is string => Boolean(t))
-      .map((t) => `'${t.replace(/'/g, "''")}'!1:1`);
-
-    const headerRes = ranges.length
-      ? await sheets.spreadsheets.values.batchGet({ spreadsheetId, ranges })
-      : { data: { valueRanges: [] } };
-
-    // valueRanges come back in the same order as the requested ranges (which is
-    // tab order, since every tab has a title).
-    const valueRanges = headerRes.data.valueRanges ?? [];
-    const subsheets: SubsheetMeta[] = tabs.map((t, i) => {
-      const name = t.properties?.title ?? `Sheet${i + 1}`;
-      const headers = (valueRanges[i]?.values?.[0] ?? []).map((c) => coerceCell(c));
-      const totalRows = t.properties?.gridProperties?.rowCount ?? 0;
-      return {
-        name,
-        headers: headers.filter((h) => h !== ""),
-        rowCount: Math.max(0, totalRows - 1),
-      };
-    });
-
-    return { ok: true, data: { spreadsheetId, title, subsheets } };
   } catch (err) {
     return { ok: false, error: describeSheetsError(err) };
   }
@@ -93,34 +95,36 @@ export async function readSubsheet(
   }
 
   try {
-    const sheets = getSheets();
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId,
-      range: `'${sheetName.replace(/'/g, "''")}'`,
-      valueRenderOption: "FORMATTED_VALUE",
-    });
-
-    const matrix = (res.data.values ?? []) as unknown[][];
-    if (matrix.length < 1) {
-      return { ok: false, error: `Subsheet "${sheetName}" is empty.` };
-    }
-
-    const headers = (matrix[0] ?? []).map((c) => coerceCell(c));
-    const rows: Record<string, string>[] = [];
-    for (let r = 1; r < matrix.length; r++) {
-      const raw = matrix[r] ?? [];
-      const rec: Record<string, string> = {};
-      let any = false;
-      headers.forEach((h, i) => {
-        if (!h) return;
-        const v = coerceCell(raw[i]);
-        rec[h] = v;
-        if (v) any = true;
+    return await withSheetsRetry(async () => {
+      const sheets = getSheets();
+      const res = await sheets.spreadsheets.values.get({
+        spreadsheetId,
+        range: `'${sheetName.replace(/'/g, "''")}'`,
+        valueRenderOption: "FORMATTED_VALUE",
       });
-      if (any) rows.push(rec);
-    }
 
-    return { ok: true, data: { name: sheetName, headers: headers.filter(Boolean), rows } };
+      const matrix = (res.data.values ?? []) as unknown[][];
+      if (matrix.length < 1) {
+        return { ok: false, error: `Subsheet "${sheetName}" is empty.` };
+      }
+
+      const headers = (matrix[0] ?? []).map((c) => coerceCell(c));
+      const rows: Record<string, string>[] = [];
+      for (let r = 1; r < matrix.length; r++) {
+        const raw = matrix[r] ?? [];
+        const rec: Record<string, string> = {};
+        let any = false;
+        headers.forEach((h, i) => {
+          if (!h) return;
+          const v = coerceCell(raw[i]);
+          rec[h] = v;
+          if (v) any = true;
+        });
+        if (any) rows.push(rec);
+      }
+
+      return { ok: true, data: { name: sheetName, headers: headers.filter(Boolean), rows } };
+    });
   } catch (err) {
     return { ok: false, error: describeSheetsError(err) };
   }
@@ -141,6 +145,9 @@ function describeSheetsError(err: unknown): string {
   }
   if (/invalid_grant|invalid.?jwt|account not found/i.test(message)) {
     return "Google authentication failed — check the service-account credentials in .env.local.";
+  }
+  if (/premature close|econnreset|socket hang up|fetch failed|timeout/i.test(message)) {
+    return "A temporary network glitch occurred while connecting to Google. Please try again in a few moments.";
   }
   return `Could not read the sheet: ${message}`;
 }
