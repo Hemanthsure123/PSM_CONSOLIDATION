@@ -126,7 +126,12 @@ function makeWorld(opts: { server: (method: string, path: string, body: Record<s
     PropertiesService: { getScriptProperties: () => ({ getProperty: (k: string) => props.get(k) ?? null }) },
     LockService: { getDocumentLock: () => ({ tryLock: () => true, releaseLock: () => undefined }) },
     // A simulated clock: sleeping advances it, so waiting for a "sleeping" app takes no real time.
-    Utilities: { getUuid: () => `00000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`, sleep: (ms: number) => void (clock += ms) },
+    Utilities: {
+      getUuid: () => `00000000-0000-4000-8000-${String(++uuid).padStart(12, "0")}`,
+      sleep: (ms: number) => void (clock += ms),
+      formatDate: () => "5 Nov 10:00",
+    },
+    Session: { getScriptTimeZone: () => "Asia/Kolkata" },
     ScriptApp: {
       getProjectTriggers: () => triggers.map((t) => ({ getHandlerFunction: () => t.fn })),
       deleteTrigger: (t: { getHandlerFunction: () => string }) => triggers.splice(triggers.findIndex((x) => x.fn === t.getHandlerFunction()), 1),
@@ -143,7 +148,11 @@ function makeWorld(opts: { server: (method: string, path: string, body: Record<s
         return { getResponseCode: () => res.code, getContentText: () => JSON.stringify(res.body) };
       },
     },
-    Date: { now: () => clock },
+    Date: class extends Date {
+      static now() {
+        return clock;
+      }
+    },
     JSON,
     String,
     Math,
@@ -243,6 +252,26 @@ const edit = (w: ReturnType<typeof makeWorld>, row: number, value: string) => {
   w.fn("psmAutomationSweep")();
   const post = w.calls.find((c) => c.method === "post");
   check("the sweep sends it once the app is up — same request id (no duplicate job)", post?.body?.requestId === requestId, post);
+}
+{
+  // Up but unable to take jobs (e.g. AUTOMATION_TOKEN missing on the server): says so, keeps retrying.
+  let configured = false;
+  const w = makeWorld({
+    server: (m, p) =>
+      p === "/api/health" ? { code: 200, body: {} } : !configured ? { code: 503, body: { error: "The automation isn't configured on this server (AUTOMATION_TOKEN)." } } : ok202(m, p),
+  });
+  w.fn("psmAutomationSetup")();
+  const cols = w.fn("psmColumns_")(w.sheet);
+  w.sheet.set(3, cols.instructions, "Subsheets: Edge Applied\nFocus: Flutter");
+  edit(w, 3, "start");
+  const details = String(w.sheet.cell(3, cols.details));
+  const requestId = details.match(/request (\S+)/)?.[1];
+  check("5xx: stays PENDING, the row shows the app's reason", w.sheet.cell(3, cols.status) === "PENDING" && details.includes("HTTP 503") && details.includes("AUTOMATION_TOKEN"), details);
+  check("…and keeps its request id for the sweep", Boolean(requestId) && requestId === w.calls.find((c) => c.method === "post")?.body?.requestId);
+  configured = true;
+  w.fn("psmAutomationSweep")();
+  const posts = w.calls.filter((c) => c.method === "post");
+  check("the sweep re-sends the same request once the app can take it", posts.length === 2 && posts[1].body?.requestId === requestId, posts);
 }
 
 // ── sweep ────────────────────────────────────────────────────────────────────

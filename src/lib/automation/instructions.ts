@@ -29,10 +29,11 @@ const LABELS: { key: "tabs" | "focus" | "github" | "dsa" | "top" | "sheet" | "ex
   { key: "github", re: /^(?:git\s*hub)(?:\s*inspection|\s*screening|\s*check)?\s*[:=\-–—]?\s*(.*)$/i },
   { key: "dsa", re: /^(?:dsa|coding\s*profiles?|competitive\s*programming)(?:\s*screening|\s*check)?\s*[:=\-–—]?\s*(.*)$/i },
   { key: "top", re: /^(?:top|shortlist(?:\s*count)?|profiles?(?:\s*required)?)\s*[:=\-–—]?\s*(\d{1,3})\s*(?:profiles?|candidates?)?\s*$/i },
-  { key: "experience", re: /^(?:experience(?:\s*in\s*domain)?|domain\s*experience)\s*[:=\-–—]?\s*(.*)$/i },
+  // A separator is required, so a sentence such as "Experience with Node.js preferred" stays focus text.
+  { key: "experience", re: new RegExp(String.raw`^(?:experience(?:\s*in\s*(?:the\s*)?(?:screening\s*)?domain)?|domain\s*experience)${LABEL_SEP}(.+)$`, "i") },
 ];
 
-const OFF = /\b(?:no|off|skip|none|false|disable[d]?|not\s+needed|don'?t)\b/i;
+const OFF = /\b(?:no|off|skip|none|false|disable[d]?|not\s+(?:needed|required|mandatory|necessary)|don'?t)\b/i;
 const SHEET_URL = /https?:\/\/docs\.google\.com\/spreadsheets\/d\/[A-Za-z0-9_-]+[^\s]*/i;
 
 /** "(all candidates)" / "(domain-fit candidates only)" / "no" → the GitHub scope. */
@@ -59,6 +60,22 @@ export function dsaGatesOf(text: string): DsaGates {
   g.minRating.codechef = rating(/\b(?:cc|codechef)\b\D{0,10}?(\d{3,4})\b/i);
   g.minRating.leetcode = rating(/\b(?:lc|leetcode)\b\s*(?:rating)?\D{0,8}?(\d{4})\b/i);
   return g;
+}
+
+/**
+ * The control row's dropdown columns (Subsheets, Github, DSA, Experience in Screening Domain) are
+ * settings: a filled one always applies. They are added after the free text as labeled lines, and
+ * parseInstructions keeps the last value of each setting, so a word in the text ("GitHub", "DSA",
+ * "experience") never overrides what the row's columns say.
+ */
+export function withColumnSettings(instructions: string, cols: { subsheets?: string; github?: string; dsa?: string; experience?: string }): string {
+  const settings = [
+    cols.subsheets && `Subsheets: ${cols.subsheets}`,
+    cols.github && `GitHub: ${cols.github}`,
+    cols.dsa && `DSA: ${cols.dsa}`,
+    cols.experience && `Experience in domain: ${cols.experience}`,
+  ].filter((s): s is string => Boolean(s));
+  return [instructions.trim(), ...settings].filter(Boolean).join("\n");
 }
 
 /** Split the cell into items and read each one. */
@@ -90,13 +107,15 @@ export function parseInstructions(cell: string): ParsedInstructions {
     const value = (hit.m![1] ?? "").trim();
     switch (hit.key) {
       case "tabs":
-        out.tabs.push(...splitTabList(value));
+        // The last list wins (the row's Subsheets column comes after the free text).
+        out.tabs = splitTabList(value);
         break;
       case "focus":
         focus.push(value);
         break;
       case "github":
         out.github = githubScopeOf(value || "yes");
+        out.review = null;
         out.githubExplicit = true;
         if (/\b(?:no|off|skip|without)\s*(?:code\s*)?review\b/i.test(value)) out.review = false;
         else if (/\bcode\s*review\b|\breview\b/i.test(value) && !OFF.test(value.replace(/\(.*?\)/g, ""))) out.review = true;
@@ -110,9 +129,7 @@ export function parseInstructions(cell: string): ParsedInstructions {
         out.topN = clampTop(Number(hit.m![1]));
         break;
       case "experience":
-        if (value && !OFF.test(value) && !/not\s*req/i.test(value)) {
-          out.requireExperience = true;
-        }
+        out.requireExperience = Boolean(value) && !OFF.test(value) && !/not\s*req/i.test(value);
         break;
       case "sheet":
         out.sheetUrl = sheet?.[0] ?? null;

@@ -6,7 +6,7 @@ import { storePdf } from "@/lib/report-storage";
 import { buildJdTechSpec, checkGithubAccess, describeJdTechSpec } from "@/lib/github-analysis";
 import { mapWithConcurrency } from "@/lib/rate-limit";
 import { GITHUB_BATCH_SIZE, MIN_DOMAIN_SCORE, combinedScore, compareShortlist, gateFailure, githubEvidenceScore, priorityGroup, shortlistBar } from "@/lib/domain-scoring";
-import { candidateSignals } from "@/lib/domain-signals";
+import { candidateKeywordSignals, candidateSignals } from "@/lib/domain-signals";
 import { isAssessed } from "@/lib/pool/match";
 import type { InternalStanding } from "@/lib/pool/types";
 import { bestRating, type DsaGates } from "@/lib/dsa-scoring";
@@ -230,6 +230,7 @@ export async function buildDomainReport(
   for (const o of outcomes) {
     o.rankScore = combinedScore(o, useGithub, checkPresentation, useDsa);
     o.signals = candidateSignals(o, signalCtx);
+    o.signalsUsed = candidateKeywordSignals(o, signalCtx);
   }
   const base = { shortlisted: cards.length, considered, candidates: outcomes, excluded, limitedToTopN: limitToTopN };
 

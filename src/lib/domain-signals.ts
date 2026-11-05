@@ -113,7 +113,7 @@ export function candidateKeywordSignals(c: DomainCandidateOutcome, ctx: SignalsC
 }
 
 export function candidateSignals(c: DomainCandidateOutcome, ctx: SignalsContext): string[] {
-  const out: string[] = [candidateKeywordSignals(c, ctx)];
+  const out: string[] = [];
   const parts = rankParts(c, ctx.useGithub, ctx.checkPresentation, ctx.useDsa);
   const prio = c.priority && c.priority > 0 ? PRIORITY_TEXT[c.priority as 1 | 2 | 3] : "";
 

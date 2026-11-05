@@ -9,7 +9,7 @@
 import "./server-only-shim";
 import { CERTIFICATION_ONLY_CAP, SINGLE_EVIDENCE_CAP, UNGROUNDED_CAP, githubIdentity, groundDomainFit } from "@/lib/domain-evidence";
 import { combinedScore, compareShortlist, gateFailure, githubEvidenceScore, githubStrengthNotOnResume, rankParts } from "@/lib/domain-scoring";
-import { candidateSignals, type SignalsContext } from "@/lib/domain-signals";
+import { candidateKeywordSignals, candidateSignals, type SignalsContext } from "@/lib/domain-signals";
 import { domainCsv, type DomainCsvInput } from "@/lib/domain-csv";
 import { buildDomainReport } from "@/actions/domain";
 import { EMPTY_PLATFORM, type DsaSnapshot } from "@/lib/dsa-types";
@@ -265,6 +265,8 @@ const outcome = (c: DomainCandidate, o: Partial<DomainCandidateOutcome> = {}): D
   ok("resume quotes with their source", s.some((l) => l.startsWith("Resume (project): “built a MERN")) && s.some((l) => l.startsWith("Resume — Redis: “Redis pub/sub”")), s);
   ok("GitHub line with repos, commits and proven tech", s.some((l) => l.startsWith("GitHub 70/100 (+14 rank points): 2 domain repos, 120 commits in 2 years; their code proves React, Node.js")), s);
   ok("mandatory and experience lines", s.includes("Meets every mandatory requirement") && s.some((l) => l.startsWith("Domain experience: Backend intern")), s);
+  const used = candidateKeywordSignals(c, ctx());
+  ok("Signals Used: the evidence kinds as keywords, apart from the Signals lines", used.startsWith("Resume, GitHub") && used.includes("Domain Experience (Backend intern at Acme") && !s.includes(used), used);
   ok("no DSA / presentation lines when they weren't screened", !s.some((l) => l.startsWith("DSA") || l.startsWith("Resume presentation")), s);
 
   const notChecked = candidateSignals(c, ctx({ poolChecked: false }));
@@ -341,6 +343,8 @@ const input = (o: Partial<DomainCsvInput> & Pick<DomainCsvInput, "result">): Dom
   ok("complete CSV adds the audit columns last", base.headers.slice(-3).join("|") === "Scored By|Phone|User ID", base.headers.slice(-3));
   ok("headers are unique", new Set(base.headers).size === base.headers.length);
   ok("Signals are bullet lines", base.rows[0].Signals === "• Shortlisted at rank 1 of 1\n• Domain fit 82/100", base.rows[0].Signals);
+  const withUsed = domainCsv(input({ result: { ...plain, candidates: plain.candidates.map((c, i) => (i === 0 ? { ...c, signalsUsed: "Resume, GitHub" } : c)) } })).rows[0];
+  ok("Signals Used is its own column, next to the detailed Signals", withUsed["Signals Used"] === "Resume, GitHub" && withUsed.Signals === base.rows[0].Signals, withUsed);
   ok("external when the pool was checked", base.rows[0]["Internal Standing"] === "External" && base.rows[0]["Matched In Pool By"] === undefined);
   ok("'Not checked' when it wasn't", domainCsv(input({ result: plain, poolChecked: false })).rows[0]["Internal Standing"] === "Not checked");
   ok("rank score only for ranked rows", base.rows[0]["Rank Score"] === "82" && base.rows[1]["Rank Score"] === "");

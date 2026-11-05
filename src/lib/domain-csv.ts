@@ -284,8 +284,8 @@ export function domainCsv(input: DomainCsvInput): { headers: string[]; rows: Rec
     "Domain Experience": c.experience,
     "Resume Presentation Score": String(c.presentationScore),
     "Resume Presentation Notes": c.presentationNotes,
-    "Signals Used": c.signals?.[0] ?? "",
-    Signals: c.signals?.[0] ?? "",
+    "Signals Used": c.signalsUsed ?? "",
+    Signals: (c.signals ?? []).map((s) => `• ${s}`).join("\n"),
     "Scored By": c.scoredBy ?? "",
   }));
   for (const u of unscored) {
@@ -294,8 +294,8 @@ export function domainCsv(input: DomainCsvInput): { headers: string[]; rows: Rec
       ...internalColumns(u.internal, input.poolChecked),
       Status: u.status,
       "Not Shortlisted Because": u.reason,
-      "Signals Used": `${u.status}: ${u.reason}`,
-      Signals: `${u.status}: ${u.reason}`,
+      "Signals Used": u.status,
+      Signals: `• ${u.status}: ${u.reason}`,
     });
   }
   return { headers, rows };

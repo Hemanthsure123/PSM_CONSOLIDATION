@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { databaseConfigured, describeDbError } from "@/lib/db/client";
 import { allowedSpreadsheets, allowedTabs, checkToken, jobSummary } from "@/lib/automation/api";
 import { writeControlStatus } from "@/lib/automation/control-sheet";
-import { finishJob, requestStopJob } from "@/lib/automation/store";
+import { cancelPendingJob, requestStopJob } from "@/lib/automation/store";
 import { kickWorker } from "@/lib/automation/worker";
 
 export const runtime = "nodejs";
@@ -34,17 +34,18 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: "No active or pending job found for this row." }, { status: 404 });
     }
 
-    // If job was still queued/pending, finalize it right away
-    if (job.status === "pending") {
-      await finishJob(job.id, "system", "completed", null);
-      await writeControlStatus(job, {
+    // Still queued: finish it at once (nothing was screened). If a worker took it meanwhile, it
+    // sees the stop flag and delivers what it screened — handled like a running job below.
+    const cancelled = job.status === "pending" ? await cancelPendingJob(job.id) : null;
+    if (cancelled) {
+      await writeControlStatus(cancelled, {
         status: "completed",
         step: "done",
-        progress: { ...job.progress, note: "Cancelled before screening started" },
+        progress: { ...cancelled.progress, note: "Stopped before screening started — nothing was screened" },
         result: null,
         error: null,
       });
-      return NextResponse.json({ message: "Job was pending and has been stopped.", job: jobSummary(job) }, { status: 200 });
+      return NextResponse.json({ message: "Job was pending and has been stopped.", job: jobSummary(cancelled) }, { status: 200 });
     }
 
     // If processing, kick worker so it checks stopRequested and delivers results screened so far

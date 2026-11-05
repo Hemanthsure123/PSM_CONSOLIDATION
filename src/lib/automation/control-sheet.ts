@@ -1,6 +1,7 @@
 import "server-only";
 import { getSheetsWriter } from "@/lib/sheets";
 import { columnLetter } from "@/lib/automation/delivery-rules";
+import { withColumnSettings } from "@/lib/automation/instructions";
 import { detailsLink, detailsText, statusLabel, type DetailsInput } from "@/lib/automation/sheet-text";
 import type { ControlRequest } from "@/lib/automation/types";
 
@@ -95,20 +96,11 @@ export async function readControlRequest(spreadsheetId: string, tab: string, row
   const dsa = at(layout.dsa);
   const experience = at(layout.experience);
 
-  // Combine discrete columns if set and not already explicitly inside instructions
-  const extraLines: string[] = [];
-  if (subsheets && !/sub\s*-?\s*sheets?/i.test(instructions)) extraLines.push(`Subsheets: ${subsheets}`);
-  if (github && !/git\s*hub/i.test(instructions)) extraLines.push(`GitHub: ${github}`);
-  if (dsa && !/\bdsa\b|leetcode|codeforces|codechef/i.test(instructions)) extraLines.push(`DSA: ${dsa}`);
-  if (experience && !/experience/i.test(instructions)) extraLines.push(`Experience in domain: ${experience}`);
-
-  const combinedInstructions = [...extraLines, instructions].filter(Boolean).join("\n");
-
   return {
     spreadsheetId,
     sheetName: tab,
     row,
-    instructions: combinedInstructions,
+    instructions: withColumnSettings(instructions, { subsheets, github, dsa, experience }),
     subsheets,
     github,
     dsa,

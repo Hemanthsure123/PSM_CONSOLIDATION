@@ -11,28 +11,17 @@ import { env } from "@/lib/env";
  */
 const globalForSheets = globalThis as unknown as { sheets?: sheets_v4.Sheets; sheetsWriter?: sheets_v4.Sheets };
 
-// Configure global retry policy on googleapis HTTP transport for network blips & socket drops
+// Transport-level retries for every googleapis call, kept to gaxios's own bounded rules: at most 3
+// retries, on a dropped connection (no response: "Premature close", ECONNRESET …), 408, 429 or 5xx.
+// Only reads are retried here — a write (POST: values.append, batchUpdate, Drive upload) whose
+// response was lost may already have happened, so retrying it could add a row twice. No custom
+// shouldRetry: it would replace gaxios's attempt / method / status checks and retry without end.
 google.options({
   retryConfig: {
     retry: 3,
-    retryDelay: 500,
-    httpMethodsToRetry: ["GET", "POST", "HEAD", "OPTIONS"],
-    statusCodesToRetry: [
-      [100, 199],
-      [429, 429],
-      [500, 599],
-    ],
     noResponseRetries: 3,
-    shouldRetry: (err: any) => {
-      const msg = String(err?.message ?? "").toLowerCase();
-      return (
-        msg.includes("premature close") ||
-        msg.includes("econnreset") ||
-        msg.includes("socket hang up") ||
-        msg.includes("etimedout") ||
-        msg.includes("fetch failed")
-      );
-    },
+    retryDelay: 500,
+    httpMethodsToRetry: ["GET", "HEAD", "OPTIONS"],
   },
 });
 
@@ -75,7 +64,9 @@ export function getSheetsWriter(): sheets_v4.Sheets {
 
 /**
  * Execute a Google Sheets operation with automatic retries for transient socket/network errors
- * (e.g. "Premature close", "ECONNRESET", "socket hang up", "fetch failed", rate limits).
+ * (e.g. "Premature close", "ECONNRESET", "socket hang up", "fetch failed", rate limits) — including
+ * a failed sign-in (the OAuth token fetch), which the transport retries don't cover. Reads only:
+ * a write whose response was lost may already have happened.
  */
 export async function withSheetsRetry<T>(fn: () => Promise<T>, maxRetries = 3, baseDelayMs = 400): Promise<T> {
   let attempt = 0;

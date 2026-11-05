@@ -241,7 +241,13 @@ function psmSubmit_(sheet, cols, row, requestId) {
     psmSetStatus_(sheet, cols, row, 'FAILED', (res.body && res.body.error) || 'The app refused the request (HTTP ' + res.code + ').');
     return false;
   }
-  return false; // 5xx / network: stays PENDING, the sweep tries again
+  // 5xx / network: stays PENDING and the sweep tries again — but the row says why, so a server
+  // that is up yet can't take jobs (e.g. not configured) is visible instead of "waking up" forever.
+  // The "request <id>" part must stay: the sweep finds the request by it.
+  var reason = res.code ? 'HTTP ' + res.code + (res.body && res.body.error ? ': ' + res.body.error : '') : (res.body && res.body.error) || 'no answer';
+  var at = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'd MMM HH:mm');
+  psmSetStatus_(sheet, cols, row, 'PENDING', 'The app could not take this yet (' + String(reason).slice(0, 200) + ', ' + at + ') — retrying every 5 minutes · request ' + requestId);
+  return false;
 }
 
 /** Request the app to stop screening and immediately deliver whatever candidates are screened so far. */

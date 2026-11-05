@@ -424,6 +424,8 @@ export interface DomainCandidateOutcome extends DomainCandidate {
   rankScore?: number;
   /** Why the candidate is where they are, one line each (the CSV's Signals column). */
   signals?: string[];
+  /** What the judgement drew on, as keywords: "Resume, GitHub, DSA (LeetCode (300 solved))…" (the CSV's Signals Used column). */
+  signalsUsed?: string;
 }
 
 /** Outcome of a domain-shortlisting run. */

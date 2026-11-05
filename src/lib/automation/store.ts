@@ -114,7 +114,7 @@ export async function createOrResumeJob(req: ControlRequest, requestId: string):
         const id = String(failed.rows[0].id);
         const r = await tx.query(
           `update automation.jobs set status = 'pending', error = null, attempts = 0, lease_owner = null, lease_until = null,
-                  finished_at = null, updated_at = now() where id = $1 returning *`,
+                  progress = progress - 'stopRequested', finished_at = null, updated_at = now() where id = $1 returning *`,
           [id],
         );
         await tx.query(`insert into automation.job_requests (request_id, job_id) values ($1, $2)`, [requestId, id]);
@@ -193,9 +193,13 @@ export async function releaseOwnInstanceLeases(owner: string): Promise<number> {
 
 /** Extend the lease (and save progress). False = the lease was lost: stop working on the job. */
 export async function heartbeat(jobId: string, owner: string, patch: { step?: JobStep; progress?: JobProgress } = {}): Promise<boolean> {
+  // The worker's progress replaces the stored one — except a stop the sheet asked for meanwhile
+  // (requestStopJob sets progress.stopRequested), which must survive the next save.
   const rows = await query(
     `update automation.jobs set lease_until = now() + make_interval(secs => $3), updated_at = now(),
-            step = coalesce($4, step), progress = coalesce($5::jsonb, progress)
+            step = coalesce($4, step),
+            progress = case when $5::jsonb is null then progress
+                            else $5::jsonb || jsonb_strip_nulls(jsonb_build_object('stopRequested', progress->'stopRequested')) end
       where id = $1 and lease_owner = $2 and status = 'processing' returning id`,
     [jobId, owner, LEASE_MS / 1000, patch.step ?? null, patch.progress ? JSON.stringify(patch.progress) : null],
   );
@@ -268,7 +272,7 @@ export async function requestStopJob(params: {
   if (params.jobId) {
     queryText = `update automation.jobs
       set progress = jsonb_set(progress, '{stopRequested}', 'true'::jsonb), updated_at = now()
-      where id = $1 returning *`;
+      where id = $1 and status in ('pending', 'processing') returning *`;
     args = [params.jobId];
   } else if (params.spreadsheetId && params.controlTab && params.controlRow) {
     queryText = `update automation.jobs
@@ -280,6 +284,19 @@ export async function requestStopJob(params: {
     return null;
   }
   const rows = await query(queryText, args);
+  return rows[0] ? toJob(rows[0]) : null;
+}
+
+/**
+ * A job stopped before any worker took it up: finished at once, nothing screened. Null when a
+ * worker took it meanwhile — it then sees the stop flag and delivers what it screened.
+ */
+export async function cancelPendingJob(jobId: string): Promise<JobRow | null> {
+  const rows = await query(
+    `update automation.jobs set status = 'completed', step = 'done', finished_at = now(), lease_owner = null, lease_until = null, updated_at = now()
+      where id = $1 and status = 'pending' returning *`,
+    [jobId],
+  );
   return rows[0] ? toJob(rows[0]) : null;
 }
 

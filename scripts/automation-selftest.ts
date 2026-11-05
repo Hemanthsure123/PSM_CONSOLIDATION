@@ -10,7 +10,7 @@
 import "./server-only-shim";
 import { detectDomainColumns } from "@/lib/domain-columns";
 import { dsaGatesActive } from "@/lib/dsa-scoring";
-import { destinationTabName, dsaGatesOf, githubScopeOf, istDate, parseInstructions, profilesRequiredOf, resolveTabs } from "@/lib/automation/instructions";
+import { destinationTabName, dsaGatesOf, githubScopeOf, istDate, parseInstructions, profilesRequiredOf, resolveTabs, withColumnSettings } from "@/lib/automation/instructions";
 import { KEY_COLUMNS, cellText, columnLetter, deliveredKeys, deliveryTable, planHeaders, rowKey, sheetRows, unscoredRow } from "@/lib/automation/delivery-rules";
 import { contenders, scoreBounds, shortlistFinal, waveOf } from "@/lib/automation/ranking-bounds";
 import { adaptiveConcurrency } from "@/lib/automation/load";
@@ -83,6 +83,28 @@ check("GitHub scope words", githubScopeOf("(all candidates)") === "all" && githu
   check("GitHub default is domain-fit, not explicit", p.github === "fit" && !p.githubExplicit);
   check("DSA default is off", !p.dsa.use && !p.dsa.explicit);
   check("code review: 'no review'", parseInstructions("GitHub: (all candidates) no review").review === false);
+}
+// The row's dropdown columns are settings: they win over words in the free text.
+{
+  const text = [
+    "Act as a technical recruiter hiring Backend Engineering Interns.",
+    "- **GitHub:** Review repositories of domain-fit candidates to verify actual implementation.",
+    "Prioritize hands-on backend experience from projects and internships. DSA is not required.",
+    "Subsheets: Old Tab",
+  ].join("\n");
+  const cols = { subsheets: "NEED TO SHORTLIST|| 4 NOV 2026", github: "All candidates (no review)", dsa: "Off", experience: "Not required" };
+  const combined = withColumnSettings(text, cols);
+  check("columns are added after the text, every one of them", combined.startsWith("Act as") && combined.endsWith("Experience in domain: Not required") && combined.includes("GitHub: All candidates (no review)"), combined);
+  const p = parseInstructions(combined);
+  check("column Subsheets replaces a tab list in the text", p.tabs.join("|") === "NEED TO SHORTLIST|| 4 NOV 2026", p.tabs);
+  check("column Github wins over a GitHub sentence in the text", p.github === "all" && p.githubExplicit && p.review === false, { github: p.github, review: p.review });
+  check("column DSA Off", !p.dsa.use && p.dsa.explicit);
+  check("column Experience 'Not required'", p.requireExperience === false);
+  const q = parseInstructions(withColumnSettings("Focus: Flutter\nGitHub: all candidates with code review", { github: "Domain-fit candidates (with review)", dsa: "CF 1400 / 300 solved", experience: "Required" }));
+  check("dropdown values: domain-fit with review, DSA gates, experience required", q.github === "fit" && q.review === true && q.dsa.use && q.dsa.gates.minRating.codeforces === 1400 && q.dsa.gates.minSolved === 300 && q.requireExperience === true, q);
+  check("empty columns add nothing", withColumnSettings("Focus: Java", {}) === "Focus: Java");
+  check("a sentence starting with 'Experience' is focus, not the setting", parseInstructions("Experience with Node.js preferred").requireExperience !== true);
+  check("'DSA is not required' turns DSA off", !parseInstructions("DSA is not required").dsa.use);
 }
 check("profiles required", profilesRequiredOf("10") === 10 && profilesRequiredOf("8-10") === 10 && profilesRequiredOf("10+") === 10 && profilesRequiredOf("") === null && profilesRequiredOf("TBD") === null);
 check("IST date crosses midnight correctly", istDate(new Date("2026-10-28T19:00:00Z")) === "2026-10-29" && istDate(new Date("2026-10-28T18:00:00Z")) === "2026-10-28");
