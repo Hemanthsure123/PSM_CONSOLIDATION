@@ -12,15 +12,16 @@ Nobody has to open the app.
 
 ## What you add to the sheet
 
-The coordination sheet is "Edge Team PC || PSM Task Coordination", tab **Profile Shortlisting - New**. The setup script and layout uses columns AK to AQ:
+The coordination sheet is "Edge Team PC || PSM Task Coordination", tab **Profile Shortlisting - New**. The setup script adds these columns at the end of the header row (today AK to AR). Columns are found by their header text, so they can move:
 
 | Column | Who fills it | What it holds |
 |---|---|---|
+| **Subsheets** | You | The tabs to screen in the Internal Sheets spreadsheet, separated by commas (e.g. `Edge Applied, Academy Applied`). Blank: the standard applicant tabs that exist. |
 | **Screening Instructions** | You | What to screen / Focus (plain text role criteria, e.g. "Flutter developers who shipped apps; Firebase is a must") |
 | **Github** | You (dropdown) | `Domain-fit candidates (with review)`, `Domain-fit candidates (no review)`, `All candidates (with review)`, `All candidates (no review)`, or `Off` |
 | **DSA** | You (dropdown / text) | `Off`, `Yes`, `300+ solved`, `500+ solved`, `CF 1400 / 300 solved`, `LC 1600` (or custom cutoffs) |
 | **Experience in Screening Domain** | You (dropdown) | `Not required`, `Required`, `1+ years`, `2+ years` |
-| **Trigger** | You (dropdown) | `start` runs the automation for this row. `stop` halts screening immediately and delivers whatever candidates have been screened so far. |
+| **Trigger** | You (dropdown) | `start` runs the automation for this row. `stop` halts screening and delivers whatever candidates have been screened so far (a job still queued is cancelled). |
 | **Automation Status** | The app | `PENDING`, `PROCESSING`, `COMPLETED`, `AWAITING_REVIEW` or `FAILED` |
 | **Automation Details** | The app | Progress, then a clickable link to the delivered `psm_final_shortlisted_<date>` tab |
 
@@ -29,6 +30,10 @@ The app also reads two columns that every row already has:
 - **No. of Profiles Required**: how many to shortlist.
 
 No other column is read or changed.
+
+**The dropdown columns always win.** A filled Subsheets, Github, DSA or Experience cell applies even when the instructions text mentions GitHub, DSA or experience in passing. Leave a cell blank to fall back to what the text says (below), then to the defaults.
+
+**If the server can't take a request** (it answers with an error), the row stays `PENDING` and Automation Details shows the server's reason, e.g. `HTTP 503: The automation isn't configured on this server (AUTOMATION_TOKEN)`. The sheet retries every 5 minutes with the same request id, so fixing the server is enough — no need to type start again.
 
 ### Screening Instructions
 
@@ -43,7 +48,7 @@ DSA: yes
 
 | Item | How to write it | If you leave it out |
 |---|---|---|
-| **Subsheets** | Tab names in the Internal Sheets spreadsheet, separated by commas. Case and spaces don't matter. Quote a name that contains a comma: `'Batch 2, late'`. | Required |
+| **Subsheets** | Tab names in the Internal Sheets spreadsheet, separated by commas. Case and spaces don't matter. Quote a name that contains a comma: `'Batch 2, late'`. | The Subsheets column; if that is blank too, whichever of Edge Applied, Academy Applied, External Applied and All Applied exist |
 | **Focus** | What a good candidate looks like for this company, in your own words. Write must-haves as "Must have: …" separated by `;`. Write alternatives with "or": "Node.js or Golang" is met by either. Leave out the company's product or industry (gaming, fintech …): candidates are judged on technology, not on their projects' subject. The model turns it into the domain brief and the must-have skills, keeping only must-haves that your text actually states. | Required |
 | **GitHub** | `(domain-fit candidates)` inspects only candidates whose resume fits. `(all candidates)` inspects everyone with a GitHub link. `no` skips GitHub. Add `no review` to skip the code review of the top projects. | Domain-fit candidates, with code review |
 | **DSA** | `yes`, `no`, or minimums such as `CF 1400 or CC 1600, 300 solved, 10 contests, DSA score 50` | Off |
