@@ -129,6 +129,27 @@ export function deliveredKeys(headers: string[], values: string[][], jobId: stri
   return keys;
 }
 
+/** The statuses of a row written without a score ("Not evaluated" …), which a later delivery may fill in. */
+export const PLACEHOLDER_STATUSES = new Set(["Not evaluated", "Could not be evaluated"]);
+
+/**
+ * The rows this job wrote without a score, by key → their 1-based row number in the tab. When the
+ * job later screens those candidates, their rows are rewritten in place instead of being skipped.
+ */
+export function placeholderRows(headers: string[], values: string[][], jobId: string): Map<string, number> {
+  const col = (name: string) => headers.indexOf(name);
+  const job = col("Job ID");
+  const status = col("Status");
+  const out = new Map<string, number>();
+  if (job < 0 || status < 0) return out;
+  values.forEach((v, i) => {
+    if (String(v[job] ?? "").trim() !== jobId || !PLACEHOLDER_STATUSES.has(String(v[status] ?? "").trim())) return;
+    const cell = (name: string) => (col(name) >= 0 ? String(v[col(name)] ?? "") : "");
+    out.set(rowKey({ "Mobile Number": cell("Mobile Number"), "User ID": cell("User ID"), "Source Tab": cell("Source Tab"), Name: cell("Name") }), i + 2);
+  });
+  return out;
+}
+
 /** "AK" for 37 (1-based). */
 export function columnLetter(n: number): string {
   let s = "";

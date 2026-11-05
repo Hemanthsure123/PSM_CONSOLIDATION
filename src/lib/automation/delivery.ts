@@ -3,7 +3,7 @@ import { buildDomainReport } from "@/actions/domain";
 import { getSheetsWriter } from "@/lib/sheets";
 import { env } from "@/lib/env";
 import { withSheetsRetry } from "@/lib/automation/control-sheet";
-import { deliveredKeys, deliveryTable, planHeaders, rowKey, sheetRows, unscoredRow } from "@/lib/automation/delivery-rules";
+import { PLACEHOLDER_STATUSES, deliveredKeys, deliveryTable, placeholderRows, planHeaders, rowKey, sheetRows, unscoredRow } from "@/lib/automation/delivery-rules";
 import { JobError } from "@/lib/automation/errors";
 import { destinationTabName } from "@/lib/automation/instructions";
 import { loadCandidates, logEvent } from "@/lib/automation/store";
@@ -162,6 +162,9 @@ export async function deliver(ctx: RunContext, v: Validated, only: "shortlist" |
       const plan = planHeaders(values[0] ?? [], wanted);
       const already = deliveredKeys(values[0] ?? [], values.slice(1), ctx.job.id);
       const toWrite = rows.filter((r) => !already.has(rowKey(r)));
+      // Rows this job wrote as "Not evaluated" that now have a result: rewritten in place.
+      const placeholders = placeholderRows(values[0] ?? [], values.slice(1), ctx.job.id);
+      const toFill = rows.filter((r) => placeholders.has(rowKey(r)) && !PLACEHOLDER_STATUSES.has(r.Status ?? ""));
 
       // 3. Header: key columns missing from an older tab are inserted in place, other new ones appended.
       const requests: object[] = plan.inserts.map((index) => ({ insertDimension: { range: { sheetId, dimension: "COLUMNS", startIndex: index, endIndex: index + 1 }, inheritFromBefore: false } }));
@@ -187,7 +190,17 @@ export async function deliver(ctx: RunContext, v: Validated, only: "shortlist" |
           }),
         );
       }
-      return { written: toWrite.length, skipped: rows.length - toWrite.length, gid: sheetId };
+      // 5. Placeholders filled in (a PUT of known rows: safe to retry).
+      for (let i = 0; i < toFill.length; i += APPEND_CHUNK) {
+        const chunk = toFill.slice(i, i + APPEND_CHUNK);
+        await withSheetsRetry(() =>
+          sheets.spreadsheets.values.batchUpdate({
+            spreadsheetId,
+            requestBody: { valueInputOption: "RAW", data: chunk.map((r) => ({ range: `${q(tab)}!A${placeholders.get(rowKey(r))}`, values: sheetRows(plan.headers, [r]) })) },
+          }),
+        );
+      }
+      return { written: toWrite.length, filled: toFill.length, skipped: rows.length - toWrite.length - toFill.length, gid: sheetId };
     } catch (err) {
       if (err instanceof JobError) throw err;
       const status = Number((err as { code?: number }).code ?? (err as { response?: { status?: number } }).response?.status);
@@ -202,7 +215,7 @@ export async function deliver(ctx: RunContext, v: Validated, only: "shortlist" |
     ctx.job.id,
     "delivering",
     "info",
-    `${only === "shortlist" ? "Shortlist" : "Complete screening"}: wrote ${written.written} rows to "${tab}"${written.skipped ? ` (${written.skipped} already there)` : ""}.`,
+    `${only === "shortlist" ? "Shortlist" : "Complete screening"}: wrote ${written.written} rows to "${tab}"${written.filled ? `, filled in ${written.filled} not evaluated before` : ""}${written.skipped ? ` (${written.skipped} already there)` : ""}.`,
   );
   return {
     destinationTab: tab,
@@ -217,7 +230,7 @@ export async function deliver(ctx: RunContext, v: Validated, only: "shortlist" |
     duplicates: v.stats.duplicates,
     flagged: [...v.flags.values()].filter((f) => f.length).length,
     reviewReasons: v.reasons,
-    rowsWritten: written.written + written.skipped,
+    rowsWritten: written.written + written.filled + written.skipped,
     complete: only === "all",
   };
 }

@@ -11,7 +11,7 @@ import "./server-only-shim";
 import { detectDomainColumns } from "@/lib/domain-columns";
 import { dsaGatesActive } from "@/lib/dsa-scoring";
 import { destinationTabName, dsaGatesOf, githubScopeOf, istDate, parseInstructions, profilesRequiredOf, resolveTabs, withColumnSettings } from "@/lib/automation/instructions";
-import { KEY_COLUMNS, cellText, columnLetter, deliveredKeys, deliveryTable, planHeaders, rowKey, sheetRows, unscoredRow } from "@/lib/automation/delivery-rules";
+import { KEY_COLUMNS, cellText, columnLetter, deliveredKeys, deliveryTable, placeholderRows, planHeaders, rowKey, sheetRows, unscoredRow } from "@/lib/automation/delivery-rules";
 import { contenders, scoreBounds, shortlistFinal, waveOf } from "@/lib/automation/ranking-bounds";
 import { adaptiveConcurrency } from "@/lib/automation/load";
 import { buildJdTechSpec, mandatoryTechsAbsent, splitMandatoryItems } from "@/lib/github-analysis";
@@ -242,6 +242,12 @@ const planOf = (o: Partial<AutomationPlan> = {}): AutomationPlan => ({
   check("rows already written for this job are recognised by mobile number", keys.has("m:9876543210") && keys.size === 1, [...keys]);
   check("…and skipped on the full delivery", t.rows.filter((r) => !keys.has(rowKey(r))).length === 2);
   check("another job's rows don't count", deliveredKeys(headers, written, "other-job").size === 0);
+  // A row written as "Not evaluated" is filled in when the candidate is screened later.
+  const notEvaluated = { ...s.rows[0], Status: "Not evaluated", "Mobile Number": "9000000001", Name: "Later" };
+  const tab = [...written, ...sheetRows(headers, [notEvaluated])];
+  const holes = placeholderRows(headers, tab, ctx.jobId);
+  check("placeholders found with their sheet row (header = row 1)", holes.size === 1 && holes.get("m:9000000001") === tab.length + 1, [...holes]);
+  check("…only this job's", placeholderRows(headers, tab, "other-job").size === 0);
   check("row key falls back to user id, then tab + name", rowKey({ "Mobile Number": "", "User ID": "ABC-1" }) === "u:abc-1" && rowKey({ "Source Tab": "T", Name: "N" }) === "r:T|N");
   check("column letters", columnLetter(1) === "A" && columnLetter(26) === "Z" && columnLetter(27) === "AA" && columnLetter(37) === "AK");
   check("cells capped under the Sheets limit", cellText("x".repeat(60_000)).length === 45_000 && cellText(null) === "");

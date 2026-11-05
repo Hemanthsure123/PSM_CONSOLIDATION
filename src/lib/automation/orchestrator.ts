@@ -75,7 +75,9 @@ async function deliverShortlistEarly(ctx: RunContext, sheet: ReturnType<typeof s
   const unscreened = all.filter((c) => c.state === "pending" || (c.state === "error" && c.retryable)).map((c) => c.internal);
   if (!unscreened.length || !shortlistFinal(screenedNow, unscreened, bounds)) return;
   await logEvent(ctx.job.id, "evaluating", "info", `The top ${bounds.topN} can't change any more (${unscreened.length} still to screen rank below it) — delivering the shortlist now.`);
-  await ctx.beat("evaluating", { note: "shortlist is final — checking its GitHub" }, true);
+  // The saved step stays "screening": the rest still has to be screened, so a failure here (e.g. no
+  // edit access to the sheet) must resume the screening, not jump past it. The sheet shows the work.
+  await ctx.beat("screening", { note: "shortlist is final — checking its GitHub" }, true);
   await sheet.now("evaluating", ctx.progress);
   await evaluateGithub(ctx);
   await evaluateReviews(ctx);
@@ -116,7 +118,15 @@ export async function runJob(job: JobRow, owner: string): Promise<void> {
       await ctx.beat(step, { note: undefined }, true);
     }
 
-    // 2. Screening agent — wave by wave, with the shortlist delivered as soon as it is final.
+    // 2. Screening agent — wave by wave, with the shortlist delivered as soon as it is final. A job
+    //    taken up again past this step with candidates still unscreened (older checkpoints) screens them first.
+    if (stepIndex(step) > stepIndex("screening") && !ctx.stopRequested && !(await ctx.checkStopRequested())) {
+      const left = (await loadCandidates(job.id)).filter((c) => c.state === "pending").length;
+      if (left) {
+        await logEvent(job.id, "screening", "info", `${left} candidates were never screened — screening them before delivering.`);
+        step = "screening";
+      }
+    }
     if (stepIndex(step) <= stepIndex("screening")) {
       await readCandidates(ctx);
       await screenCandidates(ctx, () => deliverShortlistEarly(ctx, sheet));
