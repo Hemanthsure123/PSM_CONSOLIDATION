@@ -17,6 +17,7 @@ const view = (u: Awaited<ReturnType<typeof listRoster>>[number]) => ({
   role: u.role,
   lead: u.leadEmail,
   active: u.active,
+  signInEmails: u.signInEmails ?? [],
 });
 
 export const GET = withUser(async () => NextResponse.json({ users: (await listRoster()).map(view) }), { admin: true });

@@ -11,9 +11,52 @@ export interface RosterUser {
   role: "member" | "lead" | "admin";
   active: boolean;
   leadEmail: string | null;
+  /** Other Google accounts this person may sign in with (admin-linked, app.user_logins). */
+  signInEmails?: string[];
 }
 
-const SELECT = `select email, name, aliases, role, active, lead_email as "leadEmail" from app.users`;
+const SELECT = `select u.email, u.name, u.aliases, u.role, u.active, u.lead_email as "leadEmail",
+  coalesce((select array_agg(l.login_email order by l.login_email) from app.user_logins l where l.user_email = u.email), '{}') as "signInEmails"
+  from app.users u`;
+
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+export const MAX_SIGN_IN_EMAILS = 5;
+
+/**
+ * The roster person a Google account signs in as: their roster email, or an account linked to
+ * them. Null when the account isn't on the roster at all. Inactive people are returned (the
+ * caller refuses them with a clear message).
+ */
+export function resolveSignIn(googleEmail: string, roster: RosterUser[]): RosterUser | null {
+  const email = googleEmail.trim().toLowerCase();
+  if (!email) return null;
+  return roster.find((u) => u.email === email) ?? roster.find((u) => (u.signInEmails ?? []).includes(email)) ?? null;
+}
+
+/**
+ * Cleans and checks every person's linked sign-in accounts. Each must be a real address, not
+ * anyone's roster email, and linked to one person only. Returns them lower-cased, de-duplicated.
+ */
+export function cleanSignInEmails(entries: { email: string; signInEmails?: unknown }[]): Map<string, string[]> {
+  const primaries = new Set(entries.map((e) => e.email));
+  const owner = new Map<string, string>();
+  const out = new Map<string, string[]>();
+  for (const e of entries) {
+    const raw = Array.isArray(e.signInEmails) ? e.signInEmails : [];
+    const list = [...new Set(raw.map((x) => String(x ?? "").trim().toLowerCase()).filter(Boolean))];
+    if (list.length > MAX_SIGN_IN_EMAILS) throw new UserError(422, `${e.email} can have at most ${MAX_SIGN_IN_EMAILS} extra sign-in accounts.`, "invalid_roster");
+    for (const l of list) {
+      if (!EMAIL_RE.test(l) || l.length > 254) throw new UserError(422, `"${l}" isn't an email address.`, "invalid_roster");
+      if (l === e.email) throw new UserError(422, `${l} is already ${e.email}'s roster email.`, "invalid_roster");
+      if (primaries.has(l)) throw new UserError(422, `${l} is someone else's roster email, so it can't be linked to ${e.email}.`, "invalid_roster");
+      const taken = owner.get(l);
+      if (taken) throw new UserError(422, `${l} is linked to both ${taken} and ${e.email}. One Google account signs in as one person.`, "invalid_roster");
+      owner.set(l, e.email);
+    }
+    out.set(e.email, list);
+  }
+  return out;
+}
 
 export const normName = (s: string) => s.normalize("NFKC").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
 
@@ -23,14 +66,32 @@ export function matchMentor(cell: string, roster: RosterUser[]): RosterUser | nu
   if (!key) return null;
   return (
     roster.find((u) => u.active && (normName(u.name) === key || u.aliases.some((a) => normName(a) === key))) ??
-    // "hemanth" in a cell that says "Hemanth (PSM)" or an email typed by hand.
-    roster.find((u) => u.active && (key.split(" ")[0] === normName(u.name) || key === normName(u.email))) ??
+    // "hemanth" in a cell that says "Hemanth (PSM)" or an email typed by hand (roster or linked account).
+    roster.find(
+      (u) =>
+        u.active &&
+        (key.split(" ")[0] === normName(u.name) || key === normName(u.email) || (u.signInEmails ?? []).some((l) => key === normName(l))),
+    ) ??
     null
   );
 }
 
 export async function listRoster(): Promise<RosterUser[]> {
-  return query<RosterUser>(`${SELECT} order by active desc, role = 'admin' desc, name`);
+  return query<RosterUser>(`${SELECT} order by u.active desc, u.role = 'admin' desc, u.name`);
+}
+
+/** One roster person by roster email, with their linked accounts. */
+export async function rosterUser(email: string): Promise<RosterUser | null> {
+  return (await query<RosterUser>(`${SELECT} where u.email = $1`, [email]))[0] ?? null;
+}
+
+/** The roster person a signed-in Google account maps to (roster email first, then linked accounts). */
+export async function rosterUserForSignIn(googleEmail: string): Promise<RosterUser | null> {
+  const rows = await query<RosterUser>(
+    `${SELECT} where u.email = $1 or u.email = (select user_email from app.user_logins where login_email = $1)`,
+    [googleEmail],
+  );
+  return resolveSignIn(googleEmail, rows);
 }
 
 /** MOBILE_ADMIN_EMAILS are admins from their first sign-in, even before anyone adds them. */
@@ -50,6 +111,8 @@ export interface RosterInput {
   role: "member" | "lead" | "admin";
   lead?: string | null;
   active: boolean;
+  /** Linked Google accounts. Omitted = keep what's stored; [] = remove all. */
+  signInEmails?: string[];
 }
 
 /**
@@ -66,6 +129,8 @@ export async function replaceRoster(entries: RosterInput[], by: RosterUser): Pro
     role: (["member", "lead", "admin"].includes(e.role) ? e.role : "member") as RosterUser["role"],
     lead: e.lead ? String(e.lead).trim().toLowerCase() : null,
     active: e.active !== false,
+    keepLogins: e.signInEmails === undefined,
+    signInEmails: e.signInEmails,
   }));
   for (const e of clean) {
     if (!/^[^@\s]+@[^@\s]+$/.test(e.email)) throw new UserError(422, `"${e.email}" isn't an email address.`, "invalid_roster");
@@ -81,6 +146,9 @@ export async function replaceRoster(entries: RosterInput[], by: RosterUser): Pro
   if (!me || !me.active || me.role !== "admin") {
     throw new UserError(422, "You can't remove your own admin access here. Ask another admin.", "invalid_roster");
   }
+  // People who didn't send signInEmails keep their stored links (older app versions don't know the field).
+  const stored = new Map((await listRoster()).map((u) => [u.email, u.signInEmails ?? []]));
+  const logins = cleanSignInEmails(clean.map((e) => ({ email: e.email, signInEmails: e.keepLogins ? stored.get(e.email) ?? [] : e.signInEmails })));
 
   await transaction(async (tx) => {
     for (const e of clean) {
@@ -97,6 +165,22 @@ export async function replaceRoster(entries: RosterInput[], by: RosterUser): Pro
     for (const e of clean) {
       const lead = e.lead && clean.some((x) => x.email === e.lead) ? e.lead : null;
       await tx.query("update app.users set lead_email = $2 where email = $1", [e.email, lead]);
+    }
+    // Linked sign-in accounts: replaced for everyone in the request (a removed link signs out at once).
+    const listed = clean.map((e) => e.email);
+    const keep = clean.flatMap((e) => logins.get(e.email) ?? []);
+    const dropped = await tx.query<{ login_email: string }>(
+      "delete from app.user_logins where (user_email = any($1::text[]) or login_email = any($2::text[])) returning login_email",
+      [listed, keep],
+    );
+    for (const e of clean) {
+      for (const l of logins.get(e.email) ?? []) {
+        await tx.query("insert into app.user_logins (login_email, user_email, created_by) values ($1, $2, $3)", [l, e.email, by.email]);
+      }
+    }
+    const unlinked = dropped.rows.map((r) => r.login_email).filter((l) => !keep.includes(l));
+    if (unlinked.length) {
+      await tx.query("update app.sessions set revoked_at = now() where revoked_at is null and login_email = any($1::text[])", [unlinked]);
     }
     // Deactivated people lose their sessions and devices at once.
     await tx.query(

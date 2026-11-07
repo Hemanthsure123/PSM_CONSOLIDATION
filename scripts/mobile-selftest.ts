@@ -10,7 +10,7 @@ import { dsaGatesOf, githubScopeOf, parseInstructions, withColumnSettings } from
 import { findColumns, parseCount, parseSheetDate, resolveDeadline, rowsToTasks, taskIdFor } from "@/lib/mobile/control-rows";
 import { parseRange, rowStats, summarize } from "@/lib/mobile/analytics";
 import { signAccessToken, verifyAccessToken } from "@/lib/mobile/jwt";
-import { matchMentor, type RosterUser } from "@/lib/mobile/roster";
+import { cleanSignInEmails, matchMentor, resolveSignIn, type RosterUser } from "@/lib/mobile/roster";
 import { configToCells, validateConfig } from "@/lib/mobile/screening";
 
 let passed = 0;
@@ -85,9 +85,9 @@ test("task ids survive inserted rows and change with the assignment", () => {
 });
 
 const roster: RosterUser[] = [
-  { email: "hemanthreddy.sure@nxtwave.co.in", name: "Hemanth", aliases: [], role: "admin", active: true, leadEmail: null },
+  { email: "hemanthreddy.sure@nxtwave.co.in", name: "Hemanth", aliases: [], role: "admin", active: true, leadEmail: null, signInEmails: ["hemanthsure668@gmail.com"] },
   { email: "bepari.faraazahmed@nxtwave.co.in", name: "Faraaz", aliases: ["Faraaz Ahmed"], role: "member", active: true, leadEmail: null },
-  { email: "old@nxtwave.co.in", name: "Gone", aliases: [], role: "member", active: false, leadEmail: null },
+  { email: "old@nxtwave.co.in", name: "Gone", aliases: [], role: "member", active: false, leadEmail: null, signInEmails: ["gone@gmail.com"] },
 ];
 
 test("Mentor cells match names, aliases and emails; inactive people never match", () => {
@@ -97,6 +97,35 @@ test("Mentor cells match names, aliases and emails; inactive people never match"
   assert.equal(matchMentor("hemanthreddy.sure@nxtwave.co.in", roster)?.name, "Hemanth");
   assert.equal(matchMentor("Gone", roster), null);
   assert.equal(matchMentor("", roster), null);
+});
+
+test("sign-in is decided by the roster: roster email or a linked account, never the domain alone", () => {
+  // The linked Gmail signs in as Hemanth (same tasks, role, pushes).
+  assert.equal(resolveSignIn("HemanthSure668@gmail.com", roster)?.email, "hemanthreddy.sure@nxtwave.co.in");
+  assert.equal(resolveSignIn("hemanthreddy.sure@nxtwave.co.in", roster)?.role, "admin");
+  // Unlinked accounts are nobody, whatever their domain.
+  assert.equal(resolveSignIn("hemanthsure3@gmail.com", roster), null);
+  assert.equal(resolveSignIn("someone@nxtwave.co.in", roster), null);
+  assert.equal(resolveSignIn("", roster), null);
+  // An inactive person's linked account resolves to them, so the caller can refuse with "access removed".
+  assert.equal(resolveSignIn("gone@gmail.com", roster)?.active, false);
+  // A Mentor cell holding the linked email still finds the person.
+  assert.equal(matchMentor("hemanthsure668@gmail.com", roster)?.name, "Hemanth");
+});
+
+test("linked sign-in accounts: cleaned, one person each, never a roster email", () => {
+  const a = "a@nxtwave.co.in";
+  const b = "b@nxtwave.co.in";
+  const ok = cleanSignInEmails([{ email: a, signInEmails: [" A.Personal@Gmail.com ", "a.personal@gmail.com"] }, { email: b }]);
+  assert.deepEqual(ok.get(a), ["a.personal@gmail.com"]);
+  assert.deepEqual(ok.get(b), []);
+  const refused = (entries: { email: string; signInEmails?: unknown }[], re: RegExp) =>
+    assert.throws(() => cleanSignInEmails(entries), (e: Error) => re.test(e.message));
+  refused([{ email: a, signInEmails: ["not-an-email"] }], /isn't an email/);
+  refused([{ email: a, signInEmails: [b] }, { email: b }], /someone else's roster email/);
+  refused([{ email: a, signInEmails: [a] }], /already/);
+  refused([{ email: a, signInEmails: ["x@gmail.com"] }, { email: b, signInEmails: ["X@gmail.com"] }], /linked to both/);
+  refused([{ email: a, signInEmails: ["1@g.com", "2@g.com", "3@g.com", "4@g.com", "5@g.com", "6@g.com"] }], /at most 5/);
 });
 
 test("access tokens: valid, forged, expired", () => {

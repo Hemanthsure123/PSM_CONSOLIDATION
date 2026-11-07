@@ -5,7 +5,7 @@ import { query, transaction } from "@/lib/db/client";
 import { env } from "@/lib/env";
 import { UserError } from "@/lib/mobile/http";
 import { ACCESS_TTL_SECONDS, signAccessToken } from "@/lib/mobile/jwt";
-import { ensureBootstrapAdmin, type RosterUser } from "@/lib/mobile/roster";
+import { ensureBootstrapAdmin, rosterUserForSignIn, type RosterUser } from "@/lib/mobile/roster";
 
 /** Refresh tokens live 60 days; each use replaces it with a new one. */
 const REFRESH_TTL_DAYS = 60;
@@ -16,7 +16,8 @@ let oauthClient: OAuth2Client | null = null;
 
 /**
  * Verifies a Google ID token from the app (Credential Manager): signature, audience (our web
- * client), issuer, expiry, a verified email in an allowed domain. Returns the lower-cased email.
+ * client), issuer, expiry and a verified email. Returns the lower-cased email. Who may sign in is
+ * decided by the roster in startSession (roster email or an admin-linked account), not here.
  */
 export async function verifyGoogleIdToken(idToken: string): Promise<{ email: string; name: string }> {
   oauthClient ??= new OAuth2Client();
@@ -29,10 +30,6 @@ export async function verifyGoogleIdToken(idToken: string): Promise<{ email: str
   }
   const email = (payload?.email ?? "").toLowerCase();
   if (!email || !payload?.email_verified) throw new UserError(401, "This Google account has no verified email.", "invalid_google_token");
-  const domain = email.split("@")[1] ?? "";
-  if (!env.mobile.allowedEmailDomains.includes(domain)) {
-    throw new UserError(403, `Sign in with your NxtWave account (${env.mobile.allowedEmailDomains.join(" or ")}).`, "domain_not_allowed");
-  }
   return { email, name: payload.name ?? email.split("@")[0] };
 }
 
@@ -52,25 +49,36 @@ function issue(user: RosterUser, sessionId: string, refreshToken: string): Issue
   };
 }
 
-/** After Google sign-in: the person must be on the roster (bootstrap admins are added on first sign-in). */
-export async function startSession(email: string, googleName: string, device?: DeviceInfo | null): Promise<IssuedSession> {
-  await ensureBootstrapAdmin(email, googleName);
-  const rows = await query<RosterUser>(
-    "select email, name, aliases, role, active, lead_email as \"leadEmail\" from app.users where email = $1",
-    [email],
-  );
-  const user = rows[0];
-  if (!user || !user.active) {
-    throw new UserError(403, "You're not on the PSM team roster yet. Ask your admin to add you in the app.", "not_on_roster");
+/**
+ * After Google sign-in, the roster decides: the Google account must be a roster email or an
+ * account an admin linked to a roster person, and that person must be active. The session is the
+ * roster person's (their tasks, role and pushes), whichever of their accounts signed in.
+ * Bootstrap admins (MOBILE_ADMIN_EMAILS, NxtWave addresses) are added on first sign-in.
+ */
+export async function startSession(googleEmail: string, googleName: string, device?: DeviceInfo | null): Promise<IssuedSession> {
+  const domains = env.mobile.allowedEmailDomains;
+  const nxtwave = domains.includes(googleEmail.split("@")[1] ?? "");
+  if (nxtwave) await ensureBootstrapAdmin(googleEmail, googleName);
+  const user = await rosterUserForSignIn(googleEmail);
+  if (!user) {
+    throw nxtwave
+      ? new UserError(403, "You're not on the PSM team roster yet. Ask your admin to add you in the app.", "not_on_roster")
+      : new UserError(
+          403,
+          `${googleEmail} isn't linked to anyone on the PSM team. Sign in with your NxtWave account (${domains.join(" or ")}), or ask your admin to link this account in Me → Team.`,
+          "domain_not_allowed",
+        );
   }
+  if (!user.active) throw new UserError(403, "Your access was removed. Ask your admin.", "not_on_roster");
   const refreshToken = randomBytes(32).toString("base64url");
   const id = randomUUID();
+  const viaLinked = googleEmail !== user.email ? googleEmail : null;
   await query(
-    `insert into app.sessions (id, user_email, refresh_hash, expires_at, family)
-     values ($1, $2, $3, now() + make_interval(days => $4), $1)`,
-    [id, email, sha256(refreshToken), REFRESH_TTL_DAYS],
+    `insert into app.sessions (id, user_email, refresh_hash, expires_at, family, login_email)
+     values ($1, $2, $3, now() + make_interval(days => $4), $1, $5)`,
+    [id, user.email, sha256(refreshToken), REFRESH_TTL_DAYS, viaLinked],
   );
-  await registerDevice(email, id, device);
+  await registerDevice(user.email, id, device);
   return issue(user, id, refreshToken);
 }
 
@@ -81,7 +89,9 @@ export async function startSession(email: string, googleName: string, device?: D
 export async function refreshSession(refreshToken: string): Promise<IssuedSession> {
   return transaction(async (tx) => {
     const found = await tx.query(
-      `select s.id, s.family, s.expires_at, s.rotated_at, s.revoked_at,
+      `select s.id, s.family, s.expires_at, s.rotated_at, s.revoked_at, s.login_email,
+              (s.login_email is null or exists (select 1 from app.user_logins l
+                 where l.login_email = s.login_email and l.user_email = s.user_email)) as "loginLinked",
               u.email, u.name, u.aliases, u.role, u.active, u.lead_email as "leadEmail"
          from app.sessions s join app.users u on u.email = s.user_email
         where s.refresh_hash = $1 for update of s`,
@@ -95,13 +105,17 @@ export async function refreshSession(refreshToken: string): Promise<IssuedSessio
     }
     if (new Date(s.expires_at).getTime() <= Date.now()) throw new UserError(401, "Your session ended. Sign in again.", "refresh_expired");
     if (!s.active) throw new UserError(401, "Your access was removed. Ask your admin.", "not_on_roster");
+    if (!s.loginLinked) {
+      await tx.query("update app.sessions set revoked_at = coalesce(revoked_at, now()) where family = $1", [s.family]);
+      throw new UserError(401, "This Google account was unlinked from your profile. Sign in again.", "not_on_roster");
+    }
 
     const next = randomBytes(32).toString("base64url");
     const id = randomUUID();
     await tx.query(
-      `insert into app.sessions (id, user_email, refresh_hash, expires_at, family)
-       values ($1, $2, $3, now() + make_interval(days => $4), $5)`,
-      [id, s.email, sha256(next), REFRESH_TTL_DAYS, s.family],
+      `insert into app.sessions (id, user_email, refresh_hash, expires_at, family, login_email)
+       values ($1, $2, $3, now() + make_interval(days => $4), $5, $6)`,
+      [id, s.email, sha256(next), REFRESH_TTL_DAYS, s.family, s.login_email],
     );
     await tx.query("update app.sessions set rotated_at = now(), replaced_by = $2, last_used_at = now() where id = $1", [s.id, id]);
     await tx.query("update app.devices set session_id = $2 where session_id = $1", [s.id, id]);

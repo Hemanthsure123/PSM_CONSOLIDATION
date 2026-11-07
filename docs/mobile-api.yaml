@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.0.0
+  version: 1.1.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
     This file is the source of truth. Change it first, then the routes under
@@ -69,7 +69,7 @@ paths:
       responses:
         "200": { description: Signed in, content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } } }
         "401": { $ref: "#/components/responses/Unauthorized" }
-        "403": { description: "Valid Google account but not allowed (domain or not on the roster). code = not_on_roster | domain_not_allowed", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: "Valid Google account but not allowed. Access comes from the roster: the account must be a roster email or a linked sign-in account (RosterEntry.signInEmails) of an active person. code = not_on_roster (NxtWave address not on the roster, or access removed) | domain_not_allowed (other account not linked to anyone)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
   /auth/refresh:
     post:
@@ -692,6 +692,15 @@ components:
         role: { type: string, enum: [member, lead, admin] }
         lead: { type: string, format: email, description: Who gets this member's escalations }
         active: { type: boolean }
+        signInEmails:
+          type: array
+          maxItems: 5
+          items: { type: string, format: email }
+          description: |
+            Other Google accounts this person may sign in with (e.g. a Gmail account that mirrors
+            their work account). Signing in with one opens this person's session: same tasks, role
+            and notifications. Each account belongs to one person and can't be a roster email.
+            On PUT, omit to keep the stored list; [] removes all (their devices are signed out).
 
     TaskState:
       type: string
