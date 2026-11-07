@@ -13,6 +13,8 @@ import {
   DEFAULT_INTERVIEW_LENGTH_MIN,
   docKey,
   interviewOptions,
+  interviewStateOf,
+  IST_OFFSET_MS,
   interviewStart,
   isOpen,
   PREP_STATUS_LABEL,
@@ -391,7 +393,19 @@ export async function setPrepStatus(user: RosterUser, key: string, body: { statu
   }
   if (document) cells.push({ col: c.prepDocument, text: document });
   if (note) cells.push({ col: c.remarks, text: p.remarks ? `${p.remarks} | ${note}` : note });
-  await writePrepCells(key, cells);
+  const today = dayOf(new Date());
+  const minutes = Math.floor(((Date.now() + IST_OFFSET_MS) % 86_400_000) / 60_000);
+  await writePrepCells(key, cells, (row) => ({
+    ...row,
+    prepGivenRaw: label,
+    prepStatus: status,
+    prepBy: status === "done" && !row.prepBy.length ? [user.name.toUpperCase()] : row.prepBy,
+    prepByRaw: status === "done" && !row.prepBy.length ? user.name.toUpperCase() : row.prepByRaw,
+    prepDay: status === "done" ? today : status === "pending" ? null : row.prepDay,
+    prepTime: status === "done" ? { start: minutes, end: null } : status === "pending" ? null : row.prepTime,
+    prepDocument: document || row.prepDocument,
+    remarks: note ? (row.remarks ? `${row.remarks} | ${note}` : note) : row.remarks,
+  }));
   await logEvent(key, user, "prep_status", status === "pending" ? "Reopened" : label);
   await rememberAction(key, { doneAt: status === "done" ? new Date() : null, ...(status === "done" && !p.prepBy.length ? { mentorEmails: [user.email] } : {}) });
   return prepDetail(user, key);
@@ -407,7 +421,11 @@ export async function setInterviewStatus(user: RosterUser, key: string, body: { 
   const status = options ? options.find((o) => o.trim().toLowerCase() === asked.toLowerCase()) : asked;
   if (!status) throw new UserError(422, `"${asked}" isn't one of the sheet's statuses. Refresh and pick again.`, "invalid_status");
   await loadForWrite(user, key);
-  await writePrepCells(key, [{ col: requireColumn(snap.columns.candidateStatus, "Candidate's Status"), text: status }]);
+  await writePrepCells(key, [{ col: requireColumn(snap.columns.candidateStatus, "Candidate's Status"), text: status }], (row) => ({
+    ...row,
+    candidateStatus: status.trim(),
+    interviewState: interviewStateOf(status),
+  }));
   await logEvent(key, user, "interview_status", status.trim());
   return prepDetail(user, key);
 }
@@ -432,7 +450,7 @@ export async function assignPrep(user: RosterUser, key: string, body: { emails?:
   // Keep names the roster doesn't know (e.g. someone outside the app) unless the change removes them.
   const unknown = p.prepBy.filter((n) => !mentorsOf({ prepBy: [n] }, roster).length);
   const names = [...people.map((u) => u!.name.toUpperCase()), ...(isLead ? [] : unknown)];
-  await writePrepCells(key, [{ col: snap.columns.prepBy, text: names.join(", ") }]);
+  await writePrepCells(key, [{ col: snap.columns.prepBy, text: names.join(", ") }], (row) => ({ ...row, prepBy: names, prepByRaw: names.join(", ") }));
   await logEvent(key, user, "assign", names.join(", ") || "Unassigned");
   await rememberAction(key, { mentorEmails: emails });
   return prepDetail(user, key);

@@ -44,6 +44,7 @@ const g = globalThis as unknown as {
   __prepSource?: { at: number; source: PrepSource };
   __prepDropdowns?: { at: number; key: string; v: Dropdowns };
   __prepHeader?: { key: string; row: unknown[] };
+  __prepNotMirror?: { key: string; at: number };
 };
 const q = (tab: string) => `'${tab.replace(/'/g, "''")}'`;
 
@@ -179,33 +180,21 @@ export type CellWrite =
  * (the team may have sorted, inserted or edited rows). Never writes into an IMPORTRANGE mirror.
  * Returns the row written.
  */
-export async function writePrepCells(key: string, cells: CellWrite[]): Promise<number> {
-  const snap = await readPrepSnapshot(true);
-  const prep = snap.byKey.get(key);
-  if (!prep) throw new UserError(409, "This row is no longer in the drill-down sheet (it was changed or deleted). Refresh and try again.", "row_moved");
+export async function writePrepCells(key: string, cells: CellWrite[], patch?: (p: PrepRow) => PrepRow): Promise<number> {
+  // Fast path: the cached read (≤ 30 s old) and a one-row check. Only when that row no longer
+  // holds the prep (rows sorted / inserted) is the whole tab read again to find it.
+  let snap = await readPrepSnapshot();
+  let prep = snap.byKey.get(key);
+  if (!prep || !(await rowStillHolds(snap, prep))) {
+    snap = await readPrepSnapshot(true);
+    prep = snap.byKey.get(key);
+    if (!prep || !(await rowStillHolds(snap, prep))) {
+      forgetPrepSnapshot();
+      throw new UserError(409, "This row changed or left the drill-down sheet while you were working. Refresh and try again.", "row_moved");
+    }
+  }
   await assertNotMirror(snap);
   const sheets = getSheetsWriter();
-  // Re-check the exact row just before writing: someone may have edited it since the read.
-  const check = await withSheetsRetry(() =>
-    sheets.spreadsheets.values.get({
-      spreadsheetId: snap.spreadsheetId,
-      range: `${q(snap.tab)}!A${prep.row}:Z${prep.row}`,
-      valueRenderOption: "UNFORMATTED_VALUE",
-      dateTimeRenderOption: "SERIAL_NUMBER",
-    }),
-  );
-  const header = g.__prepHeader?.key === `${snap.spreadsheetId}|${snap.tab}` ? g.__prepHeader.row : null;
-  if (!header) throw new UserError(503, "The drill-down tab's header can't be read. Try again.", "sheets_unavailable");
-  const now = rowsToPreps(
-    [header, (check.data.values?.[0] ?? []) as unknown[]],
-    snap.columns,
-    new Date(Date.now() + IST_OFFSET_MS).getUTCFullYear(),
-    dayOf(new Date()),
-  )[0];
-  if (!now || !sameIdentity(now, prep)) {
-    forgetPrepSnapshot();
-    throw new UserError(409, "The drill-down sheet changed while you were working. Refresh and try again.", "row_moved");
-  }
   const sheetId = await sheetIdOf(snap.spreadsheetId, snap.tab);
   const requests: sheets_v4.Schema$Request[] = cells
     .filter((c) => c.col > 0 && c.col <= 26)
@@ -231,12 +220,43 @@ export async function writePrepCells(key: string, cells: CellWrite[]): Promise<n
   // A write is never retried blindly (a lost response may have applied); these are idempotent
   // "set cell" writes, so one retry on a transient error is safe.
   await withSheetsRetry(() => sheets.spreadsheets.batchUpdate({ spreadsheetId: snap.spreadsheetId, requestBody: { requests } }), 2);
-  forgetPrepSnapshot();
+  if (patch) {
+    // Show the change at once without re-reading the tab; the next read (≤ 1 min) confirms it.
+    const updated = patch(prep);
+    const i = snap.preps.indexOf(prep);
+    if (i >= 0) snap.preps[i] = updated;
+    snap.byKey.set(key, updated);
+  } else {
+    forgetPrepSnapshot();
+  }
   return prep.row;
 }
 
-/** Refuse to write when the tab we'd write to is itself an IMPORTRANGE (its cells must stay empty). */
+/** Re-reads one row and checks it still holds [prep] (someone may have edited or moved it). */
+async function rowStillHolds(snap: PrepSnapshot, prep: PrepRow): Promise<boolean> {
+  const header = g.__prepHeader?.key === `${snap.spreadsheetId}|${snap.tab}` ? g.__prepHeader.row : null;
+  if (!header) return false;
+  const check = await withSheetsRetry(() =>
+    getSheetsWriter().spreadsheets.values.get({
+      spreadsheetId: snap.spreadsheetId,
+      range: `${q(snap.tab)}!A${prep.row}:Z${prep.row}`,
+      valueRenderOption: "UNFORMATTED_VALUE",
+      dateTimeRenderOption: "SERIAL_NUMBER",
+    }),
+  );
+  const now = rowsToPreps(
+    [header, (check.data.values?.[0] ?? []) as unknown[]],
+    snap.columns,
+    new Date(Date.now() + IST_OFFSET_MS).getUTCFullYear(),
+    dayOf(new Date()),
+  )[0];
+  return Boolean(now && sameIdentity(now, prep));
+}
+
+/** Refuse to write when the tab we'd write to is itself an IMPORTRANGE (its cells must stay empty). Checked once per 10 min. */
 async function assertNotMirror(snap: PrepSnapshot): Promise<void> {
+  const key = `${snap.spreadsheetId}|${snap.tab}`;
+  if (g.__prepNotMirror && g.__prepNotMirror.key === key && Date.now() - g.__prepNotMirror.at < SOURCE_TTL_MS) return;
   const res = await withSheetsRetry(() =>
     getSheetsWriter().spreadsheets.values.get({ spreadsheetId: snap.spreadsheetId, range: `${q(snap.tab)}!A1`, valueRenderOption: "FORMULA" }),
   );
@@ -244,6 +264,7 @@ async function assertNotMirror(snap: PrepSnapshot): Promise<void> {
     g.__prepSource = undefined;
     throw new UserError(503, "The drill-down tab is a copy of another sheet; the server will write to the original. Try again in a moment.", "sheets_unavailable");
   }
+  g.__prepNotMirror = { key, at: Date.now() };
 }
 
 /**
