@@ -77,6 +77,18 @@ function cutoff(pool: Cand[], cfg: BoundsConfig, phase: "github" | "review"): { 
   return ranked.length >= cfg.topN ? ranked[cfg.topN - 1] : null;
 }
 
+/**
+ * The pool in shortlist order as far as it is known now (place, then the rank score with what
+ * has been read so far). Used to find the candidates around the cut-off.
+ */
+export function rankedPlaces<C extends Cand>(pool: C[], cfg: BoundsConfig): C[] {
+  return pool
+    .map((c) => ({ c, place: placeOf(c), score: scoreBounds(c, cfg, "final").min }))
+    .filter((x): x is { c: C; place: Place; score: number } => x.place !== null)
+    .sort((a, b) => a.place[0] - b.place[0] || a.place[1] - b.place[1] || b.score - a.score)
+    .map((x) => x.c);
+}
+
 /** The candidates still able to reach the top N (ids), given what is unknown in `phase`. */
 export function contenders(candidates: Cand[], cfg: BoundsConfig, phase: "github" | "review"): Set<string> {
   const pool = candidates.filter((c) => clearsGates(c, cfg));

@@ -403,6 +403,24 @@ export interface DomainCandidate extends DomainCandidateRow {
   githubAccountName?: string;
   /** Does the GitHub account look like the candidate's? A clear mismatch isn't counted in the rank. */
   githubIdentity?: "match" | "mismatch" | "unknown";
+  /** Must-haves the model said were met but the resume's evidence never names (meetsMandatory was set false). */
+  mandatoryOverruled?: string[];
+  /** An independent second judgement for a candidate near the shortlist cut-off (automation). */
+  secondOpinion?: SecondOpinion;
+}
+
+/** A second model's judgement of the same resume, grounded the same way, compared with the first. */
+export interface SecondOpinion {
+  /** "provider/model" that gave it. */
+  scoredBy: string;
+  domainScore: number;
+  meetsMandatory: boolean;
+  /** False when the two judgements disagree on what matters for the shortlist. */
+  agrees: boolean;
+  /** What differs, in one line ("" when they agree). */
+  difference: string;
+  /** ISO time. */
+  at: string;
 }
 
 /** A scored candidate plus where they landed in the shortlist. */

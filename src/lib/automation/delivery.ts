@@ -7,7 +7,7 @@ import { PLACEHOLDER_STATUSES, deliveredKeys, deliveryTable, placeholderRows, pl
 import { JobError } from "@/lib/automation/errors";
 import { destinationTabName } from "@/lib/automation/instructions";
 import { loadCandidates, logEvent } from "@/lib/automation/store";
-import { jobVerdict, reviewFlags } from "@/lib/automation/validation";
+import { jobVerdict, mainModelOf, missFlags, reviewFlags } from "@/lib/automation/validation";
 import type { UnscoredRow } from "@/lib/domain-csv";
 import type { RunContext } from "@/lib/automation/context";
 import type { JobResult } from "@/lib/automation/types";
@@ -85,7 +85,14 @@ export async function validate(ctx: RunContext, final = true): Promise<Validated
   if (!built.ok) throw new JobError(`Ranking failed: ${built.error}`, true);
   const report = built.data;
   const flags = new Map<string, string[]>();
-  for (const c of report.candidates.filter((x) => x.shortlisted)) flags.set(c.id, reviewFlags(c, ctx.plan));
+  const run = { mainModel: mainModelOf(candidates) };
+  const mandatoryActive = ctx.plan.mandatory.trim().length > 0;
+  for (const c of report.candidates) {
+    const f = c.shortlisted ? reviewFlags(c, ctx.plan, run) : missFlags(c, mandatoryActive);
+    if (f.length || c.shortlisted) flags.set(c.id, f);
+  }
+  const shortlistedIds = new Set(report.candidates.filter((c) => c.shortlisted).map((c) => c.id));
+  const possibleMisses = report.candidates.filter((c) => !c.shortlisted && (flags.get(c.id) ?? []).length).length;
   const sourceTabOf = new Map(screened.map((c) => [c.candidate!.id, c.sourceTab]));
   const live = all.filter((c) => c.state !== "duplicate");
   const unscored = live
@@ -103,14 +110,15 @@ export async function validate(ctx: RunContext, final = true): Promise<Validated
     shortlisted,
     requested: ctx.plan.topN,
     unscored: final ? stats.unscored : 0,
-    flaggedShortlisted: [...flags.values()].filter((f) => f.length).length,
+    flaggedShortlisted: [...flags.entries()].filter(([id, f]) => shortlistedIds.has(id) && f.length).length,
     briefSource: ctx.plan.briefSource,
   });
   await logEvent(
     ctx.job.id,
     "validating",
     "info",
-    `${final ? "" : "Shortlist final before the full screening: "}${shortlisted} shortlisted of ${stats.scored} scored; ${verdict.status}${verdict.reasons.length ? `: ${verdict.reasons.join("; ")}` : ""}.`,
+    `${final ? "" : "Shortlist final before the full screening: "}${shortlisted} shortlisted of ${stats.scored} scored; ${verdict.status}${verdict.reasons.length ? `: ${verdict.reasons.join("; ")}` : ""}.` +
+      (possibleMisses ? ` ${possibleMisses} not shortlisted marked "possible miss" by the second opinion.` : ""),
   );
   return { report, flags, sourceTabOf, unscored, status: verdict.status, reasons: verdict.reasons, stats };
 }

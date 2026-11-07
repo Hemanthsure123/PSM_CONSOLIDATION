@@ -1,11 +1,14 @@
 import "server-only";
 import { reviewDomainProjects } from "@/lib/domain-project-review";
 import { GITHUB_BUDGET_FLOOR, shortlistBar } from "@/lib/domain-scoring";
-import { inspectDomainGithub, type GithubInspectResult } from "@/lib/domain-screen";
+import { inspectDomainGithub, screenDomainCandidate, type DomainScreenResult, type GithubInspectResult } from "@/lib/domain-screen";
 import { BELOW_BAR_NOTE } from "@/lib/domain-csv";
 import { checkGithubAccess } from "@/lib/github-analysis";
 import { runQueue } from "@/lib/parallel-queue";
-import { adaptiveConcurrency } from "@/lib/automation/load";
+import { adaptiveConcurrency, cpuGate, ioConcurrency } from "@/lib/automation/load";
+import { secondOpinionChain } from "@/lib/automation/engine";
+import { compareOpinions, secondOpinionPicks } from "@/lib/automation/second-opinion";
+import { logEvent } from "@/lib/automation/store";
 import { clearsGates, contenders, type BoundsConfig } from "@/lib/automation/ranking-bounds";
 import { loadCandidates, markPending, saveEvaluated, type CandidateCheckpoint } from "@/lib/automation/store";
 import type { RunContext } from "@/lib/automation/context";
@@ -234,4 +237,68 @@ export async function noteUninspected(ctx: RunContext): Promise<void> {
         : "Not inspected — misses a must-have, so GitHub can't change the result";
     await saveEvaluated(ctx.job.id, cp.key, c, {});
   }
+}
+
+const secondOpinionParallel = () => ioConcurrency(3, 4);
+
+/**
+ * Second opinions for the candidates next to the cut-off (second-opinion.ts): the same resume
+ * judged again by an independent model, grounded by the same checks. Stored on the candidate;
+ * a disagreement becomes a review flag in validation — scores and ranking never change. Called
+ * again later, it only judges candidates who don't have one yet; failures are simply skipped.
+ */
+export async function evaluateSecondOpinions(ctx: RunContext): Promise<void> {
+  const chain = secondOpinionChain();
+  if (!chain) return;
+  const all = screened(await loadCandidates(ctx.job.id));
+  const byId = new Map(all.map((cp) => [cp.candidate!.id, cp]));
+  const picks = secondOpinionPicks(all.map(withInternal), boundsOf(ctx))
+    .map((id) => byId.get(id))
+    .filter((cp): cp is CandidateCheckpoint => Boolean(cp));
+  if (!picks.length) return;
+  const mandatoryActive = ctx.plan.mandatory.trim().length > 0;
+  await ctx.beat("evaluating", { note: `second opinion on ${picks.length} near the cut-off` }, true);
+  let agree = 0;
+  let disagree = 0;
+  let failed = 0;
+  const saves: Promise<unknown>[] = [];
+  await runQueue<CandidateCheckpoint, DomainScreenResult>({
+    items: picks,
+    concurrency: secondOpinionParallel,
+    stopped: () => ctx.stopped,
+    run: (cp) =>
+      screenDomainCandidate(cp.row, {
+        domain: ctx.plan.brief,
+        mandatory: ctx.plan.mandatory,
+        useDsa: false,
+        useGithub: false,
+        requireExperience: Boolean(ctx.plan.requireExperience),
+        checkPresentation: false,
+        gate: (work) => cpuGate.run(work),
+        chain,
+        cache: true,
+      }),
+    retryAfter: () => null,
+    onDone: (cp, res) => {
+      if (!res.ok) {
+        failed++;
+        return;
+      }
+      const first = withInternal(cp);
+      const second = { domainScore: res.candidate.domainScore, meetsMandatory: res.candidate.meetsMandatory, scoredBy: res.candidate.scoredBy ?? chain };
+      const verdict = compareOpinions(first, second, mandatoryActive);
+      if (verdict.agrees) agree++;
+      else disagree++;
+      cp.candidate!.secondOpinion = { ...second, ...verdict, at: new Date().toISOString() };
+      saves.push(saveEvaluated(ctx.job.id, cp.key, cp.candidate!, {}).catch((e) => console.warn("[automation] save failed:", e)));
+    },
+  });
+  await Promise.all(saves);
+  await ctx.beat("evaluating", { note: undefined }, true);
+  await logEvent(
+    ctx.job.id,
+    "evaluating",
+    disagree ? "warn" : "info",
+    `Second opinion (${chain.replace(/^openai:/, "openai/")}) on ${picks.length} near the cut-off: ${agree} agree, ${disagree} disagree (flagged for a person)${failed ? `, ${failed} couldn't be judged` : ""}.`,
+  );
 }

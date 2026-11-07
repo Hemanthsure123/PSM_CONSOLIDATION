@@ -1,6 +1,8 @@
 import "server-only";
 import { fetchResume, type ResumeBytes } from "@/lib/resume";
-import { contentFromBytes, looksLikeResume, transcribeDocument, visionTiers, DOC_LABEL } from "@/lib/resume-content";
+import { contentFromBytes, looksLikeResume, transcribeDocument, visionTiers, DOC_LABEL, type Transcript } from "@/lib/resume-content";
+import { parsePdf } from "@/lib/pdf-text";
+import { OCR_READER_VERSION, readResumeCache, sha256, writeResumeCache } from "@/lib/resume-cache";
 import { env } from "@/lib/env";
 import { extractProfileLinksFromResume, collectResumeUrls } from "@/lib/resume-links";
 import { getGithubContributions, parseGithubUser } from "@/lib/coding-stats";
@@ -63,7 +65,12 @@ const ocrChain = () =>
     "gemini:gemini-3.8-flash,gemini:gemini-3.6-flash,gemini:gemini-3.5-flash,gemini:gemini-3-flash-preview,gemini:gemini-3.1-flash-lite,gemini:gemini-2.5-flash," +
       `openai:${env.openai.model}`,
   );
-const OCR_TIMEOUT_MS = 60_000;
+/**
+ * One transcription attempt is cut off here, then the next vision model is tried. A clean
+ * one-page transcription takes ~8-15 s; waiting 60 s on an overloaded model held a screening
+ * slot for a minute per scanned resume.
+ */
+const OCR_TIMEOUT_MS = 35_000;
 
 export interface DomainScreenOptions {
   domain: string;
@@ -72,12 +79,69 @@ export interface DomainScreenOptions {
   mandatory: string;
   requireExperience: boolean;
   checkPresentation: boolean;
+  /** Runs the CPU-heavy reading of the file (automation: one at a time on a small instance). */
+  gate?: <T>(work: () => Promise<T>) => Promise<T>;
+  /** "provider:model,..." for the judgement instead of the configured chain (second opinions). */
+  chain?: string;
+  /** Reuse identical judgements and scan transcriptions from the content caches. */
+  cache?: boolean;
+}
+
+/** Where one candidate's screening time went (stored per candidate; summarised per job). */
+export interface ScreenMetrics {
+  downloadMs: number;
+  /** Waiting for the CPU gate before reading the file. */
+  gateWaitMs: number;
+  /** Reading the file (PDF text + links, .docx, ...). */
+  readMs: number;
+  /** Transcribing a scanned file / image (0 = not needed). */
+  ocrMs: number;
+  /** The model's judgement (and the DSA read alongside it). */
+  judgeMs: number;
+  totalMs: number;
+  /** The file's text came from the resume cache (not parsed again). */
+  textFromCache: boolean;
+  /** The judgement came from the judgement cache (no model call). */
+  judgementFromCache: boolean;
+  /** The scan's transcription came from the resume cache. */
+  ocrFromCache: boolean;
+  scoredBy: string;
 }
 
 export type DomainScreenResult =
-  | { ok: true; candidate: DomainCandidate; source: string }
+  | { ok: true; candidate: DomainCandidate; source: string; metrics?: ScreenMetrics }
   /** invalid = the file is not a resume (never retried); error = could not be screened. */
-  | { ok: false; kind: "invalid" | "error"; error: string; retryable: boolean };
+  | { ok: false; kind: "invalid" | "error"; error: string; retryable: boolean; metrics?: ScreenMetrics };
+
+const passThrough = <T,>(work: () => Promise<T>) => work();
+
+type DocType = Extract<Transcript, { ok: true }>["type"];
+/** A scan's transcription as cached: what the file is, and its text when it is a resume. */
+interface CachedTranscript {
+  type: DocType;
+  description: string;
+  text: string;
+  model: string;
+}
+
+/** Transcribe a scan / image once per file content (automation.resume_cache, kind "ocr"). */
+async function transcribeOnce(
+  bytes: Buffer,
+  inline: { mimeType: string; data: string },
+  label: string,
+  useCache: boolean,
+): Promise<(CachedTranscript & { ok: true; fromCache: boolean }) | { ok: false; error: string }> {
+  const hash = useCache ? sha256(bytes) : "";
+  if (hash) {
+    const hit = await readResumeCache<CachedTranscript>(hash, "ocr", OCR_READER_VERSION);
+    if (hit?.type) return { ok: true, ...hit, fromCache: true };
+  }
+  const doc = await transcribeDocument(inline, { chain: ocrChain(), label, timeoutMs: OCR_TIMEOUT_MS });
+  if (!doc.ok) return doc;
+  const out: CachedTranscript = { type: doc.type, description: doc.description, text: doc.text, model: doc.model };
+  if (hash) await writeResumeCache(hash, "ocr", OCR_READER_VERSION, out, bytes.length);
+  return { ok: true, ...out, fromCache: false };
+}
 
 /** github.com first path segments that are GitHub's own pages, never a user. */
 const GITHUB_NON_USER =
@@ -186,14 +250,32 @@ async function readDsa(forLinks: ResumeBytes): Promise<DsaSnapshot> {
  */
 export async function screenDomainCandidate(row: DomainCandidateRow, opts: DomainScreenOptions): Promise<DomainScreenResult> {
   const { domain, useDsa, useGithub, mandatory, requireExperience, checkPresentation } = opts;
-  const fail = (error: string, retryable = false): DomainScreenResult => ({ ok: false, kind: "error", error, retryable });
-  const invalid = (error: string): DomainScreenResult => ({ ok: false, kind: "invalid", error, retryable: false });
+  const gate = opts.gate ?? passThrough;
+  const t0 = performance.now();
+  const m: ScreenMetrics = {
+    downloadMs: 0,
+    gateWaitMs: 0,
+    readMs: 0,
+    ocrMs: 0,
+    judgeMs: 0,
+    totalMs: 0,
+    textFromCache: false,
+    judgementFromCache: false,
+    ocrFromCache: false,
+    scoredBy: "",
+  };
+  const since = (t: number) => Math.round(performance.now() - t);
+  const metrics = (): ScreenMetrics => ({ ...m, totalMs: since(t0) });
+  const fail = (error: string, retryable = false): DomainScreenResult => ({ ok: false, kind: "error", error, retryable, metrics: metrics() });
+  const invalid = (error: string): DomainScreenResult => ({ ok: false, kind: "invalid", error, retryable: false, metrics: metrics() });
   if (!domain.trim()) return fail("Enter the domain to shortlist for first.");
   if (!/^https?:\/\//i.test((row.resumeUrl ?? "").trim())) return fail("No resume link in the sheet.");
 
   try {
     // 1. Download — a passing failure is retried; a missing / unshared file is final.
+    let t = performance.now();
     const fetched = await fetchResume(row.resumeUrl);
+    m.downloadMs = since(t);
     if (!fetched.ok) {
       return fetched.transient
         ? fail(`Resume download failed temporarily (${fetched.error.slice(0, 80)}) — retrying.`, true)
@@ -202,7 +284,17 @@ export async function screenDomainCandidate(row: DomainCandidateRow, opts: Domai
     const bytes = fetched.bytes;
 
     // 2. What the file really is, and what the model may read.
-    const content = await contentFromBytes(bytes);
+    // Reading the file is the CPU-heavy part: it goes through the gate (one file at a time on a
+    // small instance) while other candidates' downloads and model calls keep going.
+    const queued = performance.now();
+    const content = await gate(async () => {
+      m.gateWaitMs = since(queued);
+      const started = performance.now();
+      const c = await contentFromBytes(bytes);
+      if (typeof c !== "string" && c.source === "pdf") m.textFromCache = Boolean((await parsePdf(bytes.data)).fromCache);
+      m.readMs = since(started);
+      return c;
+    });
     if (typeof content === "string") return fail(content);
     let resumeText = content.text;
     // Gemini reads a PDF with a real text layer natively (layout-aware — the presentation
@@ -210,8 +302,11 @@ export async function screenDomainCandidate(row: DomainCandidateRow, opts: Domai
     let forModel: ResumeBytes = content.source === "pdf" && looksLikeResume(resumeText) ? bytes : asText(resumeText);
     if (!looksLikeResume(resumeText)) {
       if (!content.inline) return invalid("The file has no readable resume text (no skills / projects / experience / education).");
-      const doc = await transcribeDocument(content.inline, { chain: ocrChain(), label: `domain-ocr:${row.id}`, timeoutMs: OCR_TIMEOUT_MS });
+      t = performance.now();
+      const doc = await transcribeOnce(bytes.data, content.inline, `domain-ocr:${row.id}`, Boolean(opts.cache));
+      m.ocrMs = since(t);
       if (!doc.ok) return fail(`Could not read the scanned resume: ${doc.error.slice(0, 160)}`, true);
+      m.ocrFromCache = doc.fromCache;
       if (doc.type !== "resume") {
         return invalid(`The resume link is ${DOC_LABEL[doc.type]}${doc.description ? ` — ${doc.description}` : ""}.`);
       }
@@ -245,12 +340,16 @@ export async function screenDomainCandidate(row: DomainCandidateRow, opts: Domai
     const dsaRead = useDsa ? readDsa(forLinks) : Promise.resolve(undefined);
 
     // 5. The judgement.
+    t = performance.now();
     const [res, gh, dsa] = await Promise.all([
-      analyzeCandidateForDomain(forModel, domain, "", mandatory, requireExperience, checkPresentation),
+      analyzeCandidateForDomain(forModel, domain, "", mandatory, requireExperience, checkPresentation, { chain: opts.chain, cache: opts.cache }),
       githubLinks,
       dsaRead,
     ]);
+    m.judgeMs = since(t);
     if (!res.ok) return fail(res.error, true);
+    m.scoredBy = res.data.scoredBy;
+    m.judgementFromCache = Boolean(res.data.fromCache);
     const leetcodeSolved = dsa?.leetcode.solved ?? 0;
     const codeforcesSolved = dsa?.codeforces.solved ?? 0;
 
@@ -273,6 +372,7 @@ export async function screenDomainCandidate(row: DomainCandidateRow, opts: Domai
     return {
       ok: true,
       source: content.source === "pdf" && forModel === bytes ? "pdf" : `${content.source} (as text)`,
+      metrics: metrics(),
       candidate: {
         ...row,
         domainScore,
@@ -281,6 +381,8 @@ export async function screenDomainCandidate(row: DomainCandidateRow, opts: Domai
         domainProofs: grounded.proofs,
         ...(grounded.capped ? { rawDomainScore: grounded.rawScore, domainCapped: grounded.capped } : {}),
         meetsMandatory: res.data.meetsMandatory && absent.length === 0,
+        // The model said every must-have is met but the evidence never names these (kept for review / second opinions).
+        ...(absent.length ? { mandatoryOverruled: absent } : {}),
         hasDomainExperience: res.data.hasDomainExperience,
         experience: res.data.experience,
         presentationScore: checkPresentation ? res.data.presentationScore : 0,

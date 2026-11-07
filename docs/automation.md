@@ -195,7 +195,7 @@ The **orchestrator** (`orchestrator.ts`) runs the agents in order and decides re
 - a wrong tab name;
 - re-running a failed row, which resumed.
 
-The self-tests are `scripts/automation-selftest.ts` (instructions, columns, flags, delivery rules, status text) and `scripts/apps-script-selftest.ts` (the real `.gs` file against a simulated sheet).
+The self-tests are `scripts/automation-selftest.ts` (instructions, columns, flags, delivery rules, status text), `scripts/screening-perf-selftest.ts` (the parallel queue, the CPU gate, one-pass PDF reading, second-opinion picks and comparison, timing summary) and `scripts/apps-script-selftest.ts` (the real `.gs` file against a simulated sheet).
 
 ### Why it's fast on the free plan
 
@@ -203,8 +203,20 @@ The self-tests are `scripts/automation-selftest.ts` (instructions, columns, flag
 |---|---|
 | **Stage-first screening and an early shortlist** | The shortlist is delivered as soon as it can't change, before the rest of the sheet is screened |
 | **GitHub and code review only for contenders** | Only candidates who can still reach the top N are inspected. The test uses exact score bounds:<br>• domain fit, plus DSA, plus up to 20 points for GitHub;<br>• the code review can move the GitHub part only within known limits.<br>Anyone who would rank below the N-th candidate even at their best is skipped. A top-10 run inspects about 10–20 profiles instead of every domain fit, and the shortlist is identical to inspecting everyone.<br>With `GitHub: (all candidates)`, everyone else's GitHub is read after the shortlist is out. |
-| **Memory- and CPU-aware parallelism** | 5 resumes, 4 GitHub profiles and 3 code reviews run at once. That is halved while memory is high or the server is busy (event-loop delay over 300 ms), and drops to one at a time above 450 MB or 1 s of delay. On the free plan's 0.1 CPU, parsing many resumes at once would otherwise make even `/api/health` miss Render's 5-second health check, and Render would restart the server mid-job. |
-| **Nothing done twice** | Inspections and reviews are cached for 24 h, and a restarted job skips finished candidates |
+| **Waiting and CPU work are limited separately** | Up to 6 resumes are in flight at once (`AUTOMATION_CONCURRENCY`): downloads and model calls mostly wait. Opening the files, the only CPU-heavy step, goes through a gate one file at a time (`AUTOMATION_CPU_PARALLEL`, default 1). So the model calls overlap the parsing instead of queueing behind it. Before 2026-11-08 the whole resume was throttled on event-loop delay, which left the free plan's 0.1 CPU screening one resume at a time (91 resumes took 37 minutes). The width drops only under memory pressure (halved above `AUTOMATION_MEMORY_SOFT_MB` 380, at most 2 above `AUTOMATION_MEMORY_HARD_MB` 450). GitHub (4) and code reviews (3) still also slow down while the event loop lags. |
+| **One queue for all stages** | TR-2, TR-1 and assessed candidates still go first, but the next stage starts in any free slot, so no slot sits idle at the end of a stage. The early shortlist runs as soon as its stages are done, while screening carries on. |
+| **Each PDF opened once** | The text for the model, the GitHub links and the coding-profile links come from one parse (before: three). pdf.js font warnings are switched off. |
+| **Nothing done twice** | Content caches in the database (migration 008):<br>• a resume file's text and links, by the SHA-256 of its bytes (`automation.resume_cache`), so the same file in a re-run or another company's job is never parsed again;<br>• a scan's transcription, likewise;<br>• a model judgement, keyed by everything it depends on (the exact text the model read, the brief, the must-haves, the prompt and schema, the models), so a re-run reuses it (`automation.judgement_cache`). Only Gemini and OpenAI judgements are stored.<br>Unused rows are deleted after 90 days. Inspections and reviews are cached for 24 h, and a restarted job skips finished candidates. |
+| **Scans fail over fast** | A scanned resume's transcription attempt is cut off after 35 s (before: 60 s), then the next vision model is tried. |
+
+### Accuracy safeguards
+
+| Safeguard | What it does |
+|---|---|
+| **Evidence grounding** | Core skills need a quote that really appears in the projects, experience or achievements; a high fit needs quoted evidence (capped at 35 / 50 / 79 without it); a "meets every must-have" claim is overruled when the evidence never names one (kept as `mandatoryOverruled`). |
+| **Second opinion near the cut-off** | Up to 15 candidates per job are judged again by an independent model (OpenAI, which reads the same file), grounded the same way: the ones whose must-have claim was overruled, the 3 places above and 4 below the top-N cut-off, and fits within 8 points of the bar. A disagreement on the must-haves, on which side of the bar, or by 15+ points becomes a **Review Flag**. On a shortlisted candidate it says "Second opinion disagrees"; on one not shortlisted whom the second model would shortlist, "Possible miss". It never changes a score or the ranking. Switch off with `AUTOMATION_SECOND_OPINION=off`. |
+| **Mixed models flagged** | When Gemini's daily quota runs out mid-job and some candidates were judged by another model, those shortlisted are flagged "Judged by X (most of this job by Y)": different models grade on different scales. |
+| **Traceable runs** | Every job's plan carries an engine stamp (code version, models, widths, second-opinion chain), and the log ends screening with a timing line: wall time, median download / read / CPU wait / AI time, cache hits and which models judged. Per-candidate timings are in `job_candidates.metrics`. |
 
 **"X or Y" must-haves.** A must-have such as "Node.js or Golang" or "MongoDB or MySQL" is met when any one alternative is proven. This applies to:
 - the resume screening;
@@ -217,9 +229,9 @@ The self-tests are `scripts/automation-selftest.ts` (instructions, columns, flag
 |---|---|
 | See a job | `GET /api/automation/jobs/<id>?events=1` with `Authorization: Bearer <AUTOMATION_TOKEN>`. Returns status, step, progress, result and the event log. |
 | Recent jobs | `GET /api/automation/jobs?limit=20` |
-| Database | Schema `automation`: `jobs`, `job_requests`, `job_events`, `job_candidates`. Checkpoints of jobs finished more than 30 days ago are pruned; the jobs and their events stay. |
+| Database | Schema `automation`: `jobs`, `job_requests`, `job_events`, `job_candidates` (with per-candidate `metrics`), `resume_cache`, `judgement_cache`. Checkpoints of jobs finished more than 30 days ago are pruned; the jobs and their events stay. Cache rows unused for 90 days are deleted. |
 | Turn the worker off | Set `AUTOMATION_WORKER` to anything but `on`. Jobs wait as `PENDING` until it is on again. |
-| Speed | `AUTOMATION_CONCURRENCY` (default 5) sets how many resumes are screened at once. It drops automatically while memory is high (`AUTOMATION_MEMORY_SOFT_MB` 380 halves it; `AUTOMATION_MEMORY_HARD_MB` 450 makes it one at a time), so the free plan's 512 MB is never exceeded. |
+| Speed | `AUTOMATION_CONCURRENCY` (default 6, max 10) sets how many resumes are in flight at once; `AUTOMATION_CPU_PARALLEL` (default 1, max 4) how many files are opened at once. Raise the second only on an instance with a full CPU or more. The first drops automatically while memory is high, so the free plan's 512 MB is never exceeded. The timing line at the end of screening shows where the time went. |
 
 Server settings (Render → Environment):
 
@@ -229,7 +241,9 @@ Server settings (Render → Environment):
 | `AUTOMATION_WORKER` | `on` |
 | `AUTOMATION_SPREADSHEET_IDS` | The coordination sheet's id. Requests from any other sheet are refused. |
 | `AUTOMATION_CONTROL_TABS` | Optional; defaults to `Profile Shortlisting - New` |
-| `AUTOMATION_CONCURRENCY` | Optional; defaults to 5 (lowered automatically under memory pressure) |
+| `AUTOMATION_CONCURRENCY` | Optional; defaults to 6 (lowered automatically under memory pressure) |
+| `AUTOMATION_CPU_PARALLEL` | Optional; defaults to 1 (files opened at once; keep 1 on the free plan) |
+| `AUTOMATION_SECOND_OPINION` | Optional; `off` switches second opinions off (they need OpenAI keys) |
 
 ## Troubleshooting
 

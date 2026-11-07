@@ -6,6 +6,7 @@ import { ChatPoolError, filePart, hasProviderKeys, pooledChatJson, strictJsonSch
 import { escalate, type EscalationTier, type TierResult } from "@/lib/llm-escalation";
 import { fetchResumeBytes, type ResumeBytes } from "@/lib/resume";
 import { pdfBufferToText } from "@/lib/pdf-text";
+import { readJudgement, sha256, writeJudgement } from "@/lib/resume-cache";
 import { env } from "@/lib/env";
 import type {
   ActionResult,
@@ -594,6 +595,16 @@ export interface DomainFit {
   presentationNotes: string;
   /** The model that gave this judgement, e.g. "gemini/gemini-3.6-flash". */
   scoredBy: string;
+  /** Reused from the judgement cache (same resume text, brief, mandatory list, prompt and models). */
+  fromCache?: boolean;
+}
+
+/** Options of one domain judgement (automation). */
+export interface DomainJudgeOptions {
+  /** "provider:model,…" to use instead of the configured chain (e.g. an OpenAI-only second opinion). */
+  chain?: string;
+  /** Reuse / store the judgement in the judgement cache (identical inputs only). */
+  cache?: boolean;
 }
 
 /** Clamp any LLM-returned score to a 0-100 integer (0 when unusable). */
@@ -679,6 +690,7 @@ export async function analyzeCandidateForDomain(
   requireExperience = false,
   /** When true, also grade the resume's structure / alignment / visual quality. */
   checkPresentation = false,
+  opts: DomainJudgeOptions = {},
 ): Promise<ActionResult<DomainFit>> {
   const base =
     `Domain to shortlist for:\n${domain.trim().slice(0, 1500)}\n\n` +
@@ -721,8 +733,33 @@ export async function analyzeCandidateForDomain(
       : { ok: false, kind: "unusable", detail: "unreadable JSON, no domainScore, or a score with no evidence" };
   };
 
+  const chain = domainChain(opts.chain);
+  if (!chain.length) return { ok: false, error: `${DOMAIN_RETRY_PREFIX} (no model with keys in the chain)` };
+
+  // Same resume text + brief + mandatory list + prompt + models → same judgement: reuse it.
+  const cacheKey = opts.cache
+    ? sha256(
+        JSON.stringify({
+          v: DOMAIN_CACHE_VERSION,
+          system: DOMAIN_TASK.system,
+          schema: DOMAIN_TASK.schema,
+          shape: DOMAIN_TASK.shapeHint,
+          temperature: DOMAIN_TASK.temperature,
+          visualInstruction,
+          textInstruction,
+          mime: resume.mimeType,
+          resume: sha256(resume.data),
+          chain: chain.map((t) => `${t.provider}:${t.model}`),
+        }),
+      )
+    : "";
+  if (cacheKey) {
+    const hit = await readJudgement<Omit<DomainFit, "scoredBy" | "fromCache">>(cacheKey);
+    if (hit) return { ok: true, data: { ...hit.data, scoredBy: hit.scoredBy, fromCache: true } };
+  }
+
   const tiers: EscalationTier<Omit<DomainFit, "scoredBy">>[] = [];
-  for (const { provider, model } of domainChain()) {
+  for (const { provider, model } of chain) {
     if (provider === "gemini") {
       tiers.push({
         provider,
@@ -773,14 +810,20 @@ export async function analyzeCandidateForDomain(
 
   const res = await escalate(tiers, DOMAIN_LEAVE_ON, (line) => console.warn(`[llm:domain] ${line}`));
   if (res.ok) {
-    if (res.provider !== "gemini") console.warn(`[llm:domain] judged by fallback ${res.label}`);
-    return { ok: true, data: { ...res.value, scoredBy: `${res.provider}/${res.model}` } };
+    if (res.provider !== chain[0].provider) console.warn(`[llm:domain] judged by fallback ${res.label}`);
+    const scoredBy = `${res.provider}/${res.model}`;
+    // Only judgements from the strong providers are reused; a last-resort fallback is re-asked next time.
+    if (cacheKey && (res.provider === "gemini" || res.provider === "openai")) await writeJudgement(cacheKey, scoredBy, res.value);
+    return { ok: true, data: { ...res.value, scoredBy } };
   }
   return { ok: false, error: `${DOMAIN_RETRY_PREFIX} (${res.error})` };
 }
 
 /** Start of the error when every model failed (quota, overload, unusable answers) — a retry can succeed. */
 const DOMAIN_RETRY_PREFIX = "Could not assess the resume for the domain";
+
+/** Bump to invalidate every cached domain judgement (the prompt, schema and models are part of the key already). */
+const DOMAIN_CACHE_VERSION = 1;
 
 /**
  * Domain judgement chain — quality first, never a "lite" model:
@@ -793,7 +836,7 @@ const DOMAIN_RETRY_PREFIX = "Could not assess the resume for the domain";
  * Models checked against these keys on 2026-10-14 (2.5-flash answers only on keys created
  * before its retirement). Override with DOMAIN_LLM_CHAIN="provider:model,…".
  */
-function domainChain(): { provider: "gemini" | ChatProvider; model: string }[] {
+function domainChain(override?: string): { provider: "gemini" | ChatProvider; model: string }[] {
   const gemini = Array.from(
     new Set([
       ...env.gemini.model.split(",").map((m) => m.trim()).filter((m) => m && !/lite/i.test(m)),
@@ -804,6 +847,7 @@ function domainChain(): { provider: "gemini" | ChatProvider; model: string }[] {
     ]),
   );
   const spec =
+    override?.trim() ||
     env.domain.llmChain.trim() ||
     [...gemini.map((m) => `gemini:${m}`), ...env.openai.models.map((m) => `openai:${m}`), "mistral:ministral-14b-latest"].join(",");
   const out: { provider: "gemini" | ChatProvider; model: string }[] = [];

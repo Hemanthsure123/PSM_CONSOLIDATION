@@ -1,6 +1,6 @@
 import "server-only";
 import { SchemaType, type Schema } from "@google/generative-ai";
-import { pdfBufferToText } from "@/lib/pdf-text";
+import { pdfAnnotationLinks, pdfBufferToText } from "@/lib/pdf-text";
 import { parseLeetCodeUser, parseCodeforcesHandle, parseCodeChefHandle } from "@/lib/coding-stats";
 import { runLlmChain } from "@/lib/llm-router";
 import { env } from "@/lib/env";
@@ -47,39 +47,9 @@ function str(v: unknown): string {
 
 // ── Layer 1: PDF link annotations ────────────────────────────────────────────
 
-interface PdfAnnotation {
-  url?: string;
-  unsafeUrl?: string;
-}
-
+/** Clickable links of a PDF — from the shared one-pass parse (pdf-text.ts), never a second parse. */
 async function getPdfAnnotationLinks(buffer: Buffer): Promise<string[]> {
-  // Destroy the pdf.js document when done — otherwise its parsed pages/fonts
-  // stay in memory and accumulate across a large batch until the process OOMs.
-  let destroy: (() => Promise<void>) | undefined;
-  try {
-    const { getDocumentProxy } = await import("unpdf");
-    const pdf = await getDocumentProxy(new Uint8Array(buffer));
-    destroy = () => pdf.destroy();
-    const urls: string[] = [];
-    for (let i = 1; i <= pdf.numPages; i++) {
-      const page = await pdf.getPage(i);
-      const annots = (await page.getAnnotations()) as PdfAnnotation[];
-      for (const a of annots) {
-        const url = a?.url || a?.unsafeUrl;
-        if (typeof url === "string" && url.trim()) urls.push(url.trim());
-      }
-    }
-    return urls;
-  } catch (err) {
-    console.warn("[resume-links] annotation extraction failed:", err instanceof Error ? err.message : err);
-    return [];
-  } finally {
-    try {
-      await destroy?.();
-    } catch {
-      /* already torn down */
-    }
-  }
+  return pdfAnnotationLinks(buffer);
 }
 
 // ── Layer 2: plain-text URLs ─────────────────────────────────────────────────

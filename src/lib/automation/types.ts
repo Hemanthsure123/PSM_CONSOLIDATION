@@ -54,6 +54,18 @@ export interface PlanTab {
 }
 
 /** The Planner's output — everything the later steps need, stored on the job. */
+/** What screened a job (see engine.ts): code version, models and widths. */
+export interface EngineStamp {
+  version: string;
+  /** The primary judgement model(s) configured. */
+  models: string;
+  /** Screening width (model calls / downloads in flight) and CPU width (files read at once). */
+  ioParallel: number;
+  cpuParallel: number;
+  /** Second opinions near the cut-off: the chain, or "off". */
+  secondOpinion: string;
+}
+
 export interface AutomationPlan {
   version: 1;
   sourceSpreadsheetId: string;
@@ -75,6 +87,8 @@ export interface AutomationPlan {
   /** Assumptions the planner made, shown in the job's details. */
   notes: string[];
   requireExperience?: boolean;
+  /** What screened the job (code version, models, widths) — absent on jobs planned before 2026-11-08. */
+  engine?: EngineStamp;
 }
 
 /** One control-row request, as the server read it from the sheet. */

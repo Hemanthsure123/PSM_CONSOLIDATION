@@ -1,4 +1,5 @@
 import { shortlistBar } from "@/lib/domain-scoring";
+import { possibleMissFlag, secondOpinionFlag } from "@/lib/automation/second-opinion";
 import type { AutomationPlan } from "@/lib/automation/types";
 import type { DomainCandidateOutcome } from "@/lib/types";
 
@@ -12,8 +13,21 @@ import type { DomainCandidateOutcome } from "@/lib/types";
 /** How close to the domain-fit bar counts as borderline. */
 export const NEAR_BAR = 5;
 
+/** What the whole run says about a candidate's judgement (for the model-mix flag). */
+export interface RunContextFacts {
+  /** The model that judged most of this job's candidates ("" = unknown). */
+  mainModel?: string;
+}
+
+/** The model most of the candidates were judged by ("" when none recorded). */
+export function mainModelOf(candidates: { scoredBy?: string }[]): string {
+  const counts = new Map<string, number>();
+  for (const c of candidates) if (c.scoredBy) counts.set(c.scoredBy, (counts.get(c.scoredBy) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "";
+}
+
 /** Review flags for one shortlisted candidate ("" free). */
-export function reviewFlags(c: DomainCandidateOutcome, plan: Pick<AutomationPlan, "github" | "dsa">): string[] {
+export function reviewFlags(c: DomainCandidateOutcome, plan: Pick<AutomationPlan, "github" | "dsa">, run: RunContextFacts = {}): string[] {
   const flags: string[] = [];
   const bar = shortlistBar(c);
   if (c.domainScore - bar < NEAR_BAR) flags.push(`Borderline domain fit (${c.domainScore}, bar ${bar})`);
@@ -27,7 +41,17 @@ export function reviewFlags(c: DomainCandidateOutcome, plan: Pick<AutomationPlan
   }
   if (plan.github !== "off" && c.githubStatus === "failed") flags.push("GitHub check failed");
   if (plan.dsa.use && c.dsa?.partial) flags.push("A DSA profile couldn't be read in full");
+  const second = secondOpinionFlag(c);
+  if (second) flags.push(second);
+  // Different models grade differently: a candidate judged by a fallback model ranks on another scale.
+  if (run.mainModel && c.scoredBy && c.scoredBy !== run.mainModel) flags.push(`Judged by ${c.scoredBy} (most of this job by ${run.mainModel})`);
   return flags;
+}
+
+/** Flags for a candidate who was NOT shortlisted (only what suggests a person should look again). */
+export function missFlags(c: DomainCandidateOutcome, mandatoryActive: boolean): string[] {
+  const miss = possibleMissFlag(c, mandatoryActive);
+  return miss ? [miss] : [];
 }
 
 export interface RunFacts {

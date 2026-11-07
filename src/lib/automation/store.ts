@@ -1,4 +1,6 @@
 import "server-only";
+import { pruneContentCaches } from "@/lib/resume-cache";
+import type { ScreenMetrics } from "@/lib/domain-screen";
 import { createHash } from "node:crypto";
 import { query, transaction } from "@/lib/db/client";
 import type { InternalStanding } from "@/lib/pool/types";
@@ -342,6 +344,8 @@ export interface CandidateCheckpoint {
   attempts: number;
   nextTryAt: string | null;
   duplicateOf: string | null;
+  /** Where the last screening attempt's time went (null before migration 008 / not screened yet). */
+  metrics: ScreenMetrics | null;
 }
 
 function toCandidate(r: Raw): CandidateCheckpoint {
@@ -361,6 +365,7 @@ function toCandidate(r: Raw): CandidateCheckpoint {
     attempts: Number(r.attempts ?? 0),
     nextTryAt: iso(r.next_try_at),
     duplicateOf: (r.duplicate_of as string | null) ?? null,
+    metrics: (r.metrics ?? null) as ScreenMetrics | null,
   };
 }
 
@@ -407,24 +412,28 @@ export async function saveScreening(
     | { state: "screened"; candidate: DomainCandidate; githubState: "none" | "pending" }
     | { state: "invalid"; error: string }
     | { state: "error"; error: string; retryable: boolean; nextTryAt: Date | null },
+  metrics: ScreenMetrics | null = null,
 ): Promise<void> {
+  const m = metrics ? JSON.stringify(metrics) : null;
   if (out.state === "screened") {
     await query(
       `update automation.job_candidates set state = 'screened', candidate = $3::jsonb, github_state = $4, error = null, retryable = false,
-              attempts = attempts + 1, next_try_at = null, updated_at = now() where job_id = $1 and key = $2`,
-      [jobId, key, JSON.stringify(out.candidate), out.githubState],
+              attempts = attempts + 1, next_try_at = null, metrics = coalesce($5::jsonb, metrics), updated_at = now() where job_id = $1 and key = $2`,
+      [jobId, key, JSON.stringify(out.candidate), out.githubState, m],
     );
   } else if (out.state === "invalid") {
     await query(
-      `update automation.job_candidates set state = 'invalid', error = $3, retryable = false, attempts = attempts + 1, updated_at = now()
+      `update automation.job_candidates set state = 'invalid', error = $3, retryable = false, attempts = attempts + 1,
+              metrics = coalesce($4::jsonb, metrics), updated_at = now()
         where job_id = $1 and key = $2`,
-      [jobId, key, out.error.slice(0, 1_000)],
+      [jobId, key, out.error.slice(0, 1_000), m],
     );
   } else {
     await query(
-      `update automation.job_candidates set state = 'error', error = $3, retryable = $4, attempts = attempts + 1, next_try_at = $5, updated_at = now()
+      `update automation.job_candidates set state = 'error', error = $3, retryable = $4, attempts = attempts + 1, next_try_at = $5,
+              metrics = coalesce($6::jsonb, metrics), updated_at = now()
         where job_id = $1 and key = $2`,
-      [jobId, key, out.error.slice(0, 1_000), out.retryable, out.nextTryAt],
+      [jobId, key, out.error.slice(0, 1_000), out.retryable, out.nextTryAt, m],
     );
   }
 }
@@ -452,10 +461,14 @@ export async function markPending(jobId: string, keys: string[], field: "github_
   ]);
 }
 
-/** Housekeeping: candidate checkpoints of jobs finished more than 30 days ago (the jobs themselves stay). */
+/**
+ * Housekeeping: candidate checkpoints of jobs finished more than 30 days ago (the jobs themselves
+ * stay), and resume / judgement cache rows nobody used for 90 days.
+ */
 export async function pruneOldCheckpoints(): Promise<void> {
   await query(
     `delete from automation.job_candidates c using automation.jobs j
       where c.job_id = j.id and j.finished_at < now() - interval '30 days'`,
   ).catch(() => undefined);
+  await pruneContentCaches();
 }

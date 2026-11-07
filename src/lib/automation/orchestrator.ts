@@ -3,7 +3,8 @@ import { writeControlStatus } from "@/lib/automation/control-sheet";
 import { LeaseLostError, RunContext } from "@/lib/automation/context";
 import { deliver, validate } from "@/lib/automation/delivery";
 import { isRetryable, JobError, messageOf } from "@/lib/automation/errors";
-import { boundsOf, evaluateGithub, evaluateReviews, noteUninspected } from "@/lib/automation/evaluation";
+import { boundsOf, evaluateGithub, evaluateReviews, evaluateSecondOpinions, noteUninspected } from "@/lib/automation/evaluation";
+import { describeEngine, engineStamp } from "@/lib/automation/engine";
 import { planJob } from "@/lib/automation/planner";
 import { readCandidates, screenCandidates } from "@/lib/automation/screening";
 import { finishJob, heartbeat, loadCandidates, logEvent, releaseForRetry, savePlan, saveResult, type JobRow } from "@/lib/automation/store";
@@ -81,6 +82,7 @@ async function deliverShortlistEarly(ctx: RunContext, sheet: ReturnType<typeof s
   await sheet.now("evaluating", ctx.progress);
   await evaluateGithub(ctx);
   await evaluateReviews(ctx);
+  await evaluateSecondOpinions(ctx);
   const validated = await validate(ctx, false);
   const result = await deliver(ctx, validated, "shortlist");
   await ctx.beat("screening", { shortlistTab: result.destinationTab, shortlistUrl: result.destinationUrl, shortlistCount: result.shortlisted, note: undefined }, true);
@@ -105,7 +107,7 @@ export async function runJob(job: JobRow, owner: string): Promise<void> {
     // 1. Planner.
     if (!ctx.plan || stepIndex(step) <= stepIndex("planning")) {
       await heartbeat(job.id, owner, { step: "planning" });
-      const plan = await planJob(job);
+      const plan = { ...(await planJob(job)), engine: engineStamp() };
       if (!(await savePlan(job.id, owner, plan))) throw new LeaseLostError();
       ctx.plan = plan;
       await logEvent(
@@ -128,6 +130,7 @@ export async function runJob(job: JobRow, owner: string): Promise<void> {
       }
     }
     if (stepIndex(step) <= stepIndex("screening")) {
+      await logEvent(job.id, "screening", "info", describeEngine(engineStamp()));
       await readCandidates(ctx);
       await screenCandidates(ctx, () => deliverShortlistEarly(ctx, sheet));
       if (ctx.stopped) throw new LeaseLostError();
@@ -146,6 +149,7 @@ export async function runJob(job: JobRow, owner: string): Promise<void> {
     if (stepIndex(step) <= stepIndex("evaluating")) {
       await evaluateGithub(ctx);
       await evaluateReviews(ctx);
+      if (!stoppedEarly) await evaluateSecondOpinions(ctx);
       if (ctx.plan.github === "all" && !stoppedEarly) await evaluateGithub(ctx, true);
       await noteUninspected(ctx);
       if (ctx.stopped) throw new LeaseLostError();

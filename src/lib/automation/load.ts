@@ -38,3 +38,50 @@ export function adaptiveConcurrency(base: number, max: number, rss: number = pro
   if (rss >= SOFT_MB * MB || lagMs >= LAG_SOFT_MS) return Math.max(1, Math.floor(width / 2));
   return width;
 }
+
+/**
+ * Width for work that mostly WAITS (model calls, downloads): limited by memory only. CPU-heavy
+ * steps inside that work go through `cpuGate`, so many model calls can be in flight while the
+ * processor parses one file at a time — the waits overlap the parsing instead of queueing behind
+ * it. (Throttling the whole unit on event-loop lag left a 0.1-CPU instance screening one resume
+ * at a time.)
+ */
+export function ioConcurrency(base: number, max: number, rss: number = process.memoryUsage().rss): number {
+  const width = Math.min(max, Math.max(1, Math.floor(base)));
+  if (rss >= HARD_MB * MB) return Math.min(width, 2);
+  if (rss >= SOFT_MB * MB) return Math.max(1, Math.floor(width / 2));
+  return width;
+}
+
+/** A counting semaphore whose width is read on every acquire (so it can follow the load). */
+export class Gate {
+  private active = 0;
+  private readonly waiters: (() => void)[] = [];
+  constructor(private readonly width: () => number) {}
+
+  get running() {
+    return this.active;
+  }
+
+  async run<T>(work: () => Promise<T>): Promise<T> {
+    while (this.active >= Math.max(1, this.width())) await new Promise<void>((r) => this.waiters.push(r));
+    this.active++;
+    try {
+      return await work();
+    } finally {
+      this.active--;
+      this.waiters.shift()?.();
+    }
+  }
+}
+
+/**
+ * CPU-heavy steps (opening PDFs) run through this gate: AUTOMATION_CPU_PARALLEL at once
+ * (default 1 — the free instance has 0.1 CPU, so parsing two files at once only makes both
+ * slower and starves the event loop that answers health checks); one at a time when the event
+ * loop is already lagging hard.
+ */
+export const cpuGate = new Gate(() => {
+  const base = Math.min(4, Math.max(1, Number(process.env.AUTOMATION_CPU_PARALLEL) || 1));
+  return loopLagMs() >= LAG_HARD_MS ? 1 : base;
+});
