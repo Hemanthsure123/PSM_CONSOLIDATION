@@ -10,7 +10,20 @@ import { env } from "@/lib/env";
  * makes sure a reminder goes out once even if two server ticks race.
  */
 
-export type PushKind = "assignment" | "reminder" | "overdue" | "escalation" | "job_update" | "test";
+export type PushKind =
+  | "assignment"
+  | "reminder"
+  | "overdue"
+  | "escalation"
+  | "job_update"
+  | "test"
+  | "prep_assigned"
+  | "prep_reminder"
+  | "prep_overdue"
+  | "prep_escalation"
+  | "prep_unassigned"
+  | "interview_checkin"
+  | "prep_digest";
 
 const g = globalThis as unknown as { __fcmAuth?: JWT };
 

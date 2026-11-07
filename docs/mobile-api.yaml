@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.1.0
+  version: 1.2.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
     This file is the source of truth. Change it first, then the routes under
@@ -44,6 +44,7 @@ tags:
   - name: voice
   - name: teams
   - name: admin
+  - name: preps
 
 paths:
   /auth/google:
@@ -617,6 +618,151 @@ paths:
         "403": { description: Not an admin (code admin_only) }
         "422": { description: Refused with a sentence (code invalid_roster) }
 
+  /preps:
+    get:
+      tags: [preps]
+      x-phase: P4
+      summary: The Calendar's interviews and preps (EDGE "Edge Team drill down", columns A..Z).
+      description: |
+        Every row with an interview between `from` and `to` (IST days, at most 62 days), plus every
+        prep still to be given (whatever its date), with the prep numbers. Rows are read from the
+        sheet (cached 30 s); category and tags come from the eligible pool (matched by phone), the
+        sheet's Product cell is the fallback. ETag-aware: unchanged → 304.
+        SLA: an interview on the next day or sooner (as of the row's first appearance in the sheet)
+        is due 45 minutes after it appeared (`slaKind` mandatory); a later interview is due 24 h
+        before it (before_interview); rows already there when tracking began have none.
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date }, description: "Default today − 7" }
+        - { name: to, in: query, schema: { type: string, format: date }, description: "Default today + 14" }
+        - { name: If-None-Match, in: header, schema: { type: string } }
+      responses:
+        "304": { description: Not modified }
+        "422": { description: Bad window (code invalid_window) }
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [from, to, today, items, stats, syncedAt]
+                properties:
+                  from: { type: string, format: date }
+                  to: { type: string, format: date }
+                  today: { type: string, format: date, description: "Today in IST" }
+                  items: { type: array, items: { $ref: "#/components/schemas/PrepItem" } }
+                  stats: { $ref: "#/components/schemas/PrepStats" }
+                  syncedAt: { type: string, format: date-time, description: "When the sheet was read" }
+
+  /preps/{prepId}:
+    get:
+      tags: [preps]
+      x-phase: P4
+      summary: One prep's page.
+      parameters: [{ $ref: "#/components/parameters/PrepId" }]
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PrepDetail" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /preps/{prepId}/status:
+    post:
+      tags: [preps]
+      x-phase: P4
+      summary: Set "Prep Given" (done also fills Prep Date / Prep Time, and "Prep given by" when empty).
+      description: |
+        Allowed for the prep's mentor(s), leads and admins, or anyone when it's unassigned.
+        `pending` reopens it (clears Prep Given, Prep Date and Prep Time). A document name goes to
+        "Prep Document"; a note is appended to "Remarks".
+      parameters: [{ $ref: "#/components/parameters/PrepId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { $ref: "#/components/schemas/PrepStatus" }
+                document: { type: string, maxLength: 200 }
+                note: { type: string, maxLength: 300 }
+      responses:
+        "200": { description: The updated prep, content: { application/json: { schema: { $ref: "#/components/schemas/PrepDetail" } } } }
+        "403": { description: Someone else's prep (code not_assignee) }
+        "409": { description: The row moved or changed in the sheet (code row_moved) — refresh }
+        "422": { description: Unknown status (code invalid_status) }
+
+  /preps/{prepId}/interview:
+    post:
+      tags: [preps]
+      x-phase: P4
+      summary: Record the interview check in "Candidate's Status" (any roster member).
+      parameters: [{ $ref: "#/components/parameters/PrepId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [status]
+              properties:
+                status: { type: string, maxLength: 80, description: "One of PrepDetail.interviewStatusOptions, or free text" }
+      responses:
+        "200": { description: The updated prep, content: { application/json: { schema: { $ref: "#/components/schemas/PrepDetail" } } } }
+        "409": { description: The row moved or changed (code row_moved) }
+
+  /preps/{prepId}/assign:
+    post:
+      tags: [preps]
+      x-phase: P4
+      summary: Set "Prep given by". Take an unassigned prep / hand back your own; leads and admins assign anyone.
+      parameters: [{ $ref: "#/components/parameters/PrepId" }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [emails]
+              properties:
+                emails: { type: array, maxItems: 4, items: { type: string, format: email }, description: "[] unassigns" }
+      responses:
+        "200": { description: The updated prep, content: { application/json: { schema: { $ref: "#/components/schemas/PrepDetail" } } } }
+        "403": { description: Assigning someone else without being a lead (code lead_only) }
+        "422": { description: Someone isn't on the roster (code invalid_assignees) }
+
+  /preps/jobs/{jobId}:
+    get:
+      tags: [preps]
+      x-phase: P4
+      summary: One job's interviews (company view) — rounds funnel, candidates, links.
+      parameters:
+        - { name: jobId, in: path, required: true, schema: { type: string } }
+      responses:
+        "404": { $ref: "#/components/responses/NotFound" }
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobId, company, companies, process, rounds, items, links]
+                properties:
+                  jobId: { type: string }
+                  company: { type: string }
+                  companies: { type: array, items: { type: string } }
+                  process: { type: array, items: { type: string } }
+                  rounds:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        round: { type: string }
+                        total: { type: integer }
+                        selected: { type: integer }
+                        rejected: { type: integer }
+                        pending: { type: integer }
+                  items: { type: array, items: { $ref: "#/components/schemas/PrepItem" } }
+                  links: { type: array, items: { $ref: "#/components/schemas/DocLink" } }
+
 components:
   securitySchemes:
     bearer:
@@ -631,6 +777,11 @@ components:
       in: path
       required: true
       schema: { type: string, description: "Opaque id of an assignment (one control row)" }
+    PrepId:
+      name: prepId
+      in: path
+      required: true
+      schema: { type: string, pattern: "^[0-9a-f]{24}$", description: "Stable id of a drill-down row (candidate phone + job + round)" }
     JobId:
       name: jobId
       in: path
@@ -897,16 +1048,133 @@ components:
               shortlistUrl: { type: string, format: uri, nullable: true }
               sheetRowUrl: { type: string, format: uri }
 
+    PrepStatus:
+      type: string
+      enum: [pending, done, missed, not_needed, not_informed, no_response, rescheduled, cancelled, other]
+      description: 'Column M "Prep Given". pending = empty. Writes use the team spellings (Yes, Missed, Not needed, DNP …).'
+    PrepTag:
+      type: object
+      required: [label, tone, group]
+      properties:
+        label: { type: string }
+        tone: { type: string, enum: [pass, fail, neutral] }
+        group: { type: string, description: "Academy, Edge 2.0, Edge 1.0, Marks, Sheet" }
+    PrepItem:
+      type: object
+      required: [id, company, candidate, category, prepStatus, interviewState, mentors, mine, slaKind]
+      properties:
+        id: { type: string }
+        row: { type: integer, description: "1-based sheet row when read (rows move; id is stable)" }
+        company: { type: string }
+        jobId: { type: string }
+        candidate: { type: string }
+        phone: { type: string, description: "10 digits, or empty" }
+        round: { type: string }
+        interviewDay: { type: [string, "null"], format: date }
+        interviewStart: { type: [string, "null"], format: date-time, description: "Null when the sheet has no readable time" }
+        interviewEnd: { type: [string, "null"], format: date-time }
+        interviewTimeText: { type: string, description: "The timings cell when it couldn't be read" }
+        interviewTbd: { type: boolean }
+        category: { type: string, enum: [academy, edge, external] }
+        edgeVersion: { type: [string, "null"], enum: ["1.0", "2.0", null] }
+        stage: { type: string, description: "TR-2 cleared, Assessment cleared, Assessed · not in pool …" }
+        tags: { type: array, items: { $ref: "#/components/schemas/PrepTag" } }
+        mentors:
+          type: array
+          items: { type: object, properties: { name: { type: string }, email: { type: [string, "null"] } } }
+        mine: { type: boolean }
+        prepStatus: { $ref: "#/components/schemas/PrepStatus" }
+        prepStatusText: { type: string }
+        candidateStatus: { type: string }
+        interviewState: { type: string, enum: [scheduled, completed, rescheduled, cancelled, no_show, next_round, selected, rejected, hold, other] }
+        dueAt: { type: [string, "null"], format: date-time }
+        slaKind: { type: string, enum: [mandatory, before_interview, none] }
+        informedLate: { type: boolean, description: "ISE / PC entered it less than 24 h before the interview" }
+        firstSeenAt: { type: [string, "null"], format: date-time }
+        doneAt: { type: [string, "null"], format: date-time }
+        mode: { type: string }
+        hasResume: { type: boolean }
+        hasLinks: { type: boolean }
+    PrepStats:
+      type: object
+      properties:
+        openToday: { type: integer }
+        openTomorrow: { type: integer }
+        overdue: { type: integer }
+        unassigned: { type: integer }
+        interviewsToday: { type: integer }
+        doneToday: { type: integer }
+        week: { type: object, properties: { done: { type: integer }, onTime: { type: integer } } }
+    DocLink:
+      type: object
+      required: [url, kind]
+      properties:
+        url: { type: string }
+        kind: { type: string, enum: [drilldown, transcript] }
+        title: { type: string }
+        updatedAt: { type: [string, "null"], format: date-time, description: "The Drive file's last change, when the server can see it" }
+        own: { type: boolean, description: "From this candidate's own row" }
+        seenOn:
+          type: array
+          items: { type: object, properties: { round: { type: string }, interviewDay: { type: [string, "null"] }, candidate: { type: string } } }
+    PrepDetail:
+      allOf:
+        - $ref: "#/components/schemas/PrepItem"
+        - type: object
+          properties:
+            source: { type: string, enum: [pool, assessed, sheet, none] }
+            entryDay: { type: [string, "null"], format: date }
+            resumeUrl: { type: string }
+            process: { type: array, items: { type: string } }
+            prepDay: { type: [string, "null"], format: date }
+            prepTime: { type: string }
+            prepDocument: { type: string }
+            remarks: { type: string }
+            hubspotUrl: { type: string }
+            meetingUrl: { type: string }
+            recordingUrl: { type: string }
+            recordingNote: { type: string }
+            completion: { type: string }
+            links: { type: array, items: { $ref: "#/components/schemas/DocLink" } }
+            journey:
+              type: array
+              items:
+                type: object
+                properties:
+                  id: { type: string }
+                  company: { type: string }
+                  round: { type: string }
+                  interviewDay: { type: [string, "null"] }
+                  candidateStatus: { type: string }
+                  interviewState: { type: string }
+                  prepStatus: { $ref: "#/components/schemas/PrepStatus" }
+            activity:
+              type: array
+              items: { type: object, properties: { at: { type: string, format: date-time }, by: { type: string }, action: { type: string }, value: { type: string } } }
+            canEdit: { type: boolean }
+            interviewStatusOptions: { type: array, items: { type: string } }
+
     PushMessage:
       description: |
         FCM **data** message (not a notification message), so the app always builds the notification
         itself: sticky assignment with countdown, re-post on swipe. High priority for assignment,
         reminder and overdue; normal for job updates.
       type: object
-      required: [type, taskId]
+      required: [type]
       properties:
-        type: { type: string, enum: [assignment, reminder, overdue, escalation, job_update, test] }
-        taskId: { type: string }
+        type:
+          type: string
+          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest]
+        taskId: { type: string, description: "Task pushes" }
+        prepId: { type: string, description: "Prep pushes (prep_*, interview_checkin)" }
+        candidate: { type: string }
+        round: { type: string }
+        category: { type: string, enum: [academy, edge, external] }
+        edgeVersion: { type: string }
+        interviewDay: { type: string, format: date }
+        interviewStart: { type: string, format: date-time }
+        dueAt: { type: string, format: date-time }
+        digest: { type: string, enum: [morning, evening] }
         jobId: { type: string }
         company: { type: string }
         profilesRequired: { type: string }
