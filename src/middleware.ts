@@ -17,7 +17,8 @@ import { NextResponse, type NextRequest } from "next/server";
  */
 
 const PUBLIC_PATHS = new Set(["/api/health"]);
-const OWN_AUTH_PREFIX = "/api/automation/";
+// These check their own credentials: the Apps Script's AUTOMATION_TOKEN, and the app's per-user tokens.
+const OWN_AUTH_PREFIXES = ["/api/automation/", "/api/mobile/"];
 
 function safeEqual(a: string, b: string): boolean {
   let diff = a.length ^ b.length;
@@ -28,7 +29,7 @@ function safeEqual(a: string, b: string): boolean {
 export function middleware(req: NextRequest) {
   const expected = process.env.APP_BASIC_AUTH?.trim();
   const path = req.nextUrl.pathname;
-  if (!expected || PUBLIC_PATHS.has(path) || path.startsWith(OWN_AUTH_PREFIX)) return NextResponse.next();
+  if (!expected || PUBLIC_PATHS.has(path) || OWN_AUTH_PREFIXES.some((p) => path.startsWith(p))) return NextResponse.next();
   const header = req.headers.get("authorization") ?? "";
   if (header.startsWith("Basic ")) {
     let given = "";

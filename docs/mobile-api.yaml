@@ -1,0 +1,908 @@
+openapi: 3.1.0
+info:
+  title: PSM Shortlisting — mobile API
+  version: 1.0.0
+  description: |
+    The contract between the Android app (private repo `psm-android`) and this server.
+    This file is the source of truth. Change it first, then the routes under
+    `src/app/api/mobile/v1/`, then the app (which copies this file with `scripts/sync-api.ps1`).
+
+    Status: **draft for Version 0**. Nothing below is implemented yet. Each operation carries its
+    delivery phase (`x-phase`: P1 / P2 / P3).
+
+    Principles:
+    - **The Google Sheet stays the source of truth.** Starting a screening writes the same
+      control-row cells as typing "start" in the sheet, then enters the existing job path
+      (`readControlRequest` → `createOrResumeJob` → worker). The agents don't change.
+    - **Auth is per user.** The app holds no shared secret: a Google ID token is exchanged for
+      short-lived access and refresh tokens. `/api/automation/*` keeps its own `AUTOMATION_TOKEN`
+      for the Apps Script; the app never calls those routes.
+    - **Errors** are `{ "error": "<what happened and how to fix it>", "code": "<machine code>" }`.
+    - **Times** are ISO-8601 with offset (`2026-11-05T15:00:00+05:30`). Deadlines come from the
+      sheet in IST.
+    - **Enums may grow.** Clients map unknown values to UNKNOWN and keep working.
+
+    Sheet → server hooks (Apps Script, `AUTOMATION_TOKEN`, not part of this contract):
+    - `POST /api/automation/assignments`: a PSM Assignee cell changed;
+    - `POST /api/automation/tick`: every 5 minutes, drives reminders and escalations.
+servers:
+  - url: https://psm-placements.onrender.com/api/mobile/v1
+    description: Production (Render)
+  - url: http://10.0.2.2:3000/api/mobile/v1
+    description: Local dev server, as seen from the Android emulator
+
+security:
+  - bearer: []
+
+tags:
+  - name: auth
+  - name: tasks
+  - name: screening
+  - name: jobs
+  - name: review
+  - name: analytics
+  - name: voice
+  - name: teams
+  - name: admin
+
+paths:
+  /auth/google:
+    post:
+      tags: [auth]
+      x-phase: P1
+      summary: Exchange a Google ID token (Credential Manager) for app tokens
+      description: |
+        The server verifies the ID token (audience = the server's OAuth web client id), checks that
+        the email's domain is allowed and that the email is on the roster (`app.users`, active),
+        then issues tokens. The device's FCM token, if sent, is registered.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [idToken, device]
+              properties:
+                idToken: { type: string }
+                device: { $ref: "#/components/schemas/DeviceInfo" }
+      responses:
+        "200": { description: Signed in, content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { description: "Valid Google account but not allowed (domain or not on the roster). code = not_on_roster | domain_not_allowed", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /auth/refresh:
+    post:
+      tags: [auth]
+      x-phase: P1
+      summary: Rotate tokens
+      description: The refresh token is single-use. Reusing an old one revokes the whole session (theft detection).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        "200": { description: New tokens, content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /auth/logout:
+    post:
+      tags: [auth]
+      x-phase: P1
+      summary: End this device's session and unregister its push token
+      responses:
+        "204": { description: Signed out }
+
+  /me:
+    get:
+      tags: [auth]
+      x-phase: P1
+      summary: The signed-in user
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/User" } } } }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /me/device:
+    put:
+      tags: [auth]
+      x-phase: P1
+      summary: Register or refresh this device's FCM token (on token refresh and app start)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DeviceInfo" }
+      responses:
+        "204": { description: Saved }
+
+  /me/test-notification:
+    post:
+      tags: [auth]
+      x-phase: P1
+      summary: Send a real test push (FCM) to this user's devices (Me → Send test notification)
+      responses:
+        "202":
+          description: Sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  delivered: { type: integer, description: Devices that accepted the push }
+
+  /tasks:
+    get:
+      tags: [tasks]
+      x-phase: P1
+      summary: Rows assigned to me (or my team, for leads)
+      parameters:
+        - name: scope
+          in: query
+          schema: { type: string, enum: [mine, team], default: mine }
+        - name: state
+          in: query
+          schema: { type: string, enum: [open, all], default: open }
+        - name: If-None-Match
+          in: header
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          headers:
+            ETag: { schema: { type: string } }
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tasks, syncedAt]
+                properties:
+                  tasks: { type: array, items: { $ref: "#/components/schemas/TaskSummary" } }
+                  syncedAt: { type: string, format: date-time, description: When the control sheet was last read }
+        "304": { description: Not changed since the ETag }
+        "403": { description: "scope=team without the lead role" }
+
+  /tasks/{taskId}:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    get:
+      tags: [tasks]
+      x-phase: P1
+      summary: One task with everything the task screen shows
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /tasks/{taskId}/ack:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      tags: [tasks]
+      x-phase: P1
+      summary: '"Start now" — acknowledge the assignment (clears the sticky notification, stops reminders)'
+      responses:
+        "200":
+          description: Acknowledged (idempotent)
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ackAt]
+                properties:
+                  ackAt: { type: string, format: date-time }
+
+  /tasks/{taskId}/access:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    get:
+      tags: [screening]
+      x-phase: P1
+      summary: Can the service account read and write the row's Internal Sheet?
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [canRead, canWrite, serviceAccountEmail, sheetUrl]
+                properties:
+                  canRead: { type: boolean }
+                  canWrite: { type: boolean, description: Needed to deliver the shortlist tab }
+                  serviceAccountEmail: { type: string, description: Shown with a copy button when access is missing }
+                  sheetUrl: { type: string, format: uri }
+
+  /tasks/{taskId}/tabs:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    get:
+      tags: [screening]
+      x-phase: P1
+      summary: The Internal Sheet's tabs with row counts (for Subsheets)
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tabs]
+                properties:
+                  tabs:
+                    type: array
+                    items:
+                      type: object
+                      required: [name, rows, url]
+                      properties:
+                        name: { type: string }
+                        rows: { type: integer, description: Data rows (header excluded) }
+                        withResume: { type: integer, description: Rows with a resume link }
+                        url: { type: string, format: uri, description: Link to the tab (gid) }
+                        suggested: { type: boolean, description: Named in the row's remarks, e.g. "edge applied" }
+        "403": { description: "No access — see /access", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /tasks/{taskId}/jd-autofill:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      tags: [screening]
+      x-phase: P2
+      summary: Draft focus + must-haves from the row's JD link (or pasted text), via the existing domain autofill
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                text: { type: string, description: Optional pasted JD text. When absent, the row's JD link is read. }
+      responses:
+        "200":
+          description: Draft
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [focus, mustHaves, warnings]
+                properties:
+                  focus: { type: string }
+                  mustHaves: { type: array, items: { type: string }, description: '"X or Y" kept as one item' }
+                  warnings: { type: array, items: { type: string } }
+        "422": { description: JD unreadable or empty }
+
+  /intake/parse:
+    post:
+      tags: [voice]
+      x-phase: P2
+      summary: Typed or spoken raw text → screening fields
+      description: |
+        LLM (existing Gemini → OpenAI → Mistral chain) with structured output, validated by the
+        deterministic `parseInstructions`. The text is untrusted: it only fills fields and is never
+        executed. Fields the model isn't sure about are listed in `unclear`, and the app highlights them.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [taskId, text, source]
+              properties:
+                taskId: { type: string }
+                text: { type: string, maxLength: 8000 }
+                source: { type: string, enum: [voice, typed] }
+      responses:
+        "200":
+          description: Parsed
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [config, unclear]
+                properties:
+                  config: { $ref: "#/components/schemas/ScreeningConfig" }
+                  unclear: { type: array, items: { type: string, description: A ScreeningConfig field name } }
+                  notes: { type: string }
+
+  /tasks/{taskId}/estimate:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      tags: [screening]
+      x-phase: P1
+      summary: ETA for the recheck screen
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScreeningConfig" }
+      responses:
+        "200": { description: Estimate, content: { application/json: { schema: { $ref: "#/components/schemas/Estimate" } } } }
+
+  /tasks/{taskId}/start:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+      - name: Idempotency-Key
+        in: header
+        required: true
+        description: A UUID per tap of Start. Retries with the same key return the same job.
+        schema: { type: string, minLength: 8, maxLength: 80 }
+    post:
+      tags: [screening]
+      x-phase: P1
+      summary: Start screening — writes the control row (Subsheets, Instructions, Github, DSA, Experience, Trigger=start), then queues the job
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ScreeningConfig" }
+      responses:
+        "202": { description: Queued, content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "200": { description: Same Idempotency-Key — the existing job, content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "409": { description: A job is already running for this row (body has the job), content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "422": { description: "Invalid config (no subsheets, no access, topN out of range)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /jobs:
+    get:
+      tags: [jobs]
+      x-phase: P1
+      summary: My recent jobs (leads can pass scope=team)
+      parameters:
+        - name: scope
+          in: query
+          schema: { type: string, enum: [mine, team], default: mine }
+        - name: limit
+          in: query
+          schema: { type: integer, default: 20, maximum: 100 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [jobs]
+                properties:
+                  jobs: { type: array, items: { $ref: "#/components/schemas/Job" } }
+
+  /jobs/{jobId}:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [jobs]
+      x-phase: P1
+      summary: Live job state (the app polls every 5 s while the job screen is open; pushes cover the rest)
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /jobs/{jobId}/stop:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    post:
+      tags: [jobs]
+      x-phase: P1
+      summary: Stop — a queued job is cancelled; a running one delivers what it has screened (same as the sheet's stop)
+      responses:
+        "200": { description: Stop requested, content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "404": { description: Not running }
+
+  /jobs/{jobId}/shortlist:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    get:
+      tags: [review]
+      x-phase: P2
+      summary: The AI shortlist, best first, with evidence for manual review
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [candidates, deliveredTabUrl]
+                properties:
+                  candidates: { type: array, items: { $ref: "#/components/schemas/ShortlistCandidate" } }
+                  deliveredTabUrl: { type: string, format: uri }
+
+  /jobs/{jobId}/shares:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+    put:
+      tags: [review]
+      x-phase: P2
+      summary: Save manual decisions (idempotent per candidate key; last write wins)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [decisions]
+              properties:
+                decisions:
+                  type: array
+                  items:
+                    type: object
+                    required: [candidateKey, decision]
+                    properties:
+                      candidateKey: { type: string, description: Mobile number key, as in the delivered tab }
+                      decision: { type: string, enum: [share, hold, reject] }
+                      reason: { type: string, enum: [skills_gap, experience, location, availability, duplicate, quality, other] }
+                      note: { type: string, maxLength: 300 }
+      responses:
+        "204": { description: Saved }
+
+  /jobs/{jobId}/send-to-company:
+    parameters:
+      - $ref: "#/components/parameters/JobId"
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema: { type: string }
+    post:
+      tags: [review]
+      x-phase: P2
+      summary: Write the shared candidates to psm_shared_<company>_<date> in the Internal Sheet
+      responses:
+        "200":
+          description: Written
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [tabName, tabUrl, count]
+                properties:
+                  tabName: { type: string }
+                  tabUrl: { type: string, format: uri }
+                  count: { type: integer }
+
+  /analytics:
+    get:
+      tags: [analytics]
+      x-phase: P1
+      summary: Tasks → screenings → shortlists delivered, on time, per person and per row, with sheet links
+      parameters:
+        - { name: days, in: query, schema: { type: integer, default: 7, maximum: 365 } }
+        - { name: from, in: query, schema: { type: string, format: date, description: "IST day; overrides days" } }
+        - { name: to, in: query, schema: { type: string, format: date, description: "IST day, inclusive" } }
+        - { name: scope, in: query, schema: { type: string, enum: [mine, team], default: mine, description: "team: leads and admins (403 admin_only otherwise)" } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Analytics" } } } }
+
+  /stt/token:
+    post:
+      tags: [voice]
+      x-phase: P2
+      summary: A short-lived token for one live speech-to-text WebSocket (provider keys never leave the server)
+      description: |
+        Providers are tried in order — **ElevenLabs (Scribe v2 Realtime) first, Deepgram as the
+        fallback** (VOICE_STT_PROVIDERS on the server). Each provider has a pool of API keys used
+        round-robin; a key that answers 401/403 is parked, one that answers 429 cools down, and the
+        next key (then the next provider) is tried. The app connects to `url` with `token`; if that
+        WebSocket fails, it asks again with that provider in `exclude` to get the fallback.
+        Tokens: ElevenLabs single-use (expires in 15 min, valid for one connection); Deepgram
+        temporary JWT (30 s to open the connection).
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                exclude:
+                  type: array
+                  items: { type: string, enum: [elevenlabs, deepgram] }
+                  description: Providers that just failed on this device, for this attempt
+                language: { type: string, default: en, description: "BCP-47, e.g. en, en-IN, hi" }
+      responses:
+        "200":
+          description: Token
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [provider, token, expiresIn, url]
+                properties:
+                  provider: { type: string, enum: [elevenlabs, deepgram] }
+                  token: { type: string }
+                  expiresIn: { type: integer, description: seconds }
+                  url: { type: string, description: "wss URL with model, language and audio format already set" }
+                  audio:
+                    type: object
+                    description: What to stream
+                    properties:
+                      encoding: { type: string, example: pcm_s16le }
+                      sampleRate: { type: integer, example: 16000 }
+        "503": { description: "Every provider and key is out of capacity right now (code = stt_unavailable); the app falls back to typing", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /teams/link:
+    put:
+      tags: [teams]
+      x-phase: P3
+      summary: Save my own Power Automate (Teams Workflows) webhook URL, stored encrypted
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [flowUrl]
+              properties:
+                flowUrl: { type: string, format: uri }
+                microsoftUpn: { type: string, description: From MSAL sign-in; used to show whose Teams it posts from }
+      responses:
+        "204": { description: Saved }
+        "422": { description: Not a Power Automate / Logic Apps webhook URL }
+    delete:
+      tags: [teams]
+      x-phase: P3
+      summary: Remove my Teams link
+      responses:
+        "204": { description: Removed }
+
+  /teams/share:
+    post:
+      tags: [teams]
+      x-phase: P3
+      summary: Post the analytics card through my own flow (it appears from my Teams account)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                from: { type: string, format: date }
+                to: { type: string, format: date }
+                company: { type: string }
+                message: { type: string, maxLength: 500 }
+      responses:
+        "202": { description: Sent to the flow }
+        "409": { description: No Teams link saved yet }
+
+  /admin/roster:
+    get:
+      tags: [admin]
+      x-phase: P1
+      summary: The roster (admin). The app's Me → Team screen.
+      responses:
+        "403": { description: Not an admin (code admin_only) }
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users: { type: array, items: { $ref: "#/components/schemas/RosterEntry" } }
+    put:
+      tags: [admin]
+      x-phase: P1
+      summary: Replace the roster (admin). Also refreshes the control sheet's Mentor dropdown when the active names changed.
+      description: |
+        Send everyone. People left out (or active=false) lose access at once: sessions revoked,
+        devices removed, history kept. Refused (422 invalid_roster) when an email isn't a NxtWave
+        address, two active people share a name, no active admin would remain, or the caller would
+        remove their own admin access.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [users]
+              properties:
+                users: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/RosterEntry" } }
+      responses:
+        "200":
+          description: Saved. The roster as stored, and what happened to the sheet's dropdown.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users, mentorDropdown]
+                properties:
+                  users: { type: array, items: { $ref: "#/components/schemas/RosterEntry" } }
+                  mentorDropdown:
+                    type: object
+                    required: [ok]
+                    properties:
+                      ok: { type: boolean, description: "False: the roster is saved but the dropdown couldn't be updated" }
+                      message: { type: string }
+        "403": { description: Not an admin (code admin_only) }
+        "422": { description: Refused with a sentence (code invalid_roster) }
+
+components:
+  securitySchemes:
+    bearer:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Access token from /auth/google or /auth/refresh (15 min). On 401, refresh once, then sign out.
+
+  parameters:
+    TaskId:
+      name: taskId
+      in: path
+      required: true
+      schema: { type: string, description: "Opaque id of an assignment (one control row)" }
+    JobId:
+      name: jobId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+
+  responses:
+    Unauthorized:
+      description: Missing, expired or invalid token
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+    NotFound:
+      description: Not found, or not visible to this user
+      content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error: { type: string, description: What happened and how to fix it (shown to the user) }
+        code: { type: string }
+
+    DeviceInfo:
+      type: object
+      required: [platform, appVersion]
+      properties:
+        platform: { type: string, enum: [android] }
+        appVersion: { type: string }
+        osVersion: { type: integer, description: Android API level }
+        model: { type: string }
+        fcmToken: { type: string }
+
+    Session:
+      type: object
+      required: [accessToken, refreshToken, expiresIn, user]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        expiresIn: { type: integer, description: Access token lifetime in seconds }
+        user: { $ref: "#/components/schemas/User" }
+
+    User:
+      type: object
+      required: [id, email, name, role]
+      properties:
+        id: { type: string }
+        email: { type: string, format: email }
+        name: { type: string }
+        role: { type: string, enum: [member, lead, admin] }
+        teamsLinked: { type: boolean }
+
+    RosterEntry:
+      type: object
+      required: [email, name, role, active]
+      properties:
+        email: { type: string, format: email }
+        name: { type: string, description: "The value in the control sheet's Mentor dropdown (e.g. Hemanth)" }
+        aliases: { type: array, items: { type: string }, description: Other spellings seen in the sheet }
+        role: { type: string, enum: [member, lead, admin] }
+        lead: { type: string, format: email, description: Who gets this member's escalations }
+        active: { type: boolean }
+
+    TaskState:
+      type: string
+      enum: [new, acknowledged, screening, shortlist_ready, shared, overdue, done]
+      description: |
+        new → acknowledged (Start now) → screening (job running) → shortlist_ready (AI delivered)
+        → shared (sent to company) → done. "overdue" applies to any open state past the deadline.
+
+    TaskSummary:
+      type: object
+      required: [id, company, profilesRequired, state]
+      properties:
+        id: { type: string }
+        company: { type: string }
+        techStack: { type: string }
+        profilesRequired: { type: integer }
+        assignedAt: { type: string, format: date-time }
+        deadline: { type: string, format: date-time }
+        deadlineInferred: { type: boolean, description: "True when the time was ambiguous in the sheet (e.g. 3:00 read as 15:00). The app shows it for confirmation." }
+        state: { $ref: "#/components/schemas/TaskState" }
+        assignee: { type: string, format: email }
+        jobId: { type: string, format: uuid }
+        ackAt: { type: string, format: date-time }
+
+    TaskDetail:
+      allOf:
+        - $ref: "#/components/schemas/TaskSummary"
+        - type: object
+          properties:
+            product: { type: string }
+            pc: { type: string, description: Placement coordinator (sheet column PC) }
+            crm: { type: string }
+            hubspotUrl: { type: string, format: uri }
+            remarks: { type: string, description: Company / shortlisting remarks }
+            jdUrl: { type: string, format: uri }
+            internalSheetUrl: { type: string, format: uri }
+            openings: { type: string }
+            proposedMechanism: { type: string }
+            lastConfig: { $ref: "#/components/schemas/ScreeningConfig" }
+            sheetRowUrl: { type: string, format: uri, description: Link to the row in the EDGE sheet }
+
+    ScreeningConfig:
+      type: object
+      required: [subsheets, focus, github, dsa, topN]
+      description: Serialised to the control row's Subsheets / Screening Instructions / Github / DSA / Experience cells.
+      properties:
+        subsheets: { type: array, minItems: 1, items: { type: string } }
+        focus: { type: string, maxLength: 4000 }
+        mustHaves: { type: array, items: { type: string }, description: '"X or Y" is one item' }
+        github: { type: string, enum: [off, fit, all], description: "fit = domain-fit candidates only (default)" }
+        codeReview: { type: boolean, default: true }
+        dsa:
+          type: object
+          required: [enabled]
+          properties:
+            enabled: { type: boolean }
+            minRating:
+              type: object
+              properties:
+                codeforces: { type: integer }
+                codechef: { type: integer }
+                leetcode: { type: integer }
+            minSolved: { type: integer }
+            minContests: { type: integer }
+            minScore: { type: integer }
+        experience: { type: string, description: Free text as in "Experience in Screening Domain" }
+        topN: { type: integer, minimum: 1, maximum: 500 }
+
+    Estimate:
+      type: object
+      required: [profiles, earlyShortlistMinutes, fullMinutes, queueAhead]
+      properties:
+        profiles: { type: integer, description: Rows that will be read }
+        withResume: { type: integer }
+        earlyShortlistMinutes: { type: integer }
+        fullMinutes: { type: integer }
+        queueAhead: { type: integer }
+        basis: { type: string, description: "e.g. 'median of the last 10 jobs'" }
+
+    JobStatus:
+      type: string
+      enum: [pending, processing, completed, failed, awaiting_review]
+
+    Job:
+      type: object
+      required: [id, status, step, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        taskId: { type: string }
+        company: { type: string }
+        status: { $ref: "#/components/schemas/JobStatus" }
+        step: { type: string, description: "planner / screening / evaluation / validation / delivery, or a finer checkpoint" }
+        progress:
+          type: object
+          properties:
+            total: { type: integer }
+            screened: { type: integer }
+            shortlisted: { type: integer }
+            githubChecked: { type: integer }
+        queueAhead: { type: integer }
+        stopRequested: { type: boolean }
+        earlyShortlistAt: { type: string, format: date-time, description: When the shortlist was first delivered (before the full screening finished) }
+        deliveredTabUrl: { type: string, format: uri }
+        error: { type: string }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+
+    ShortlistCandidate:
+      type: object
+      required: [key, rank, name, score]
+      properties:
+        key: { type: string, description: Mobile number key }
+        rank: { type: integer }
+        name: { type: string }
+        score: { type: integer, minimum: 0, maximum: 100 }
+        signals: { type: array, items: { type: string } }
+        mustHaves:
+          type: array
+          items:
+            type: object
+            required: [item, met]
+            properties:
+              item: { type: string }
+              met: { type: boolean }
+              evidence: { type: string }
+        githubUrl: { type: string, format: uri }
+        resumeUrl: { type: string, format: uri }
+        dsa: { type: string, description: Short summary, e.g. "CF 1612 · LC 420 solved" }
+        standing: { type: string, description: Eligible-pool standing / Job Eligibility tag }
+        conflicts: { type: array, items: { type: string }, description: "e.g. shared with another company this week" }
+        decision: { type: string, enum: [share, hold, reject] }
+
+    Analytics:
+      type: object
+      description: |
+        Real numbers from the control sheet and the screening jobs. A row belongs to the range by its
+        Assigned Date & Time (else its deadline). A delivered shortlist is the early delivery or the
+        job's end, whichever came first. Rows nobody was assigned in the app are only judged on time
+        when a screening delivered.
+      required: [scope, totals, byMember, rows]
+      properties:
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        scope: { type: string, enum: [mine, team] }
+        syncedAt: { type: string, format: date-time }
+        totals:
+          type: object
+          properties:
+            tasks: { type: integer }
+            assigned: { type: integer }
+            started: { type: integer, description: Rows with a screening job }
+            running: { type: integer }
+            delivered: { type: integer }
+            failed: { type: integer }
+            profilesRequired: { type: integer }
+            profilesRead: { type: integer, description: Candidates the AI read }
+            shortlisted: { type: integer }
+            medianMinutesToShortlist: { type: integer, nullable: true }
+            onTimePercent: { type: integer, nullable: true }
+            overdue: { type: integer, description: "Assigned, past the deadline, no shortlist yet" }
+        byMember:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              email: { type: string, format: email, nullable: true }
+              tasks: { type: integer }
+              started: { type: integer }
+              delivered: { type: integer }
+              onTime: { type: integer }
+              overdue: { type: integer }
+        rows:
+          type: array
+          items:
+            type: object
+            required: [taskId, company, profilesRequired, sheetRowUrl]
+            properties:
+              taskId: { type: string }
+              company: { type: string }
+              mentor: { type: string, nullable: true }
+              mentorEmail: { type: string, format: email, nullable: true }
+              profilesRequired: { type: integer, description: 'Upper bound when the sheet says a range ("10-15" → 15)' }
+              assignedAt: { type: string, format: date-time, nullable: true }
+              deadline: { type: string, format: date-time, nullable: true }
+              acknowledgedAt: { type: string, format: date-time, nullable: true }
+              jobStatus: { type: string, nullable: true, enum: [pending, processing, completed, failed, awaiting_review] }
+              profilesRead: { type: integer, nullable: true }
+              shortlisted: { type: integer, nullable: true }
+              deliveredAt: { type: string, format: date-time, nullable: true }
+              minutesToShortlist: { type: integer, nullable: true }
+              onTime: { type: boolean, nullable: true }
+              shortlistUrl: { type: string, format: uri, nullable: true }
+              sheetRowUrl: { type: string, format: uri }
+
+    PushMessage:
+      description: |
+        FCM **data** message (not a notification message), so the app always builds the notification
+        itself: sticky assignment with countdown, re-post on swipe. High priority for assignment,
+        reminder and overdue; normal for job updates.
+      type: object
+      required: [type, taskId]
+      properties:
+        type: { type: string, enum: [assignment, reminder, overdue, escalation, job_update, test] }
+        taskId: { type: string }
+        jobId: { type: string }
+        company: { type: string }
+        profilesRequired: { type: string }
+        deadline: { type: string, format: date-time }
+        jobStatus: { $ref: "#/components/schemas/JobStatus" }
+        earlyShortlist: { type: string, enum: ["true", "false"] }
+        title: { type: string }
+        body: { type: string }

@@ -10,5 +10,7 @@ export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
     const { startWorker } = await import("./lib/automation/worker");
     startWorker();
+    const { startMobileTicker } = await import("./lib/mobile/ticker");
+    startMobileTicker();
   }
 }

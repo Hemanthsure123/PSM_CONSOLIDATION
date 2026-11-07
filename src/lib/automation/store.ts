@@ -41,7 +41,7 @@ export interface JobRow {
 type Raw = Record<string, unknown>;
 const iso = (v: unknown) => (v ? new Date(v as string).toISOString() : null);
 
-function toJob(r: Raw): JobRow {
+export function toJob(r: Raw): JobRow {
   return {
     id: String(r.id),
     spreadsheetId: String(r.spreadsheet_id),

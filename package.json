@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "npx tsx scripts/db-migrate.ts",
     "db:status": "npx tsx scripts/db-migrate.ts --status",
+    "mobile:check": "npx tsx scripts/mobile-config-check.ts",
     "pool:sync": "npx tsx scripts/pool-sync.ts",
     "scores:import": "npx tsx scripts/scores-import.ts"
   },

@@ -1,0 +1,41 @@
+name: Mobile app tick
+
+# Every 5 minutes: POST /api/automation/tick, which wakes the Render instance if it slept and runs
+# one pass of the Android app's assignment sync (new Mentor rows → push, reminders, escalations,
+# shortlist-ready news). While the instance is awake it also ticks every minute on its own; this
+# schedule is what keeps a free instance from sleeping through a new assignment.
+# Needs the repository secret AUTOMATION_TOKEN (same value as on Render). GitHub may run scheduled
+# workflows a few minutes late; that only delays a push, never loses it.
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-tick
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    env:
+      APP_URL: ${{ vars.APP_URL || 'https://psm-placements.onrender.com' }}
+      AUTOMATION_TOKEN: ${{ secrets.AUTOMATION_TOKEN }}
+    steps:
+      - name: Wake the server and run one sync pass
+        run: |
+          if [ -z "$AUTOMATION_TOKEN" ]; then echo "::error::Add the AUTOMATION_TOKEN repository secret"; exit 1; fi
+          # A sleeping free instance needs up to about a minute to start.
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -s -o body.json -w '%{http_code}' --max-time 70 -X POST \
+              -H "Authorization: Bearer $AUTOMATION_TOKEN" "$APP_URL/api/automation/tick" || true)
+            if [ "$code" = "200" ]; then cat body.json; echo; exit 0; fi
+            echo "Attempt $i: HTTP $code"
+            sleep 15
+          done
+          echo "::warning::The server didn't answer the tick; the next run retries"

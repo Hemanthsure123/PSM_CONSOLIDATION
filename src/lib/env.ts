@@ -299,4 +299,61 @@ export const env = {
       return Boolean(url) && !url.includes("[YOUR-PASSWORD]");
     },
   },
+  /** The Android app's API (/api/mobile/v1, docs/mobile-api.yaml). */
+  mobile: {
+    /** HS256 key for the app's 15-minute access tokens. At least 32 characters. Different per environment. */
+    get jwtSecret() {
+      const secret = required("MOBILE_JWT_SECRET");
+      if (secret.trim().length < 32) throw new Error("MOBILE_JWT_SECRET must be at least 32 characters.");
+      return secret.trim();
+    },
+    /** The server's OAuth *web* client — the audience of the Google ID tokens the app sends. */
+    get googleWebClientId() {
+      return required("GOOGLE_OAUTH_WEB_CLIENT_ID").trim();
+    },
+    /** Only these email domains may sign in (lower-case, e.g. ["nxtwave.in", "nxtwave.co.in"]). */
+    get allowedEmailDomains(): string[] {
+      return csv(optional("MOBILE_ALLOWED_EMAIL_DOMAINS", "")).map((d) => d.replace(/^@/, ""));
+    },
+    /** Bootstrap admins (can edit the roster) before anyone is on it. */
+    get adminEmails(): string[] {
+      return csv(optional("MOBILE_ADMIN_EMAILS", ""));
+    },
+    /** The coordination sheet the app reads tasks from (EDGE). Defaults to the first automation sheet. */
+    get controlSpreadsheetId() {
+      const first = (process.env.AUTOMATION_SPREADSHEET_IDS ?? "").split(",").map((s) => s.trim()).filter(Boolean)[0] ?? "";
+      return optional("MOBILE_CONTROL_SPREADSHEET_ID", first);
+    },
+    /** Its control tab. */
+    get controlTab() {
+      const first = (process.env.AUTOMATION_CONTROL_TABS ?? "").split(",").map((s) => s.trim()).filter(Boolean)[0];
+      return optional("MOBILE_CONTROL_TAB", first || "Profile Shortlisting - New");
+    },
+    /** Firebase project for FCM pushes: the GCP project unless set (Firebase lives in the same project). */
+    get fcmProjectId() {
+      return optional("FCM_PROJECT_ID", optional("GCP_PROJECT_ID", ""));
+    },
+  },
+  /**
+   * Live speech-to-text for the app's voice intake (P2). Providers are tried in order
+   * (VOICE_STT_PROVIDERS, default ElevenLabs then Deepgram); each provider's keys rotate
+   * round-robin: ELEVENLABS_API_KEYS / ELEVENLABS_API_KEY_1…N / ELEVENLABS_API_KEY, same for Deepgram.
+   */
+  voice: {
+    get elevenLabsKeys(): string[] {
+      return keyPool("ELEVENLABS_API_KEYS", "ELEVENLABS_API_KEY");
+    },
+    get deepgramKeys(): string[] {
+      return keyPool("DEEPGRAM_API_KEYS", "DEEPGRAM_API_KEY");
+    },
+    get sttProviders(): ("elevenlabs" | "deepgram")[] {
+      const order = csv(optional("VOICE_STT_PROVIDERS", "elevenlabs,deepgram"));
+      return order.filter((p): p is "elevenlabs" | "deepgram" => p === "elevenlabs" || p === "deepgram");
+    },
+  },
 };
+
+/** "a, B ,c" → ["a", "b", "c"] (trimmed, lower-cased, de-duplicated, empties dropped). */
+function csv(value: string): string[] {
+  return Array.from(new Set(value.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean)));
+}
