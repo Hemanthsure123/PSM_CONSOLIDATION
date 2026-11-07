@@ -205,7 +205,7 @@ export interface DocLinkDto {
   seenOn: { round: string; interviewDay: string | null; candidate: string }[];
 }
 
-function linksFor(p: PrepRow, sameJob: PrepRow[]): DocLinkDto[] {
+export function linksFor(p: PrepRow, sameJob: PrepRow[]): DocLinkDto[] {
   const byKey = new Map<string, DocLinkDto>();
   const add = (row: PrepRow, url: string, kind: DocLinkDto["kind"]) => {
     if (!url) return;

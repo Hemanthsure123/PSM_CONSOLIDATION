@@ -232,6 +232,56 @@ export async function writePrepCells(key: string, cells: CellWrite[], patch?: (p
   return prep.row;
 }
 
+/** The columns the app adds at the end of the drill-down tab for prep-call results. */
+export const PREP_CALL_HEADERS = { transcript: "Prep Call Transcript", summary: "Prep Call Summary", duration: "Prep Call Duration" } as const;
+
+/**
+ * Writes cells in columns past Z, found by header text; a missing header is added after the last
+ * used column (once). Same row checks as writePrepCells. Returns the row written.
+ */
+export async function writePrepExtraCells(key: string, values: Record<string, string>): Promise<number> {
+  let snap = await readPrepSnapshot();
+  let prep = snap.byKey.get(key);
+  if (!prep || !(await rowStillHolds(snap, prep))) {
+    snap = await readPrepSnapshot(true);
+    prep = snap.byKey.get(key);
+    if (!prep || !(await rowStillHolds(snap, prep))) throw new UserError(409, "This row changed or left the drill-down sheet. Refresh and try again.", "row_moved");
+  }
+  await assertNotMirror(snap);
+  const sheets = getSheetsWriter();
+  const head = await withSheetsRetry(() => sheets.spreadsheets.values.get({ spreadsheetId: snap.spreadsheetId, range: `${q(snap.tab)}!A1:ZZ1` }));
+  const header = ((head.data.values?.[0] ?? []) as unknown[]).map((h) => String(h ?? "").trim());
+  const norm = (s: string) => s.toLowerCase().replace(/\s+/g, " ").trim();
+  let last = header.reduce((acc, h, i) => (h ? i + 1 : acc), 0);
+  const sheetId = await sheetIdOf(snap.spreadsheetId, snap.tab);
+  const requests: sheets_v4.Schema$Request[] = [];
+  const cell = (row: number, col: number, text: string): sheets_v4.Schema$Request => ({
+    updateCells: {
+      range: { sheetId, startRowIndex: row - 1, endRowIndex: row, startColumnIndex: col - 1, endColumnIndex: col },
+      rows: [{ values: [{ userEnteredValue: { stringValue: text } }] }],
+      fields: "userEnteredValue",
+    },
+  });
+  for (const [name, text] of Object.entries(values)) {
+    let col = header.findIndex((h) => norm(h) === norm(name)) + 1;
+    if (!col) {
+      col = Math.max(last, 26) + 1;
+      last = col;
+      header[col - 1] = name;
+      requests.push(cell(1, col, name));
+    }
+    requests.push(cell(prep.row, col, text.slice(0, 45_000)));
+  }
+  if (!requests.length) return prep.row;
+  // Make room when the grid is narrower than the new columns.
+  const need = Math.max(...Object.keys(values).map((n) => header.findIndex((h) => norm(h) === norm(n)) + 1));
+  const meta = await withSheetsRetry(() => sheets.spreadsheets.get({ spreadsheetId: snap.spreadsheetId, fields: "sheets.properties(sheetId,gridProperties.columnCount)" }));
+  const width = meta.data.sheets?.find((s) => s.properties?.sheetId === sheetId)?.properties?.gridProperties?.columnCount ?? 0;
+  if (width && need > width) requests.unshift({ appendDimension: { sheetId, dimension: "COLUMNS", length: need - width } });
+  await withSheetsRetry(() => sheets.spreadsheets.batchUpdate({ spreadsheetId: snap.spreadsheetId, requestBody: { requests } }), 2);
+  return prep.row;
+}
+
 /** Re-reads one row and checks it still holds [prep] (someone may have edited or moved it). */
 async function rowStillHolds(snap: PrepSnapshot, prep: PrepRow): Promise<boolean> {
   const header = g.__prepHeader?.key === `${snap.spreadsheetId}|${snap.tab}` ? g.__prepHeader.row : null;

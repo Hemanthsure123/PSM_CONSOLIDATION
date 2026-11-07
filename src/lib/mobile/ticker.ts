@@ -2,6 +2,8 @@ import "server-only";
 import { databaseConfigured } from "@/lib/db/client";
 import { syncAssignments } from "@/lib/mobile/assignments";
 import { syncPrepNotifications } from "@/lib/mobile/preps/notify";
+import { syncMeetings } from "@/lib/team/meetings";
+import { resumeRecordings } from "@/lib/team/recordings";
 
 /**
  * Once a minute: new Mentor assignments, reminders, escalations and job news become pushes, and
@@ -18,10 +20,22 @@ const short = (err: unknown) => (err instanceof Error ? err.message.slice(0, 200
 
 /** One pass of both syncs; a failure of one never stops the other. */
 export async function mobileTick(): Promise<{ tasks: { checked: number; pushed: number } | null; preps: { checked: number; pushed: number } | null }> {
-  const [tasks, preps] = await Promise.allSettled([syncAssignments(), syncPrepNotifications()]);
+  const [tasks, preps, kit] = await Promise.allSettled([syncAssignments(), syncPrepNotifications(), prepKitTick()]);
   if (tasks.status === "rejected") console.warn("[mobile] task tick failed:", short(tasks.reason));
   if (preps.status === "rejected") console.warn("[mobile] prep tick failed:", short(preps.reason));
+  if (kit.status === "rejected") console.warn("[mobile] prep kit tick failed:", short(kit.reason));
   return { tasks: tasks.status === "fulfilled" ? tasks.value : null, preps: preps.status === "fulfilled" ? preps.value : null };
+}
+
+/** Meetings (due emails, reminders, Meet recordings) and interrupted call recordings. Skipped until migration 010 exists. */
+async function prepKitTick(): Promise<void> {
+  try {
+    await syncMeetings();
+    await resumeRecordings();
+  } catch (err) {
+    if (/relation "app.(meetings|call_recordings)" does not exist/.test(short(err))) return;
+    throw err;
+  }
 }
 
 export function startMobileTicker(): void {

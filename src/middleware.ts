@@ -18,7 +18,8 @@ import { NextResponse, type NextRequest } from "next/server";
 
 const PUBLIC_PATHS = new Set(["/api/health"]);
 // These check their own credentials: the Apps Script's AUTOMATION_TOKEN, and the app's per-user tokens.
-const OWN_AUTH_PREFIXES = ["/api/automation/", "/api/mobile/"];
+// …and the team-account connect flow (a signed admin link, or this same Basic sign-in, checked in the route).
+const OWN_AUTH_PREFIXES = ["/api/automation/", "/api/mobile/", "/api/integrations/"];
 
 function safeEqual(a: string, b: string): boolean {
   let diff = a.length ^ b.length;

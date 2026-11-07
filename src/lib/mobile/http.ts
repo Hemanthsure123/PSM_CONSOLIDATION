@@ -4,6 +4,7 @@ import { databaseConfigured, describeDbError, query } from "@/lib/db/client";
 import { env } from "@/lib/env";
 import { type AccessClaims, verifyAccessToken } from "@/lib/mobile/jwt";
 import type { RosterUser } from "@/lib/mobile/roster";
+import { TeamAccountError } from "@/lib/team/google";
 
 /** Every error the app sees: a sentence for the user and a machine code (docs/mobile-api.yaml). */
 export function fail(status: number, error: string, code?: string, headers?: HeadersInit): NextResponse {
@@ -68,6 +69,8 @@ export class UserError extends Error {
 
 function serverError(err: unknown): Response {
   if (err instanceof UserError) return fail(err.status, err.message, err.code);
+  // The team Google account isn't connected / was revoked: a sentence the app shows as is.
+  if (err instanceof TeamAccountError) return fail(503, err.message, err.code === "broken" ? "team_reconnect" : err.code === "not_configured" ? "team_not_configured" : "team_not_connected");
   const message = err instanceof Error ? err.message : String(err);
   console.error("[mobile] request failed:", message.slice(0, 300));
   if (/database|ECONN|timeout|pool|terminat/i.test(message)) return fail(503, describeDbError(err), "db_unavailable");

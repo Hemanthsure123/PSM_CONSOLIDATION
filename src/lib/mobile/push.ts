@@ -23,7 +23,11 @@ export type PushKind =
   | "prep_escalation"
   | "prep_unassigned"
   | "interview_checkin"
-  | "prep_digest";
+  | "prep_digest"
+  | "recording_ready"
+  | "meeting_reminder"
+  | "prep_doc_ready"
+  | "team_account";
 
 const g = globalThis as unknown as { __fcmAuth?: JWT };
 
