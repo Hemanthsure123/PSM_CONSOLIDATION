@@ -281,19 +281,41 @@ export function interviewStateOf(raw: string): InterviewState {
   return "other";
 }
 
-/** The values the app writes to "Candidate's Status" (the team's own spellings). */
+/** The usual "Candidate's Status" values, in the order the app offers them (the sheet's dropdown wins). */
 export const INTERVIEW_STATUS_OPTIONS = [
   "To be interviewed",
   "completed and waiting for results",
-  "Rescheduled",
-  "Interview cancelled",
-  "Candidate didn't join",
-  "Panel Didn't Join",
+  "Attended waiting for results",
   "Selected for Next round",
   "Selected",
   "Rejected",
   "Hold",
+  "Rescheduled",
+  "Interview cancelled",
+  "Panel Didn't Join",
 ] as const;
+
+const norm = (v: string) => v.trim().toLowerCase();
+
+/**
+ * What the app offers for "Candidate's Status": the sheet's dropdown values (exact spellings), the
+ * usual ones first; without a dropdown, the usual list.
+ */
+export function interviewOptions(dropdown: string[] | null): string[] {
+  if (!dropdown?.length) return [...INTERVIEW_STATUS_OPTIONS];
+  const preferred = INTERVIEW_STATUS_OPTIONS.map((p) => dropdown.find((o) => norm(o) === norm(p))).filter((o): o is string => Boolean(o));
+  return [...preferred, ...dropdown.filter((o) => !preferred.includes(o))];
+}
+
+/**
+ * The "Prep Given" value to write for a status: the dropdown's own spelling ("Cancled" stays
+ * "Cancled"), else the team's usual word. Null when the dropdown has nothing for it.
+ */
+export function prepGivenValue(status: Exclude<PrepStatus, "pending" | "other">, dropdown: string[] | null): string | null {
+  const wanted = PREP_STATUS_LABEL[status];
+  if (!dropdown?.length) return wanted;
+  return dropdown.find((o) => norm(o) === norm(wanted)) ?? dropdown.find((o) => prepStatusOf(o) === status) ?? null;
+}
 
 /** A 10-digit Indian mobile number from a cell ("+91 93474 39963", "9347439963"), or "". */
 export function phone10(raw: unknown): string {

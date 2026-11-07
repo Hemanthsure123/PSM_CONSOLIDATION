@@ -12,15 +12,16 @@ import {
   dayOf,
   DEFAULT_INTERVIEW_LENGTH_MIN,
   docKey,
-  INTERVIEW_STATUS_OPTIONS,
+  interviewOptions,
   interviewStart,
   isOpen,
   PREP_STATUS_LABEL,
+  prepGivenValue,
   type PrepRow,
   type PrepStatus,
   slaFor,
 } from "@/lib/mobile/preps/parse";
-import { type CellWrite, istSerialNow, readPrepSnapshot, writePrepCells, type PrepSnapshot } from "@/lib/mobile/preps/sheet";
+import { type CellWrite, istSerialNow, readDropdowns, readPrepSnapshot, writePrepCells, type PrepSnapshot } from "@/lib/mobile/preps/sheet";
 import { mentorsOf, rememberAction, trackPreps, type Tracked } from "@/lib/mobile/preps/track";
 import { listRoster, matchMentor, type RosterUser } from "@/lib/mobile/roster";
 
@@ -142,7 +143,7 @@ export interface PrepStats {
  * The calendar window: every row with an interview between [from] and [to] (IST days), plus every
  * prep still to be given (whatever its date), so the prep list never misses one.
  */
-export async function listPreps(user: RosterUser, from: Day, to: Day): Promise<{ items: PrepItemDto[]; stats: PrepStats; syncedAt: string; etag: string }> {
+export async function listPreps(user: RosterUser, from: Day, to: Day): Promise<{ items: PrepItemDto[]; stats: PrepStats; syncedAt: string; etag: string; interviewStatusOptions: string[] }> {
   const { snap, roster, tracked } = await context();
   const now = new Date();
   const today = dayOf(now);
@@ -159,8 +160,9 @@ export async function listPreps(user: RosterUser, from: Day, to: Day): Promise<{
   items.sort((a, b) => (a.interviewStart ?? a.interviewDay ?? "").localeCompare(b.interviewStart ?? b.interviewDay ?? "") || comparePreps(a, b));
   const stats = await statsOf(snap, tracked, today, now);
   const syncedAt = snap.readAt.toISOString();
-  const etag = `"${createHash("sha256").update(JSON.stringify([items, stats, user.email])).digest("base64url").slice(0, 27)}"`;
-  return { items, stats, syncedAt, etag };
+  const interviewStatusOptions = interviewOptions((await readDropdowns(snap).catch(() => ({ candidateStatus: null }))).candidateStatus);
+  const etag = `"${createHash("sha256").update(JSON.stringify([items, stats, interviewStatusOptions, user.email])).digest("base64url").slice(0, 27)}"`;
+  return { items, stats, syncedAt, etag, interviewStatusOptions };
 }
 
 async function statsOf(snap: PrepSnapshot, tracked: Map<string, Tracked>, today: Day, now: Date): Promise<PrepStats> {
@@ -286,7 +288,7 @@ export async function prepDetail(user: RosterUser, key: string) {
     journey,
     activity: events.map((e) => ({ at: e.at.toISOString(), by: names.get(e.actor_email) ?? e.actor_email, action: e.action, value: e.value })),
     canEdit: canEditPrep(user, mentorsOf(p, roster), p.prepBy),
-    interviewStatusOptions: INTERVIEW_STATUS_OPTIONS,
+    interviewStatusOptions: interviewOptions((await readDropdowns(snap)).candidateStatus),
   };
 }
 
@@ -371,11 +373,13 @@ export async function setPrepStatus(user: RosterUser, key: string, body: { statu
   const { snap } = await context();
   const c = snap.columns;
   requireColumn(c.prepGiven, "Prep Given");
+  const label = status === "pending" ? "" : prepGivenValue(status as Exclude<PrepStatus, "pending" | "other">, (await readDropdowns(snap)).prepGiven);
+  if (label === null) throw new UserError(422, "The sheet's Prep Given dropdown has no value for that status.", "invalid_status");
   const cells: CellWrite[] = [];
   if (status === "pending") {
     cells.push({ col: c.prepGiven, text: "" }, { col: c.prepDate, text: "" }, { col: c.prepTime, text: "" });
   } else {
-    cells.push({ col: c.prepGiven, text: PREP_STATUS_LABEL[status as keyof typeof PREP_STATUS_LABEL] });
+    cells.push({ col: c.prepGiven, text: label });
     if (status === "done") {
       const { day, time } = istSerialNow();
       cells.push(
@@ -388,19 +392,23 @@ export async function setPrepStatus(user: RosterUser, key: string, body: { statu
   if (document) cells.push({ col: c.prepDocument, text: document });
   if (note) cells.push({ col: c.remarks, text: p.remarks ? `${p.remarks} | ${note}` : note });
   await writePrepCells(key, cells);
-  await logEvent(key, user, "prep_status", status === "pending" ? "Reopened" : PREP_STATUS_LABEL[status as keyof typeof PREP_STATUS_LABEL]);
+  await logEvent(key, user, "prep_status", status === "pending" ? "Reopened" : label);
   await rememberAction(key, { doneAt: status === "done" ? new Date() : null, ...(status === "done" && !p.prepBy.length ? { mentorEmails: [user.email] } : {}) });
   return prepDetail(user, key);
 }
 
 /** Sets "Candidate's Status" — the interview check (any roster member may record it). */
 export async function setInterviewStatus(user: RosterUser, key: string, body: { status?: unknown }) {
-  const status = String(body.status ?? "").trim();
-  if (!status || status.length > 80) throw new UserError(422, "Pick the interview's status.", "invalid_status");
+  const asked = String(body.status ?? "").trim();
+  if (!asked || asked.length > 200) throw new UserError(422, "Pick the interview's status.", "invalid_status");
   const { snap } = await context();
+  // The sheet has a dropdown: write its exact value (spacing included), never a value it would reject.
+  const options = (await readDropdowns(snap)).candidateStatus;
+  const status = options ? options.find((o) => o.trim().toLowerCase() === asked.toLowerCase()) : asked;
+  if (!status) throw new UserError(422, `"${asked}" isn't one of the sheet's statuses. Refresh and pick again.`, "invalid_status");
   await loadForWrite(user, key);
   await writePrepCells(key, [{ col: requireColumn(snap.columns.candidateStatus, "Candidate's Status"), text: status }]);
-  await logEvent(key, user, "interview_status", status);
+  await logEvent(key, user, "interview_status", status.trim());
   return prepDetail(user, key);
 }
 

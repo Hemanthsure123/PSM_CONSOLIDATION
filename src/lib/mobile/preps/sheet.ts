@@ -7,10 +7,16 @@ import { dayOf, findPrepColumns, identityOf, IST_OFFSET_MS, type PrepColumns, ty
 import { getSheetsWriter } from "@/lib/sheets";
 
 /**
- * Reads and writes the drill-down tab (A..Z only). Reads are cached for 30 s, so phones
- * refreshing together and the minute ticker read Sheets once. Writes always re-read the target
- * row first and refuse when it no longer holds the same prep (rows can be sorted or deleted by
- * the team while the app has them open).
+ * Reads and writes the drill-down tab (A..Z only).
+ *
+ * The EDGE sheet's "Edge Team drill down" tab is an IMPORTRANGE mirror of the coordination
+ * sheet's tab: writing into it breaks the import (#REF! for the whole tab). So the server follows
+ * the IMPORTRANGE in A1 to its SOURCE and reads and writes there — the same rows, without the
+ * import delay. A tab that isn't an import is used as is.
+ *
+ * Reads are cached for 30 s, so phones refreshing together and the minute ticker read Sheets
+ * once. Writes re-read the target row first and refuse when it no longer holds the same prep, and
+ * only write values the source's dropdowns allow.
  */
 
 export interface PrepSnapshot {
@@ -22,12 +28,58 @@ export interface PrepSnapshot {
   readAt: Date;
 }
 
+export interface PrepSource {
+  spreadsheetId: string;
+  tab: string;
+  /** True when [spreadsheetId] is the source behind an IMPORTRANGE mirror. */
+  viaImport: boolean;
+}
+
 const CACHE_MS = 30_000;
-const g = globalThis as unknown as { __prepSnap?: { at: number; snap: PrepSnapshot }; __prepSnapLoading?: Promise<PrepSnapshot>; __prepSheetId?: number };
+const SOURCE_TTL_MS = 10 * 60_000;
+const g = globalThis as unknown as {
+  __prepSnap?: { at: number; snap: PrepSnapshot };
+  __prepSnapLoading?: Promise<PrepSnapshot>;
+  __prepSheetId?: { key: string; id: number };
+  __prepSource?: { at: number; source: PrepSource };
+  __prepDropdowns?: { at: number; key: string; v: Dropdowns };
+  __prepHeader?: { key: string; row: unknown[] };
+};
 const q = (tab: string) => `'${tab.replace(/'/g, "''")}'`;
 
+/** Where the app is configured to look: the EDGE sheet's drill-down tab (possibly a mirror). */
 export function prepTarget(): { spreadsheetId: string; tab: string } {
   return { spreadsheetId: env.mobile.controlSpreadsheetId, tab: process.env.MOBILE_PREP_TAB?.trim() || "Edge Team drill down" };
+}
+
+/** `=IMPORTRANGE("https://…/d/<id>/edit", "'Tab'!A:ZZ")` → the source's id and tab, else null. */
+export function parseImportRange(formula: string): { spreadsheetId: string; tab: string } | null {
+  const m = formula.match(/IMPORTRANGE\(\s*"([^"]+)"\s*[,;]\s*"([^"]+)"\s*\)/i);
+  if (!m) return null;
+  const id = m[1].match(/\/d\/([\w-]{20,})/)?.[1] ?? (/^[\w-]{20,}$/.test(m[1].trim()) ? m[1].trim() : null);
+  if (!id) return null;
+  const range = m[2];
+  const bang = range.lastIndexOf("!");
+  if (bang < 0) return null;
+  const tab = range.slice(0, bang).replace(/^'|'$/g, "").replace(/''/g, "'");
+  return tab ? { spreadsheetId: id, tab } : null;
+}
+
+/** The tab that holds the data (follows an IMPORTRANGE in A1 to its source), cached 10 min. */
+export async function prepSource(): Promise<PrepSource> {
+  const hit = g.__prepSource;
+  if (hit && Date.now() - hit.at < SOURCE_TTL_MS) return hit.source;
+  const target = prepTarget();
+  if (!target.spreadsheetId) throw new UserError(503, "The EDGE sheet isn't configured on the server.", "sheets_unavailable");
+  let source: PrepSource = { ...target, viaImport: false };
+  const res = await withSheetsRetry(() =>
+    getSheetsWriter().spreadsheets.values.get({ spreadsheetId: target.spreadsheetId, range: `${q(target.tab)}!A1`, valueRenderOption: "FORMULA" }),
+  ).catch(() => null);
+  const formula = String(res?.data.values?.[0]?.[0] ?? "");
+  const imported = parseImportRange(formula);
+  if (imported) source = { ...imported, viaImport: true };
+  g.__prepSource = { at: Date.now(), source };
+  return source;
 }
 
 export async function readPrepSnapshot(fresh = false): Promise<PrepSnapshot> {
@@ -36,8 +88,7 @@ export async function readPrepSnapshot(fresh = false): Promise<PrepSnapshot> {
   // One read at a time: concurrent callers share it.
   if (g.__prepSnapLoading) return g.__prepSnapLoading;
   g.__prepSnapLoading = (async () => {
-    const { spreadsheetId, tab } = prepTarget();
-    if (!spreadsheetId) throw new UserError(503, "The EDGE sheet isn't configured on the server.", "sheets_unavailable");
+    const { spreadsheetId, tab } = await prepSource();
     const res = await withSheetsRetry(() =>
       getSheetsWriter().spreadsheets.values.get({
         spreadsheetId,
@@ -48,11 +99,19 @@ export async function readPrepSnapshot(fresh = false): Promise<PrepSnapshot> {
     );
     const rows = (res.data.values ?? []) as unknown[][];
     if (!rows.length) throw new UserError(503, `The "${tab}" tab is empty.`, "sheets_unavailable");
-    const columns = findPrepColumns(rows[0]);
+    let columns: PrepColumns;
+    try {
+      columns = findPrepColumns(rows[0]);
+    } catch (err) {
+      // The source moved or its header broke: look the source up again next time.
+      g.__prepSource = undefined;
+      throw new UserError(503, err instanceof Error ? err.message : "The drill-down tab's header can't be read.", "sheets_unavailable");
+    }
     const refYear = new Date(Date.now() + IST_OFFSET_MS).getUTCFullYear();
     const preps = rowsToPreps(rows, columns, refYear, dayOf(new Date()));
     const snap: PrepSnapshot = { spreadsheetId, tab, columns, preps, byKey: new Map(preps.map((p) => [p.key, p])), readAt: new Date() };
     g.__prepSnap = { at: Date.now(), snap };
+    g.__prepHeader = { key: `${spreadsheetId}|${tab}`, row: rows[0] };
     return snap;
   })();
   try {
@@ -67,13 +126,48 @@ export function forgetPrepSnapshot(): void {
 }
 
 async function sheetIdOf(spreadsheetId: string, tab: string): Promise<number> {
-  if (g.__prepSheetId !== undefined) return g.__prepSheetId;
+  const key = `${spreadsheetId}|${tab}`;
+  if (g.__prepSheetId?.key === key) return g.__prepSheetId.id;
   const meta = await withSheetsRetry(() => getSheetsWriter().spreadsheets.get({ spreadsheetId, fields: "sheets.properties(sheetId,title)" }));
   const id = meta.data.sheets?.find((s) => s.properties?.title === tab)?.properties?.sheetId;
-  if (id == null) throw new UserError(503, `The "${tab}" tab wasn't found in the EDGE sheet.`, "sheets_unavailable");
-  g.__prepSheetId = id;
+  if (id == null) throw new UserError(503, `The "${tab}" tab wasn't found.`, "sheets_unavailable");
+  g.__prepSheetId = { key, id };
   return id;
 }
+
+// ── Dropdowns ────────────────────────────────────────────────────────────────
+
+export interface Dropdowns {
+  /** "Prep Given" options, as in the sheet (null = no dropdown: any text). */
+  prepGiven: string[] | null;
+  /** "Candidate's Status" options, as in the sheet (null = no dropdown). */
+  candidateStatus: string[] | null;
+}
+
+/** The dropdown values of "Prep Given" and "Candidate's Status" (first data row), cached 10 min. */
+export async function readDropdowns(snap: PrepSnapshot): Promise<Dropdowns> {
+  const key = `${snap.spreadsheetId}|${snap.tab}`;
+  const hit = g.__prepDropdowns;
+  if (hit && hit.key === key && Date.now() - hit.at < SOURCE_TTL_MS) return hit.v;
+  const col = (n: number) => String.fromCharCode(64 + n);
+  const ranges = [snap.columns.prepGiven, snap.columns.candidateStatus].map((c) => (c ? `${q(snap.tab)}!${col(c)}2` : null));
+  const listOf = async (range: string | null): Promise<string[] | null> => {
+    if (!range) return null;
+    const res = await withSheetsRetry(() =>
+      getSheetsWriter().spreadsheets.get({ spreadsheetId: snap.spreadsheetId, ranges: [range], includeGridData: true, fields: "sheets.data.rowData.values.dataValidation" }),
+    ).catch(() => null);
+    const rule = res?.data.sheets?.[0]?.data?.[0]?.rowData?.[0]?.values?.[0]?.dataValidation;
+    if (rule?.condition?.type !== "ONE_OF_LIST") return null;
+    const values = (rule.condition.values ?? []).map((v) => String(v.userEnteredValue ?? "")).filter((v) => v.trim());
+    return values.length ? values : null;
+  };
+  const [prepGiven, candidateStatus] = await Promise.all([listOf(ranges[0]), listOf(ranges[1])]);
+  const v: Dropdowns = { prepGiven, candidateStatus };
+  g.__prepDropdowns = { at: Date.now(), key, v };
+  return v;
+}
+
+// ── Writes ───────────────────────────────────────────────────────────────────
 
 /** A cell the app writes: text, or a date / time with the team's display format. */
 export type CellWrite =
@@ -81,13 +175,15 @@ export type CellWrite =
   | { col: number; date: { serial: number; pattern: string; type: "DATE" | "TIME" } };
 
 /**
- * Writes cells of one prep's row, after checking the row still holds that prep. If the row moved
- * (the team sorted or inserted rows), the prep is found again by its key. Returns the row written.
+ * Writes cells of one prep's row in the SOURCE tab, after checking the row still holds that prep
+ * (the team may have sorted, inserted or edited rows). Never writes into an IMPORTRANGE mirror.
+ * Returns the row written.
  */
 export async function writePrepCells(key: string, cells: CellWrite[]): Promise<number> {
   const snap = await readPrepSnapshot(true);
   const prep = snap.byKey.get(key);
   if (!prep) throw new UserError(409, "This row is no longer in the drill-down sheet (it was changed or deleted). Refresh and try again.", "row_moved");
+  await assertNotMirror(snap);
   const sheets = getSheetsWriter();
   // Re-check the exact row just before writing: someone may have edited it since the read.
   const check = await withSheetsRetry(() =>
@@ -98,7 +194,8 @@ export async function writePrepCells(key: string, cells: CellWrite[]): Promise<n
       dateTimeRenderOption: "SERIAL_NUMBER",
     }),
   );
-  const header = await headerRow(snap);
+  const header = g.__prepHeader?.key === `${snap.spreadsheetId}|${snap.tab}` ? g.__prepHeader.row : null;
+  if (!header) throw new UserError(503, "The drill-down tab's header can't be read. Try again.", "sheets_unavailable");
   const now = rowsToPreps(
     [header, (check.data.values?.[0] ?? []) as unknown[]],
     snap.columns,
@@ -138,14 +235,15 @@ export async function writePrepCells(key: string, cells: CellWrite[]): Promise<n
   return prep.row;
 }
 
-const g2 = globalThis as unknown as { __prepHeader?: unknown[] };
-async function headerRow(snap: PrepSnapshot): Promise<unknown[]> {
-  if (g2.__prepHeader) return g2.__prepHeader;
+/** Refuse to write when the tab we'd write to is itself an IMPORTRANGE (its cells must stay empty). */
+async function assertNotMirror(snap: PrepSnapshot): Promise<void> {
   const res = await withSheetsRetry(() =>
-    getSheetsWriter().spreadsheets.values.get({ spreadsheetId: snap.spreadsheetId, range: `${q(snap.tab)}!A1:Z1` }),
+    getSheetsWriter().spreadsheets.values.get({ spreadsheetId: snap.spreadsheetId, range: `${q(snap.tab)}!A1`, valueRenderOption: "FORMULA" }),
   );
-  g2.__prepHeader = (res.data.values?.[0] ?? []) as unknown[];
-  return g2.__prepHeader;
+  if (parseImportRange(String(res.data.values?.[0]?.[0] ?? ""))) {
+    g.__prepSource = undefined;
+    throw new UserError(503, "The drill-down tab is a copy of another sheet; the server will write to the original. Try again in a moment.", "sheets_unavailable");
+  }
 }
 
 /**

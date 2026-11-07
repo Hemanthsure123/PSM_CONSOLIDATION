@@ -22,7 +22,10 @@ import {
   rowsToPreps,
   slaFor,
   splitNames,
+  interviewOptions,
+  prepGivenValue,
 } from "@/lib/mobile/preps/parse";
+import { parseImportRange } from "@/lib/mobile/preps/sheet";
 
 let passed = 0;
 function test(name: string, fn: () => void) {
@@ -176,6 +179,29 @@ test("a rescheduled copy keeps its own key whatever the row order; identical row
   assert.notEqual(a[0].key, a[1].key);
   const twins = rowsToPreps([header, first, first], cols, 2026);
   assert.notEqual(twins[0].key, twins[1].key);
+});
+
+test("an IMPORTRANGE mirror points at its source sheet and tab", () => {
+  const f = `=IMPORTRANGE("https://docs.google.com/spreadsheets/d/1D__u119jU7SH2afMn5x-20MF54ugCQpL6uqmFlPO0xU/edit","'Edge Team drill down'!A:ZZ")`;
+  assert.deepEqual(parseImportRange(f), { spreadsheetId: "1D__u119jU7SH2afMn5x-20MF54ugCQpL6uqmFlPO0xU", tab: "Edge Team drill down" });
+  assert.deepEqual(parseImportRange('=importrange("1D__u119jU7SH2afMn5x-20MF54ugCQpL6uqmFlPO0xU"; "Sheet1!A1:Z")'), { spreadsheetId: "1D__u119jU7SH2afMn5x-20MF54ugCQpL6uqmFlPO0xU", tab: "Sheet1" });
+  assert.equal(parseImportRange("Product"), null);
+  assert.equal(parseImportRange("=SUM(A1:A3)"), null);
+});
+
+test("writes use the sheet's own dropdown spellings", () => {
+  const prepDropdown = ["Yes", "Missed", "Candidate was busy", "DNP", "Not informed to PSM priorly", "duplicate entry", "Not needed", "Rescheduled", "Cancled"];
+  assert.equal(prepGivenValue("cancelled", prepDropdown), "Cancled");
+  assert.equal(prepGivenValue("done", prepDropdown), "Yes");
+  assert.equal(prepGivenValue("no_response", prepDropdown), "DNP");
+  assert.equal(prepGivenValue("cancelled", null), "Cancelled");
+  assert.equal(prepGivenValue("missed", ["Yes"]), null);
+  const status = ["Rejected", "Selected", "completed and waiting for results ", "Hired", "To be interviewed", "Panel Didn't Join"];
+  const opts = interviewOptions(status);
+  assert.deepEqual(opts.slice(0, 5), ["To be interviewed", "completed and waiting for results ", "Selected", "Rejected", "Panel Didn't Join"]);
+  assert.ok(opts.includes("Hired"));
+  assert.equal(opts.length, status.length);
+  assert.ok(interviewOptions(null).length >= 8);
 });
 
 test("SLA: next-day interview → 45 minutes from entry", () => {

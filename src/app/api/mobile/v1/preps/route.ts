@@ -18,7 +18,7 @@ export const GET = withUser(async (req, { user }) => {
   const to = url.searchParams.get("to") ?? addDays(today, 14);
   if (!isDay(from) || !isDay(to) || to < from) return fail(422, "from and to must be days (YYYY-MM-DD), from ≤ to.", "invalid_window");
   if ((Date.parse(to) - Date.parse(from)) / 86_400_000 > MAX_WINDOW_DAYS) return fail(422, `Ask for at most ${MAX_WINDOW_DAYS} days at once.`, "invalid_window");
-  const { items, stats, syncedAt, etag } = await listPreps(user, from, to);
+  const { items, stats, syncedAt, etag, interviewStatusOptions } = await listPreps(user, from, to);
   if (req.headers.get("if-none-match") === etag) return new Response(null, { status: 304, headers: { ETag: etag } });
-  return NextResponse.json({ from, to, today, items, stats, syncedAt }, { headers: { ETag: etag, "Cache-Control": "no-store" } });
+  return NextResponse.json({ from, to, today, items, stats, syncedAt, interviewStatusOptions }, { headers: { ETag: etag, "Cache-Control": "no-store" } });
 });
