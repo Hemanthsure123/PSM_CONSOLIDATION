@@ -624,6 +624,8 @@ paths:
       x-phase: P4
       summary: The Calendar's interviews and preps (EDGE "Edge Team drill down", columns A..Z).
       description: |
+        Read from (and written to) the SOURCE tab behind EDGE's IMPORTRANGE mirror: writing into the
+        mirror would break the import. Writes only use values the sheet's dropdowns allow.
         Every row with an interview between `from` and `to` (IST days, at most 62 days), plus every
         prep still to be given (whatever its date), with the prep numbers. Rows are read from the
         sheet (cached 30 s); category and tags come from the eligible pool (matched by phone), the
@@ -652,6 +654,7 @@ paths:
                   items: { type: array, items: { $ref: "#/components/schemas/PrepItem" } }
                   stats: { $ref: "#/components/schemas/PrepStats" }
                   syncedAt: { type: string, format: date-time, description: "When the sheet was read" }
+                  interviewStatusOptions: { type: array, items: { type: string }, description: "The sheet's Candidate's Status dropdown values (exact spellings), usual ones first" }
 
   /preps/{prepId}:
     get:
