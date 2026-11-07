@@ -823,7 +823,7 @@ paths:
     get:
       tags: [prep-kit]
       x-phase: P5
-      summary: "The candidate's email: from the candidate's own resume first; only when it has none, CRPs (JOB ID + Company Sheet Link only) → company sheet, by phone then exact name. { email, status: found|ambiguous|not_found|no_company_sheet|unreadable, source, matchedBy: resume|phone|name }. Never guessed."
+      summary: "The candidate's email, in order: 1) the company sheet (CRPs JOB ID + Company Sheet Link only, by phone then exact name); 2) if not there or no company sheet, the internal assessment sheets (by phone); 3) if in neither, the resume. { email, status: found|ambiguous|not_found|no_company_sheet|unreadable, source, matchedBy: phone|name|assessment|resume }. Never guessed."
       parameters: [{ $ref: "#/components/parameters/PrepId" }]
       responses:
         "200": { description: "OK" }

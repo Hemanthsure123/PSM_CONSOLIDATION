@@ -5,15 +5,15 @@ import { normName } from "@/lib/mobile/roster";
 import { getSheetsWriter } from "@/lib/sheets";
 
 /**
- * A candidate's email, looked up — never guessed:
- *   0. the candidate's own resume (the drill-down row's resume link): one email there → done;
- *   1. the CRPs tab (only its "JOB ID" and "Company Sheet Link" columns) gives the job's company
- *      sheet;
- *   2. every tab of that company sheet is searched by the candidate's phone (last 10 digits),
- *      then by exact full name;
- *   3. one distinct email → found. Two or more different emails → "ambiguous" (none returned);
- *      no row → "not_found".
- * Reads go through the service account and are cached (CRPs 10 min, each company sheet 10 min).
+ * A candidate's email, looked up — never guessed — in this order:
+ *   1. COMPANY SHEET: the CRPs tab (only its "JOB ID" and "Company Sheet Link" columns) gives the
+ *      job's company sheet; every tab is searched by the candidate's phone (last 10 digits), then
+ *      by exact full name. One distinct email → found; two or more → not used (ambiguous).
+ *   2. INTERNAL ASSESSMENTS (only when step 1 found none, or the job has no company sheet): the
+ *      Edge 2.0 / Edge 1.0 / Academy pool sheets and the assessment interview sheets, by phone.
+ *   3. RESUME (only when neither has it): the email written on the candidate's resume.
+ * Reads go through the service account and are cached (CRPs and company sheets 10 min,
+ * assessment sheets 6 h, resumes 6 h).
  */
 
 export type ContactStatus = "found" | "ambiguous" | "not_found" | "no_company_sheet" | "unreadable";
@@ -23,7 +23,7 @@ export interface ContactResult {
   status: ContactStatus;
   /** Where it was found ("Company sheet title › Tab"), for the app to show. */
   source: string | null;
-  matchedBy: "resume" | "phone" | "name" | null;
+  matchedBy: "phone" | "name" | "assessment" | "resume" | null;
 }
 
 const TTL = 10 * 60_000;
@@ -151,7 +151,7 @@ const NOT_PERSONAL = /@(example\.com|domain\.com|email\.com|gmail\.co)$|^(norepl
 /**
  * The email written on the candidate's own resume (PDF / Word / text; images are skipped — no
  * model reads them for this). One distinct email → it; several → the one in the resume's header
- * when only one is there; otherwise none (the company sheet decides).
+ * when only one is there; otherwise none. The last resort, after the company sheet and assessments.
  */
 async function emailFromResume(resumeUrl: string): Promise<string | null> {
   const url = resumeUrl.trim();
@@ -184,16 +184,122 @@ async function emailFromResume(resumeUrl: string): Promise<string | null> {
   return email;
 }
 
+// ── Internal assessment sheets (the emails we track per candidate) ──────────
+
+interface AssessmentSheet {
+  label: string;
+  spreadsheetId: string;
+  tab: string;
+}
+
+/** The pool and assessment sheets the eligible pool is built from, most authoritative first. */
+async function assessmentSheets(): Promise<AssessmentSheet[]> {
+  const { poolSource } = await import("@/lib/pool/sources");
+  const { scoreSheets } = await import("@/lib/pool/scores/sources");
+  const out: AssessmentSheet[] = [];
+  const e2 = poolSource("edge2");
+  if (e2.referenceTab) out.push({ label: "Edge 2.0 assessment (PII)", spreadsheetId: e2.spreadsheetId, tab: e2.referenceTab });
+  out.push({ label: "Edge 2.0 assessment", spreadsheetId: e2.spreadsheetId, tab: e2.tab });
+  const e1 = poolSource("edge1");
+  out.push({ label: "Edge 1.0 assessment", spreadsheetId: e1.spreadsheetId, tab: e1.tab });
+  const ac = poolSource("academy");
+  out.push({ label: "Academy assessed pool", spreadsheetId: ac.spreadsheetId, tab: ac.tab });
+  for (const s of scoreSheets()) out.push({ label: s.label, spreadsheetId: s.spreadsheetId, tab: s.tab });
+  return out;
+}
+
+interface AssessmentIndex {
+  /** phone (last 10) → emails per sheet, in sheet order. */
+  byPhone: Map<string, { label: string; emails: string[] }[]>;
+  at: number;
+}
+
+const EMAIL_HEAD = /^(candidate |student )?e ?mail( id| address)?$/;
+const PHONE_HEAD = /^(student )?(phone|mobile|contact|whatsapp)( number| no)?$|^student ?number$/;
+const UID_HEAD = /^(uid|user ?id)$/;
+
+const ga = globalThis as unknown as { __assessIndex?: AssessmentIndex; __assessLoading?: Promise<AssessmentIndex> };
+
 /**
- * Looks up one candidate's email: first from the candidate's own information (the resume linked
- * in the drill-down row); only when that gives none, from the job's company sheet.
+ * phone → emails from every internal assessment sheet. Interview sheets carry only UID + email,
+ * so their rows are tied to a phone through the UID → phone pairs of the other sheets. Only the
+ * three key columns are read (the interview sheets hold large evaluation cells). Cached 6 h.
  */
-export async function findCandidateEmail(jobId: string, candidate: { name: string; phone: string; resumeUrl?: string }): Promise<ContactResult> {
+async function assessmentIndex(): Promise<AssessmentIndex> {
+  if (ga.__assessIndex && Date.now() - ga.__assessIndex.at < 6 * 3600_000) return ga.__assessIndex;
+  if (ga.__assessLoading) return ga.__assessLoading;
+  ga.__assessLoading = (async () => {
+    const sheets = getSheetsWriter();
+    const rows: { label: string; order: number; phone: string; uid: string; email: string }[] = [];
+    const list = await assessmentSheets();
+    await Promise.all(
+      list.map(async (s, order) => {
+        try {
+          const head = await withSheetsRetry(() => sheets.spreadsheets.values.get({ spreadsheetId: s.spreadsheetId, range: `${q(s.tab)}!A1:CZ3` }));
+          const values = head.data.values ?? [];
+          for (let r = 0; r < values.length; r++) {
+            const h = values[r].map(norm);
+            const email = h.findIndex((x) => EMAIL_HEAD.test(x));
+            if (email < 0) continue;
+            const phone = h.findIndex((x) => PHONE_HEAD.test(x));
+            const uid = h.findIndex((x) => UID_HEAD.test(x));
+            if (phone < 0 && uid < 0) break;
+            const col = (i: number) => {
+              let t = "";
+              for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) t = String.fromCharCode(65 + ((n - 1) % 26)) + t;
+              return t;
+            };
+            const cols = [email, phone, uid].filter((i) => i >= 0);
+            const res = await withSheetsRetry(() =>
+              sheets.spreadsheets.values.batchGet({ spreadsheetId: s.spreadsheetId, ranges: cols.map((i) => `${q(s.tab)}!${col(i)}${r + 2}:${col(i)}`) }),
+            );
+            const data = (res.data.valueRanges ?? []).map((v) => v.values ?? []);
+            const at = (i: number, n: number) => (i < 0 ? "" : String(data[cols.indexOf(i)]?.[n]?.[0] ?? "").trim());
+            const total = Math.max(...data.map((d) => d.length));
+            for (let n = 0; n < total; n++) {
+              const e = at(email, n).toLowerCase();
+              if (!EMAIL.test(e)) continue;
+              rows.push({ label: s.label, order, phone: last10(at(phone, n)), uid: at(uid, n).toLowerCase(), email: e });
+            }
+            break;
+          }
+        } catch (err) {
+          console.warn("[contacts] assessment sheet unreadable:", s.label, err instanceof Error ? err.message.slice(0, 120) : err);
+        }
+      }),
+    );
+    const phoneByUid = new Map<string, string>();
+    for (const r of rows) if (r.uid && r.phone.length === 10 && !phoneByUid.has(r.uid)) phoneByUid.set(r.uid, r.phone);
+    const byPhone = new Map<string, { label: string; order: number; emails: string[] }[]>();
+    for (const r of rows.sort((a, b) => a.order - b.order)) {
+      const phone = r.phone.length === 10 ? r.phone : phoneByUid.get(r.uid) ?? "";
+      if (!phone) continue;
+      const list = byPhone.get(phone) ?? [];
+      let entry = list.find((x) => x.label === r.label);
+      if (!entry) list.push((entry = { label: r.label, order: r.order, emails: [] }));
+      if (!entry.emails.includes(r.email)) entry.emails.push(r.email);
+      byPhone.set(phone, list);
+    }
+    const index: AssessmentIndex = { byPhone, at: Date.now() };
+    if (rows.length) ga.__assessIndex = index; // never cache an empty read
+    return index;
+  })().finally(() => {
+    ga.__assessLoading = undefined;
+  });
+  return ga.__assessLoading;
+}
+
+/** The email the internal assessments track for this phone: the first sheet (most authoritative) that has exactly one. */
+async function emailFromAssessments(phone: string): Promise<{ email: string; source: string } | null> {
+  if (phone.length !== 10) return null;
+  const entries = (await assessmentIndex()).byPhone.get(phone) ?? [];
+  for (const e of entries) if (e.emails.length === 1) return { email: e.emails[0], source: e.label };
+  return null;
+}
+
+/** The company sheet step: CRPs (JOB ID + Company Sheet Link) → the company sheet, by phone then exact name. */
+async function emailFromCompanySheet(jobId: string, candidate: { name: string; phone: string }): Promise<ContactResult> {
   const none = (status: ContactStatus): ContactResult => ({ email: null, status, source: null, matchedBy: null });
-  if (candidate.resumeUrl) {
-    const fromResume = await emailFromResume(candidate.resumeUrl);
-    if (fromResume) return { email: fromResume, status: "found", source: "Candidate's resume", matchedBy: "resume" };
-  }
   if (!jobId.trim()) return none("no_company_sheet");
   let ids: string[];
   try {
@@ -229,8 +335,32 @@ export async function findCandidateEmail(jobId: string, candidate: { name: strin
   return none(unreadable ? "unreadable" : "not_found");
 }
 
+/**
+ * One candidate's email, in the team's order:
+ *   1. the job's company sheet (CRPs → company sheet);
+ *   2. when it isn't there (or the job has no company sheet): the internal assessment sheets;
+ *   3. when it's in neither: the candidate's resume.
+ * When all three come up empty, the company-sheet status is returned (not_found / ambiguous /
+ * no_company_sheet / unreadable) and no email.
+ */
+export async function findCandidateEmail(jobId: string, candidate: { name: string; phone: string; resumeUrl?: string }): Promise<ContactResult> {
+  const company = await emailFromCompanySheet(jobId, candidate);
+  if (company.email) return company;
+  const assessed = await emailFromAssessments(last10(candidate.phone)).catch((err) => {
+    console.warn("[contacts] assessments unreadable:", err instanceof Error ? err.message.slice(0, 160) : err);
+    return null;
+  });
+  if (assessed) return { email: assessed.email, status: "found", source: assessed.source, matchedBy: "assessment" };
+  if (candidate.resumeUrl) {
+    const fromResume = await emailFromResume(candidate.resumeUrl);
+    if (fromResume) return { email: fromResume, status: "found", source: "Candidate's resume", matchedBy: "resume" };
+  }
+  return company;
+}
+
 export function forgetContacts(): void {
   g.__crpIndex = undefined;
+  ga.__assessIndex = undefined;
   sheetCache.clear();
 }
 

@@ -1,7 +1,7 @@
 /**
  * Prep kit — read-only check against the real sheets (writes nothing, prints no secrets):
  *   npx tsx scripts/prepkit-check.ts [count]
- * For the latest drill-down rows: the candidate email lookup (resume first, then CRPs → company sheet; emails are
+ * For the latest drill-down rows: the candidate email lookup (company sheet, then internal assessments, then resume; emails are
  * masked), the drill-downs / transcripts a prep document would be built from, and whether the
  * team Google account and Notion are set up.
  */
@@ -35,7 +35,8 @@ async function main() {
   const started = Date.now();
   for (const p of rows) {
     const r = await findCandidateEmail(p.jobId, { name: p.candidate, phone: p.phone, resumeUrl: p.resumeUrl });
-    tally.set(r.status, (tally.get(r.status) ?? 0) + 1);
+    const k = r.matchedBy ? `${r.status} via ${r.matchedBy}` : r.status;
+    tally.set(k, (tally.get(k) ?? 0) + 1);
     const sameJob = snap.preps.filter((x) => x.jobId === p.jobId);
     const links = linksFor(p, sameJob);
     console.log(
