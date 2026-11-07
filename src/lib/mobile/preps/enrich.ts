@@ -1,10 +1,10 @@
 import "server-only";
 import { normalisePhone } from "@/lib/pool/parse";
 import { lookupStandings, poolRecords } from "@/lib/pool/queries";
-import { edge2Stage } from "@/lib/pool/standing";
-import { ASSESSMENTS, type AssessmentScore } from "@/lib/pool/scores/catalogue";
+import type { AssessmentScore } from "@/lib/pool/scores/catalogue";
 import { assessedOutsidePool, scoresFor } from "@/lib/pool/scores/queries";
-import { COMPETENCY_LABEL, PRODUCT_LABEL, TR2_TRACK_LABEL, VERDICT_LABEL, type CandidateStanding, type PersonRecords, type Product, type Tier } from "@/lib/pool/types";
+import { PRODUCT_LABEL, type CandidateStanding, type PersonRecords, type Product, type Tier } from "@/lib/pool/types";
+import { markTags, recordTags, type Tag, toneOf } from "@/lib/mobile/preps/tags";
 import { type Category, type EdgeVersion, categoryFromSheet } from "@/lib/mobile/preps/parse";
 
 /**
@@ -14,12 +14,7 @@ import { type Category, type EdgeVersion, categoryFromSheet } from "@/lib/mobile
  * Lookups are batched and cached (30 min), so a calendar refresh costs one query at most.
  */
 
-export interface Tag {
-  label: string;
-  tone: "pass" | "fail" | "neutral";
-  /** "Academy", "Edge 2.0", "Edge 1.0", "Marks", "Sheet". */
-  group: string;
-}
+export type { Tag } from "@/lib/mobile/preps/tags";
 
 export interface CandidateClass {
   category: Category;
@@ -87,7 +82,7 @@ function classify(sheetProduct: string, view: { standing: CandidateStanding | nu
     for (const st of [academy, edge2, edge1].filter(Boolean) as NonNullable<typeof academy>[]) {
       // "Edge 2.0 · MERN TR-2 · Strong hire" → the parts after the product.
       const rest = st.label.split(" · ").slice(1).join(" · ");
-      if (rest) tags.push({ label: rest, tone: st.eligible ? "pass" : "fail", group: PRODUCT_LABEL[st.product] });
+      if (rest) tags.push({ label: rest, tone: st.eligible ? (toneOf(rest) === "fail" ? "fail" : "pass") : "fail", group: PRODUCT_LABEL[st.product] });
     }
     return {
       category,
@@ -123,73 +118,6 @@ export async function classifyMany(people: { phone: string; product: string }[])
 export const classKey = (phone: string, product: string) => `${phone}|${product}`;
 
 // ── Full tags for one candidate (the prep page) ─────────────────────────────
-
-const pass = (label: string, group: string): Tag => ({ label, tone: "pass", group });
-const fail = (label: string, group: string): Tag => ({ label, tone: "fail", group });
-const info = (label: string, group: string): Tag => ({ label, tone: "neutral", group });
-const fmt = (n: number | null) => (n === null ? "" : Number.isInteger(n) ? String(n) : n.toFixed(1));
-
-function recordTags(rec: PersonRecords): Tag[] {
-  const tags: Tag[] = [];
-  const a = rec.academy;
-  if (a) {
-    const G = "Academy";
-    if (a.oldBucket) tags.push(info(`Bucket ${a.oldBucket}`, G));
-    if (a.dsaOfflineStatus) tags.push(a.dsaOfflineCleared ? pass("DSA offline cleared", G) : fail(`DSA offline · ${a.dsaOfflineStatus}`, G));
-    for (const r of a.rounds) {
-      const label = `Bucket ${r.bucket} TR-${r.round}${r.score !== null ? ` · ${fmt(r.score)}` : ""}`;
-      if (r.cleared) tags.push(pass(`${label} · cleared`, G));
-      else if (r.status) tags.push(fail(`${label} · ${r.status}`, G));
-    }
-    for (const c of a.competency) {
-      const level = c.levelLabel || (c.level !== null ? `L${c.level}` : "");
-      const label = `${COMPETENCY_LABEL[c.subject]}${level ? ` ${level}` : ""}`;
-      if (c.cleared) tags.push(pass(`${label} · cleared`, G));
-      else if (c.clearanceStatus || c.verdictBand) tags.push(fail(`${label} · ${c.clearanceStatus || c.verdictBand}`, G));
-    }
-    if (a.yog) tags.push(info(`YOG ${a.yog}`, G));
-  }
-  const e2 = rec.edge2;
-  if (e2) {
-    const G = "Edge 2.0";
-    const stage = edge2Stage(e2.candidateStage);
-    if (stage) tags.push(pass(stage === "tr2" ? "TR-2 cleared" : stage === "tr1" ? "TR-1 cleared" : "Assessment cleared", G));
-    if (e2.offlineOverallScore !== null) tags.push(info(`Offline assessment ${fmt(e2.offlineOverallScore)}/160`, G));
-    if (e2.tr1.overallTechnical !== null) tags.push(info(`TR-1 technical ${fmt(e2.tr1.overallTechnical)}`, G));
-    for (const v of e2.tr2) {
-      const label = `${TR2_TRACK_LABEL[v.track]} TR-2 · ${VERDICT_LABEL[v.verdict]}`;
-      tags.push(v.verdict === "strong_hire" || v.verdict === "medium_hire" ? pass(label, G) : fail(label, G));
-    }
-  }
-  const e1 = rec.edge1;
-  if (e1) {
-    const G = "Edge 1.0";
-    const one = (name: string, status: string) => {
-      if (!status.trim()) return;
-      const bad = /not|reject|fail|low/i.test(status);
-      tags.push(bad ? fail(`${name} · ${status}`, G) : pass(`${name} · ${status}`, G));
-    };
-    one("Assessment", e1.assessmentStatus);
-    one("TR-1", e1.tr1Status);
-    one("TR-2", e1.tr2Status);
-  }
-  return tags;
-}
-
-/** The best attempt of each assessment, as "DSA offline exam · 92/130 · Qualified". */
-function markTags(scores: AssessmentScore[], skipBucketRounds: boolean): Tag[] {
-  const best = new Map<string, AssessmentScore>();
-  for (const s of scores) {
-    const prev = best.get(s.assessment);
-    if (!prev || s.score / (s.maxScore || 1) > prev.score / (prev.maxScore || 1)) best.set(s.assessment, s);
-  }
-  // Bucket TR rounds are already shown from the Academy record (with its own score and verdict).
-  return ASSESSMENTS.filter((a) => best.has(a.key) && !(skipBucketRounds && a.key.startsWith("bucket_"))).map((a) => {
-    const s = best.get(a.key)!;
-    const label = `${a.label} · ${fmt(s.score)}/${fmt(s.maxScore || a.max)}${s.result ? ` · ${s.result}` : ""}`;
-    return s.passed === true ? pass(label, "Marks") : s.passed === false ? fail(label, "Marks") : info(label, "Marks");
-  });
-}
 
 /** Every tag we have for one candidate: product records (rounds, levels, verdicts) and final marks. */
 export async function detailTags(phone: string, cls: CandidateClass): Promise<Tag[]> {

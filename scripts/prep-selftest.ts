@@ -26,6 +26,8 @@ import {
   prepGivenValue,
 } from "@/lib/mobile/preps/parse";
 import { parseImportRange } from "@/lib/mobile/preps/sheet";
+import { markTags, recordTags, toneOf } from "@/lib/mobile/preps/tags";
+import type { AcademyRecord, Edge1Record, Edge2Record } from "@/lib/pool/types";
 
 let passed = 0;
 function test(name: string, fn: () => void) {
@@ -202,6 +204,61 @@ test("writes use the sheet's own dropdown spellings", () => {
   assert.ok(opts.includes("Hired"));
   assert.equal(opts.length, status.length);
   assert.ok(interviewOptions(null).length >= 8);
+});
+
+const who = { phone: "9000000001", userId: null, name: "Test", referenceResumeUrl: null };
+const tr1 = { selfIntro: null, dsaOverall: null, problemSolving: null, coding: null, communication: null, debugging: null, overallTechnical: null };
+const edge2 = (o: Partial<Edge2Record>): Edge2Record => ({ product: "edge2", ...who, candidateStage: "Assessment Cleared", offlineOverallScore: null, dsaCodingScore: null, csFundamentalsScore: null, sqlMcqScore: null, sqlCodingScore: null, tr1, tr2: [], ...o });
+const tag = (tags: { label: string; tone: string }[], start: string) => tags.find((t) => t.label.startsWith(start));
+
+test("tags: Edge 2.0 scores carry their maximum; a TR-1 taken but not cleared is red", () => {
+  const tags = recordTags({ edge2: edge2({ offlineOverallScore: 140, dsaCodingScore: 101, csFundamentalsScore: 30, tr1: { ...tr1, overallTechnical: 16, coding: 3, dsaOverall: 2 } }) });
+  assert.deepEqual(tag(tags, "Assessment cleared"), { label: "Assessment cleared", tone: "pass", group: "Edge 2.0" });
+  assert.equal(tag(tags, "Offline assessment")?.label, "Offline assessment · 140/160");
+  assert.equal(tag(tags, "Offline assessment")?.tone, "neutral");
+  assert.equal(tag(tags, "DSA coding")?.label, "DSA coding 101/120 · CS fundamentals 30/40");
+  assert.deepEqual(tag(tags, "TR-1 technical"), { label: "TR-1 technical · 16/100 · Not cleared", tone: "fail", group: "Edge 2.0" });
+  assert.equal(tag(tags, "TR-1 ratings")?.label, "TR-1 ratings (out of 10): DSA 2 · Coding 3");
+  const cleared = recordTags({ edge2: edge2({ candidateStage: "TR1 CLEARED", tr1: { ...tr1, overallTechnical: 72 }, tr2: [{ track: "genai", verdict: "low_hire" }] }) });
+  assert.equal(tag(cleared, "TR-1 technical")?.tone, "pass");
+  assert.equal(tag(cleared, "GenAI TR-2")?.tone, "fail");
+});
+
+test("tags: Edge 1.0 verdicts read as words with colours", () => {
+  const e1: Edge1Record = { product: "edge1", ...who, assessmentStatus: "SELECTED", tr1Status: "Low Hire", tr2Status: "" };
+  const tags = recordTags({ edge1: e1 });
+  assert.deepEqual(tags.map((t) => [t.label, t.tone]), [["Assessment · Cleared", "pass"], ["TR-1 · Low hire", "fail"]]);
+  const good = recordTags({ edge1: { ...e1, tr1Status: "Strong Hire", tr2Status: "Shortlisted" } });
+  assert.deepEqual(good.slice(1).map((t) => [t.label, t.tone]), [["TR-1 · Strong hire", "pass"], ["TR-2 · Shortlisted", "pass"]]);
+});
+
+test("tags: Academy rounds and competency show score/max and pass or fail", () => {
+  const ac: AcademyRecord = {
+    product: "academy", ...who, yog: 2026, oldBucket: "B", dsaOfflineStatus: "27th Sep - Cleared", dsaOfflineCleared: true,
+    previousPlacement: "", studentPreference: "", activePool: true,
+    rounds: [{ bucket: "B", round: 1, score: 4.58, status: "Needs improvement", cleared: false }, { bucket: "A", round: 2, score: 81, status: "", cleared: true }],
+    competency: [{ subject: "frontend", overallScore: 72, verdictBand: "Strong", clearanceStatus: "Cleared", cleared: true, level: 4, levelLabel: "L4" }],
+  };
+  const tags = recordTags({ academy: ac });
+  assert.equal(tag(tags, "Old offline")?.label, "Old offline assessment · Bucket B");
+  assert.deepEqual(tag(tags, "Bucket B TR-1"), { label: "Bucket B TR-1 · 4.6/15 · Needs improvement", tone: "fail", group: "Academy" });
+  assert.deepEqual(tag(tags, "Bucket A TR-2"), { label: "Bucket A TR-2 · 81/100 · Cleared", tone: "pass", group: "Academy" });
+  assert.deepEqual(tag(tags, "Frontend competency"), { label: "Frontend competency · 72/100 · L4 · Cleared", tone: "pass", group: "Academy" });
+  assert.equal(tag(tags, "DSA offline exam")?.tone, "pass");
+  assert.equal(tag(tags, "Graduating")?.label, "Graduating 2026");
+});
+
+test("tags: marks keep the best attempt with its maximum; colour from the verdict when no pass flag", () => {
+  const m = (assessment: any, score: number, maxScore: number, result: string, passed: boolean | null) => ({ assessment, score, maxScore, result, passed, takenOn: null, recordingUrl: null, sourceKey: "x", attempt: "1" });
+  const tags = markTags([m("old_offline", 116.07, 230, "Bucket B", null), m("dsa_offline", 80, 130, "Qualified", null), m("dsa_offline", 92, 130, "Qualified", null), m("bucket_b_tr1", 4.58, 15, "Needs improvement · Not Cleared", null)], false);
+  assert.deepEqual(tags.map((t) => [t.label, t.tone]), [
+    ["Old offline assessment · 116.1/230 · Bucket B", "neutral"],
+    ["DSA offline exam · 92/130 · Qualified", "pass"],
+    ["Bucket B TR-1 · 4.6/15 · Needs improvement · Not Cleared", "fail"],
+  ]);
+  assert.equal(toneOf("Medium Hire"), "pass");
+  assert.equal(toneOf("Rejected in TR round"), "fail");
+  assert.equal(toneOf("Bucket A"), "neutral");
 });
 
 test("SLA: next-day interview → 45 minutes from entry", () => {
