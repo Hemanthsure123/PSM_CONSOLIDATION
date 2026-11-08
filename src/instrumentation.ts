@@ -12,5 +12,7 @@ export async function register() {
     startWorker();
     const { startMobileTicker } = await import("./lib/mobile/ticker");
     startMobileTicker();
+    const { startKeepAwake } = await import("./lib/keep-awake");
+    startKeepAwake();
   }
 }

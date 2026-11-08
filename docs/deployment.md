@@ -72,9 +72,10 @@ The values are set in Render → the service → Environment, copied from `.env.
 |---|---|
 | **Supabase pauses a free project** after 7 days without activity | `.github/workflows/keepalive.yml` calls `/api/health?db=1` every 3 days. It also wakes Render. |
 | **GitHub switches off scheduled workflows** after 60 days of repository inactivity | The same workflow re-enables itself on each run, which resets the timer. |
-| **The instance sleeps** | Expected. Callers wait for `/api/health`, as above. |
+| **The instance sleeps** | Kept awake since 2026-11-08: the database's pg_cron job `psm-keep-awake` (migration 011) GETs `/api/health` every 10 minutes, and the server pings its own public URL every 10 minutes while it is up (`src/lib/keep-awake.ts`; `KEEP_AWAKE=off` disables it). GitHub's scheduled workflows were too irregular for this (set to every 5 minutes, they ran hours apart). Check the pings with `select status_code, created from net._http_response order by created desc limit 5;`. Callers should still wait for `/api/health`, as above. |
+| **The instance stops answering and a restart doesn't help** (seen 2026-11-08, 04:30 to 11:58 IST: no logs, restart accepted, nothing started) | A fresh deploy brought it back. Deploy the current commit again, then check `/api/health`. |
 | **Free-plan memory is 512 MB** | One PDF render at a time is fine. A very large run plus a PDF can restart the instance; the browser retries. For heavy daily use, move to a paid instance with 2 GB (Render → Settings → Instance type). |
-| **Free-plan hours are shared** (750 a month across the workspace's free services) | A sleeping service uses none. If the workspace runs out, services stop until the next month. |
+| **Free-plan hours are shared** (750 a month across the workspace's free services) | A sleeping service uses none. Kept awake, this service uses about 744 a month, so the workspace's other free services must stay mostly asleep. If the workspace runs out, all its free services stop until the next month. |
 | **The disk is ephemeral** | The 24 h caches start empty after each deploy or restart. Reports go to Google Drive; the local PDF fallback isn't kept. |
 | **Keys expire** | Check the GitHub token's expiry date and the model keys' quotas. `GET /api/status` shows what is configured. |
 | **Base image ages** | Node 22 is supported until April 2027. Redeploy with "Clear build cache" every few months to pick up Chromium and OS security fixes. |

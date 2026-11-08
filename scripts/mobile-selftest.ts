@@ -84,6 +84,18 @@ test("task ids survive inserted rows and change with the assignment", () => {
   assert.notEqual(taskIdFor("S", "T", ["Acme", "10/15/2026 12:30:00", "J1", ""]), taskIdFor("S", "T", ["Acme", "10/16/2026 12:30:00", "J1", ""]));
 });
 
+test("rows repeating the same identity still get distinct task ids; the first keeps the stable one", () => {
+  const row = ["", "", "Edge", "Foxo.Club", "", "", "React", "", "", "", "", "10/19/2026 12:05:00", "", "1", "5", "", ""];
+  const c = findColumns([[], header]);
+  const single = rowsToTasks("S", "T", [[], header, row], c);
+  const tripled = rowsToTasks("S", "T", [[], header, row, [...row], [...row]], c);
+  assert.equal(tripled.length, 3);
+  assert.equal(new Set(tripled.map((t) => t.taskId)).size, 3);
+  assert.equal(tripled[0].taskId, single[0].taskId);
+  // Stable across reads: the same sheet gives the same ids.
+  assert.deepEqual(rowsToTasks("S", "T", [[], header, row, [...row], [...row]], c).map((t) => t.taskId), tripled.map((t) => t.taskId));
+});
+
 const roster: RosterUser[] = [
   { email: "hemanthreddy.sure@nxtwave.co.in", name: "Hemanth", aliases: [], role: "admin", active: true, leadEmail: null, signInEmails: ["hemanthsure668@gmail.com"] },
   { email: "bepari.faraazahmed@nxtwave.co.in", name: "Faraaz", aliases: ["Faraaz Ahmed"], role: "member", active: true, leadEmail: null },

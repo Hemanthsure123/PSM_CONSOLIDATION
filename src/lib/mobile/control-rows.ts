@@ -181,14 +181,22 @@ export function rowsToTasks(spreadsheetId: string, tab: string, rows: unknown[][
   const text = (r: unknown[], col: number) => String(at(r, col) ?? "").trim();
   const shown = (i: number, col: number) => (display ? text(display[i] ?? [], col) : text(rows[i] ?? [], col));
   const tasks: ControlTask[] = [];
+  // Rows that repeat the identity (e.g. three roles of one company added at the same minute) would
+  // share a taskId, and every consumer keys on it (the app's lists crash on a repeated key). The
+  // first keeps the stable id; each repeat, in sheet order, gets "#2", "#3"... appended.
+  const seen = new Map<string, number>();
   for (let i = c.headerRow; i < rows.length; i++) {
     const r = rows[i] ?? [];
     const company = text(r, c.company);
     if (!company) continue;
     const assigned = parseSheetDate(at(r, c.assignedAt));
     const { deadline, inferred } = resolveDeadline(assigned?.at ?? null, parseSheetDate(at(r, c.deadline)));
+    const identity = [company, at(r, c.assignedAt), at(r, c.jobId), at(r, c.date)];
+    const baseId = taskIdFor(spreadsheetId, tab, identity);
+    const occurrence = (seen.get(baseId) ?? 0) + 1;
+    seen.set(baseId, occurrence);
     tasks.push({
-      taskId: taskIdFor(spreadsheetId, tab, [company, at(r, c.assignedAt), at(r, c.jobId), at(r, c.date)]),
+      taskId: occurrence === 1 ? baseId : taskIdFor(spreadsheetId, tab, [...identity, `#${occurrence}`]),
       row: i + 1,
       company,
       product: text(r, c.product),
