@@ -1,19 +1,14 @@
 import { NextResponse } from "next/server";
 import { fail, readJson, withUser } from "@/lib/mobile/http";
-import { communicationsFor, logWhatsapp } from "@/lib/team/kit";
+import { logWhatsapp } from "@/lib/team/prep";
 
 /**
- * GET /preps/{prepId}/messages — emails and WhatsApp hand-offs for the prep, newest first.
- * POST /preps/{prepId}/messages { purpose, to?, meetingId? } — the app opened WhatsApp with a
- * message (logged as "opened"; WhatsApp gives no delivery receipt without its API).
+ * POST /preps/{prepId}/messages { purpose, to? } — the app opened WhatsApp with a message: a line is
+ * added to the row's Prep Messages column (WhatsApp gives no delivery receipt without its API).
+ * Messages are kept in the sheet only.
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-
-export const GET = withUser<{ prepId: string }>(async (_req, _ctx, { prepId }) => {
-  if (!/^[0-9a-f]{24}$/.test(prepId)) return fail(404, "This prep doesn't exist.", "not_found");
-  return NextResponse.json({ items: await communicationsFor(prepId) }, { headers: { "Cache-Control": "no-store" } });
-});
 
 export const POST = withUser<{ prepId: string }>(async (req, { user }, { prepId }) => {
   if (!/^[0-9a-f]{24}$/.test(prepId)) return fail(404, "This prep doesn't exist.", "not_found");

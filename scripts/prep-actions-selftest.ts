@@ -1,6 +1,6 @@
 /**
- * Self-test for the prep kit's pure parts (no network, no database):
- *   npx tsx scripts/prepkit-selftest.ts
+ * Self-test for the prep actions' pure parts (documents, meetings, calls) (no network, no database):
+ *   npx tsx scripts/prep-actions-selftest.ts
  * Prep document normalising / rendering (HTML, Notion limits), source redaction, email MIME and
  * calendar invites (header injection, line folding), message drafts, call summary cells.
  */
@@ -10,6 +10,7 @@ import { normalizePrepDoc, selectSections } from "@/lib/prepdocs/model";
 import { renderHtml, renderNotionBlocks, renderText } from "@/lib/prepdocs/render";
 import { redact } from "@/lib/prepdocs/sources";
 import { buildIcs, buildMime } from "@/lib/team/mail";
+import { istLabel, messageLine, withEntry } from "@/lib/team/sheetlog";
 import { durationText, summaryCell } from "@/lib/team/summary";
 import { draftsFor, istRange, istWhen, meetingEmail, whatsappPrepDoc } from "@/lib/team/templates";
 
@@ -171,4 +172,33 @@ test("call summary cell and durations", () => {
   assert.equal(durationText(42), "42 s");
 });
 
-console.log(`${passed} prep kit tests passed${process.exitCode ? " — with failures above" : ""}`);
+test("sheet call entries: newest first, a retry replaces its own entry", () => {
+  const a = withEntry("", "#c11111111", "[8 Nov · Phone call] #c11111111\nfirst");
+  const b = withEntry(a, "#m22222222", "[9 Nov · Google Meet] #m22222222\nsecond");
+  assert.ok(b.indexOf("second") < b.indexOf("first"));
+  const c = withEntry(b, "#c11111111", "[8 Nov · Phone call] #c11111111\nfirst again");
+  assert.equal(c.match(/#c11111111/g)?.length, 1);
+  assert.ok(c.startsWith("[8 Nov · Phone call] #c11111111\nfirst again"));
+  assert.ok(c.includes("second"));
+});
+
+test("sheet cells stay under the cell limit (oldest dropped, newest kept)", () => {
+  let cell = "";
+  for (let i = 0; i < 30; i++) cell = withEntry(cell, `#c${String(i).padStart(8, "0")}`, `[call ${i}] #c${String(i).padStart(8, "0")}\n${"x".repeat(4000)}`);
+  assert.ok(cell.length <= 45_000);
+  assert.ok(cell.startsWith("[call 29]"));
+  assert.ok(!cell.includes("[call 0]"));
+  const huge = withEntry("", "#c99999999", `[big] #c99999999\n${"y".repeat(60_000)}`);
+  assert.ok(huge.length <= 45_000 && huge.endsWith("(cut at the sheet's cell limit)"));
+});
+
+test("message lines read in IST, with who and how", () => {
+  const at = new Date("2026-11-08T10:40:00Z");
+  assert.equal(istLabel(at), "8 Nov 2026, 4:10 PM");
+  assert.equal(
+    messageLine({ at, channel: "WhatsApp", purpose: "Meet link", to: "9876543210", status: "opened", by: "Hemanth" }),
+    "8 Nov 2026, 4:10 PM · WhatsApp · Meet link · to 9876543210 · opened · Hemanth",
+  );
+});
+
+console.log(`${passed} prep action tests passed${process.exitCode ? " — with failures above" : ""}`);

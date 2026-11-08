@@ -20,15 +20,15 @@ const short = (err: unknown) => (err instanceof Error ? err.message.slice(0, 200
 
 /** One pass of both syncs; a failure of one never stops the other. */
 export async function mobileTick(): Promise<{ tasks: { checked: number; pushed: number } | null; preps: { checked: number; pushed: number } | null }> {
-  const [tasks, preps, kit] = await Promise.allSettled([syncAssignments(), syncPrepNotifications(), prepKitTick()]);
+  const [tasks, preps, kit] = await Promise.allSettled([syncAssignments(), syncPrepNotifications(), prepWorkTick()]);
   if (tasks.status === "rejected") console.warn("[mobile] task tick failed:", short(tasks.reason));
   if (preps.status === "rejected") console.warn("[mobile] prep tick failed:", short(preps.reason));
-  if (kit.status === "rejected") console.warn("[mobile] prep kit tick failed:", short(kit.reason));
+  if (kit.status === "rejected") console.warn("[mobile] prep documents, meetings and calls tick failed:", short(kit.reason));
   return { tasks: tasks.status === "fulfilled" ? tasks.value : null, preps: preps.status === "fulfilled" ? preps.value : null };
 }
 
 /** Meetings (due emails, reminders, Meet recordings) and interrupted call recordings. Skipped until migration 010 exists. */
-async function prepKitTick(): Promise<void> {
+async function prepWorkTick(): Promise<void> {
   try {
     await syncMeetings();
     await resumeRecordings();

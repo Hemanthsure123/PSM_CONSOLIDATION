@@ -1,22 +1,16 @@
 import { NextResponse } from "next/server";
 import { fail, withUser } from "@/lib/mobile/http";
-import { MAX_RECORDING_BYTES, recordingsFor, uploadPhoneRecording } from "@/lib/team/recordings";
+import { MAX_RECORDING_BYTES, uploadPhoneRecording } from "@/lib/team/recordings";
 
 /**
- * GET /preps/{prepId}/recordings — phone and Meet recordings of the prep, newest first.
- * POST /preps/{prepId}/recordings (multipart: file, callAt ISO, durationSec, deviceKey) — a prep
- * call the phone recorded. Saved to the team Drive before the response; transcript and summary
- * follow in the background (status transcribing → summarising → ready, or failed with a reason).
- * Uploading the same deviceKey again returns the existing recording.
+ * POST /preps/{prepId}/recordings (multipart: file, callAt ISO, durationSec, deviceKey) — submit a
+ * prep call the phone recorded. Saved to the team Drive before the response; the transcript and
+ * summary are then written to the row's Prep Call columns (never stored in the database), and the
+ * real duration counts in call analytics. Submitting the same deviceKey again returns that call.
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 120;
-
-export const GET = withUser<{ prepId: string }>(async (_req, _ctx, { prepId }) => {
-  if (!/^[0-9a-f]{24}$/.test(prepId)) return fail(404, "This prep doesn't exist.", "not_found");
-  return NextResponse.json({ items: await recordingsFor(prepId) }, { headers: { "Cache-Control": "no-store" } });
-});
 
 export const POST = withUser<{ prepId: string }>(async (req, { user }, { prepId }) => {
   if (!/^[0-9a-f]{24}$/.test(prepId)) return fail(404, "This prep doesn't exist.", "not_found");

@@ -1,6 +1,6 @@
 /**
- * Prep kit — read-only check against the real sheets (writes nothing, prints no secrets):
- *   npx tsx scripts/prepkit-check.ts [count]
+ * Prep actions — read-only check against the real sheets (writes nothing, prints no secrets):
+ *   npx tsx scripts/prep-actions-check.ts [count]
  * For the latest drill-down rows: the candidate email lookup (company sheet, then internal assessments, then resume; emails are
  * masked), the drill-downs / transcripts a prep document would be built from, and whether the
  * team Google account and Notion are set up.

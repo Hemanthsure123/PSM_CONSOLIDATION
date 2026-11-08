@@ -127,7 +127,7 @@ export async function documentsFor(jobKey: string, roundKey: string): Promise<Do
   );
 }
 
-/** The prep kit's document part: existing documents (with staleness), the sources to pick from, last inputs. */
+/** The prep document overview: existing documents (with staleness), the sources to pick from, last inputs. */
 export async function prepDocsOverview(key: string) {
   const { p, sameJob } = await loadPrep(key);
   const [available, docs, team, run] = await Promise.all([

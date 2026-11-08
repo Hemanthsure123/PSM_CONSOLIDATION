@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { fail, withUser } from "@/lib/mobile/http";
-import { prepContact } from "@/lib/team/kit";
+import { prepContact } from "@/lib/team/prep";
 
 /** GET /preps/{prepId}/contact — the candidate's email from CRPs → company sheet: found / ambiguous / not_found (never guessed). */
 export const runtime = "nodejs";

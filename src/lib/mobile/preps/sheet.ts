@@ -233,7 +233,41 @@ export async function writePrepCells(key: string, cells: CellWrite[], patch?: (p
 }
 
 /** The columns the app adds at the end of the drill-down tab for prep-call results. */
-export const PREP_CALL_HEADERS = { transcript: "Prep Call Transcript", summary: "Prep Call Summary", duration: "Prep Call Duration" } as const;
+/**
+ * Columns the server adds after the last used column of the drill-down source tab (past Z): the
+ * prep calls (phone and Google Meet) and the messages sent. The sheet is the only place call
+ * transcripts, summaries and messages are kept — the database stores durations and status only.
+ */
+export const PREP_CALL_HEADERS = {
+  recording: "Prep Call Recording",
+  transcript: "Prep Call Transcript",
+  summary: "Prep Call Summary",
+  duration: "Prep Call Duration",
+  messages: "Prep Messages",
+} as const;
+
+/** The current text of extra columns (past Z) in the prep's row, found by header ("" when absent). */
+export async function readPrepExtraCells(key: string, names: string[]): Promise<Record<string, string>> {
+  let snap = await readPrepSnapshot();
+  let prep = snap.byKey.get(key);
+  if (!prep || !(await rowStillHolds(snap, prep))) {
+    snap = await readPrepSnapshot(true);
+    prep = snap.byKey.get(key);
+    if (!prep || !(await rowStillHolds(snap, prep))) throw new UserError(409, "This row changed or left the drill-down sheet. Refresh and try again.", "row_moved");
+  }
+  const sheets = getSheetsWriter();
+  const res = await withSheetsRetry(() =>
+    sheets.spreadsheets.values.batchGet({ spreadsheetId: snap.spreadsheetId, ranges: [`${q(snap.tab)}!A1:ZZ1`, `${q(snap.tab)}!A${prep.row}:ZZ${prep.row}`] }),
+  );
+  const header = ((res.data.valueRanges?.[0]?.values?.[0] ?? []) as unknown[]).map((h) => String(h ?? "").trim().toLowerCase().replace(/\s+/g, " "));
+  const row = (res.data.valueRanges?.[1]?.values?.[0] ?? []) as unknown[];
+  return Object.fromEntries(
+    names.map((n) => {
+      const i = header.indexOf(n.toLowerCase().replace(/\s+/g, " ").trim());
+      return [n, i >= 0 ? String(row[i] ?? "") : ""];
+    }),
+  );
+}
 
 /**
  * Writes cells in columns past Z, found by header text; a missing header is added after the last

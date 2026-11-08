@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.3.0
+  version: 1.4.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
     This file is the source of truth. Change it first, then the routes under
@@ -767,29 +767,30 @@ paths:
                   links: { type: array, items: { $ref: "#/components/schemas/DocLink" } }
 
 
-  # ── Prep kit (team Google account: documents, meetings, recordings) ────────
+  # ── Prep document, Google Meet, guidance sessions, call recordings (team Google account) ───
   # Any route that needs the team account answers 503 with code team_not_connected,
   # team_reconnect (permission revoked, e.g. password change) or team_not_configured.
+  # Call transcripts, summaries and messages are written to the drill-down row only (columns past
+  # Z: Prep Call Recording / Transcript / Summary / Duration, Prep Messages); the API never returns them.
 
-  /preps/{prepId}/kit:
+  /preps/{prepId}/documents:
     get:
-      tags: [prep-kit]
+      tags: [prep-document]
       x-phase: P5
-      summary: Prep documents (with "update available" reasons), the sources to build from, meetings, call recordings, message drafts and history.
+      summary: "The job + round's prep document(s) and what they can be built from."
       description: >
-        documents = { company, round, documents: [PrepDocument], sources: [DocLink], sections: [{id,label}], website, linkedin,
-        google: {connected, account, status}, notion: {configured}, run: DocRun|null }. drafts = { whatsappPrepDoc, whatsappMeeting: {prep,mock,guidance,custom},
-        email: {prep,mock,guidance,custom: {subject, body}}, placeholders: ["{meet_link}", "{when}"] } — the server fills the placeholders once the Meet link exists.
+        { prepId, candidate, phone, company, round, documents: [PrepDocument], sources: [DocLink], sections: [{id,label}],
+        website, linkedin, google: {connected, account, status}, notion: {configured}, run: DocRun|null, whatsapp: string (the
+        WhatsApp text with the document link) }. PrepDocument = { id, kind: gdoc|notion, url, title, version, round, updatedAt,
+        updatedBy, sections, status: up_to_date|update_available, reasons, lastChanges, unverified }.
       parameters: [{ $ref: "#/components/parameters/PrepId" }]
       responses:
         "200": { description: "OK" }
         "404": { $ref: "#/components/responses/NotFound" }
-
-  /preps/{prepId}/documents:
     post:
-      tags: [prep-kit]
+      tags: [prep-document]
       x-phase: P5
-      summary: Create the job + round's prep document, or update it when one exists (runs in the background, ~1 min).
+      summary: Create the job + round's prep document, or rewrite it when one exists (its current text — manual edits included — is read first). Runs in the background, ~1 min.
       parameters: [{ $ref: "#/components/parameters/PrepId" }]
       requestBody:
         required: true
@@ -799,7 +800,7 @@ paths:
               type: object
               properties:
                 kind: { type: string, enum: [gdoc, notion], default: gdoc }
-                sources: { type: array, items: { type: string, format: uri }, description: "Drill-down / transcript urls from kit.documents.sources; omitted = all" }
+                sources: { type: array, items: { type: string, format: uri }, description: "Drill-down / transcript urls from GET documents' sources; omitted = all" }
                 website: { type: string, format: uri }
                 linkedin: { type: string, format: uri }
                 sections: { type: array, items: { type: string, enum: [overview, start_here, about_company, topics, checklist, summary] }, description: "topics is required" }
@@ -808,31 +809,66 @@ paths:
         "422": { description: "no_sources / invalid_sections" }
         "503": { description: "team_not_connected / notion_not_configured" }
 
+  /preps/{prepId}/documents/edit-access:
+    post:
+      tags: [prep-document]
+      x-phase: P5
+      summary: "Edit by hand: the signed-in person (roster email + linked Google accounts) gets edit access to the round's Google Doc. { url, title, emails }."
+      parameters: [{ $ref: "#/components/parameters/PrepId" }]
+      responses:
+        "200": { description: "OK" }
+        "404": { description: "no_document" }
+        "502": { description: "share_failed" }
+
   /preps/runs/{runId}:
     get:
-      tags: [prep-kit]
+      tags: [prep-document]
       x-phase: P5
-      summary: "Progress of a document run: { id, status: queued|running|done|failed, step, error, mode, kind, result: { url, title, changes, unverified, sections, model, skipped } }."
+      summary: "Progress of a document run: { id, status: queued|running|done|failed, step, error, mode: create|update, kind, result: { url, title, changes, unverified, sections, model, skipped }, createdAt }."
       parameters:
         - { name: runId, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         "200": { description: "OK" }
         "404": { $ref: "#/components/responses/NotFound" }
 
+  /preps/{prepId}/meeting-setup:
+    get:
+      tags: [meetings]
+      x-phase: P5
+      summary: "For the Meet scheduler: { prepId, jobKey, candidate, company, round, phone, interviewWhen, google: {connected, account, status}, email: {prep,mock,guidance,custom: {subject, body}}, whatsapp: {prep,mock,guidance,custom}, placeholders: [\"{meet_link}\", \"{when}\"], meetings: [Meeting] }."
+      parameters: [{ $ref: "#/components/parameters/PrepId" }]
+      responses:
+        "200": { description: "OK" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /preps/{prepId}/contact:
     get:
-      tags: [prep-kit]
+      tags: [meetings]
       x-phase: P5
-      summary: "The candidate's email, in order: 1) the company sheet (CRPs JOB ID + Company Sheet Link only, by phone then exact name); 2) if not there or no company sheet, the internal assessment sheets (by phone); 3) if in neither, the resume. { email, status: found|ambiguous|not_found|no_company_sheet|unreadable, source, matchedBy: phone|name|assessment|resume }. Never guessed."
+      summary: "The candidate's email, in order: 1) the company sheet (CRPs JOB ID + Company Sheet Link only, by phone then exact name); 2) if not there or no company sheet, the internal assessment sheets (by phone); 3) if in neither, the resume. { email, status: found|ambiguous|not_found|no_company_sheet|unreadable, source, matchedBy: phone|name|assessment|resume, candidate }. Never guessed."
       parameters: [{ $ref: "#/components/parameters/PrepId" }]
       responses:
         "200": { description: "OK" }
 
+  /preps/contacts:
+    post:
+      tags: [meetings]
+      x-phase: P5
+      summary: "Emails of the candidates picked for a guidance session (any jobs, ≤ 100): { items: [{ prepId, candidate, company, round, contact }] }."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object, required: [prepIds], properties: { prepIds: { type: array, maxItems: 100, items: { type: string } } } }
+      responses:
+        "200": { description: "OK" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
   /preps/jobs/{jobId}/contacts:
     get:
-      tags: [prep-kit]
+      tags: [meetings]
       x-phase: P5
-      summary: "Every candidate of the job with the looked-up email: { items: [{ prepId, candidate, round, contact }] } (guidance sessions)."
+      summary: "Every candidate of the job with the looked-up email: { items: [{ prepId, candidate, company, round, contact }] }."
       parameters:
         - { name: jobId, in: path, required: true, schema: { type: string } }
       responses:
@@ -840,17 +876,10 @@ paths:
         "404": { $ref: "#/components/responses/NotFound" }
 
   /preps/{prepId}/messages:
-    get:
-      tags: [prep-kit]
-      x-phase: P5
-      summary: "Emails and WhatsApp hand-offs for the prep: { items: [{ at, channel, purpose, to, status: sent|failed|opened, error, by }] }."
-      parameters: [{ $ref: "#/components/parameters/PrepId" }]
-      responses:
-        "200": { description: "OK" }
     post:
-      tags: [prep-kit]
+      tags: [meetings]
       x-phase: P5
-      summary: The app opened WhatsApp (wa.me) with a message — logged as "opened" (no delivery receipt without the WhatsApp API).
+      summary: The app opened WhatsApp (wa.me) with a message — a line on the row's Prep Messages column ("opened"; no delivery receipt without the WhatsApp API).
       parameters: [{ $ref: "#/components/parameters/PrepId" }]
       requestBody:
         required: true
@@ -861,22 +890,14 @@ paths:
               properties:
                 purpose: { type: string, enum: [prep_document, meeting_link, reminder, follow_up, custom] }
                 to: { type: string }
-                meetingId: { type: string, format: uuid }
       responses:
         "200": { description: "{ ok: true }" }
 
   /preps/{prepId}/recordings:
-    get:
-      tags: [prep-kit]
-      x-phase: P5
-      summary: "Phone and Meet recordings of the prep, newest first: { items: [Recording] }."
-      parameters: [{ $ref: "#/components/parameters/PrepId" }]
-      responses:
-        "200": { description: "OK" }
     post:
-      tags: [prep-kit]
+      tags: [call-recordings]
       x-phase: P5
-      summary: Upload a prep call the phone recorded (≤ 40 MB). Saved to the team Drive before the response; transcript → summary → the row's Prep Call Transcript / Summary / Duration columns follow.
+      summary: Submit a prep call the phone recorded (≤ 40 MB). Saved to the team Drive before the response; the transcript and summary go to the row's Prep Call columns (never stored in the database); the real duration counts in /analytics/calls.
       parameters: [{ $ref: "#/components/parameters/PrepId" }]
       requestBody:
         required: true
@@ -889,37 +910,17 @@ paths:
                 file: { type: string, format: binary }
                 callAt: { type: string, format: date-time }
                 durationSec: { type: integer, minimum: 1, description: "From the file's own metadata" }
-                deviceKey: { type: string, description: "Stable per file on the phone (MediaStore id + size + date); the same key twice returns the existing recording" }
+                deviceKey: { type: string, description: "Stable per file on the phone; the same key twice returns the call already submitted" }
       responses:
-        "200": { description: "The Recording (status transcribing)" }
+        "200": { description: "{ id, callAt, durationSec, status: transcribing }" }
         "413": { description: "recording_too_large" }
         "415": { description: "Not audio (invalid_recording)" }
 
-  /recordings/{recordingId}/retry:
-    post:
-      tags: [prep-kit]
-      x-phase: P5
-      summary: Try a failed transcript / summary again from the saved file (the recording's mentor or an admin).
-      parameters:
-        - { name: recordingId, in: path, required: true, schema: { type: string, format: uuid } }
-      responses:
-        "200": { description: "The Recording" }
-
-  /recordings/uploaded:
-    get:
-      tags: [prep-kit]
-      x-phase: P5
-      summary: "Device keys of my recordings already on the server: { deviceKeys: [string] } (since = ISO, default 30 days)."
-      parameters:
-        - { name: since, in: query, schema: { type: string, format: date-time } }
-      responses:
-        "200": { description: "OK" }
-
   /meetings:
     get:
-      tags: [prep-kit]
+      tags: [meetings]
       x-phase: P5
-      summary: "Meetings in a window (≤ 62 days): { items: [Meeting] }. Filters: prepId, jobId, mine=1."
+      summary: "Meetings in a window (≤ 62 days): { items: [Meeting] }. Filters: prepId (matches guidance sessions that include it), jobId, mine=1."
       parameters:
         - { name: from, in: query, schema: { type: string, format: date-time } }
         - { name: to, in: query, schema: { type: string, format: date-time } }
@@ -929,7 +930,7 @@ paths:
       responses:
         "200": { description: "OK" }
     post:
-      tags: [prep-kit]
+      tags: [meetings]
       x-phase: P5
       summary: One-tap meeting — calendar event + Meet link from the team account, Meet auto recording + transcript, email with a calendar invite now / at a time / not at all.
       requestBody:
@@ -942,6 +943,7 @@ paths:
               properties:
                 kind: { type: string, enum: [prep, guidance, mock, custom] }
                 prepId: { type: string, description: "Required for prep / mock" }
+                prepIds: { type: array, maxItems: 100, items: { type: string }, description: "Guidance (or custom) for several candidates: each row gets the emails and, after the call, its transcript and summary" }
                 jobId: { type: string, description: "Guidance for a whole job" }
                 company: { type: string }
                 title: { type: string }
@@ -958,13 +960,13 @@ paths:
                     sendAt: { type: string, format: date-time }
                 force: { type: boolean, description: "Schedule despite duplicate_meeting / meeting_conflict" }
       responses:
-        "201": { description: "The Meeting: { id, kind, title, prepId, jobKey, company, startsAt, endsAt, meetUrl, calendarUrl, record, recordingOn, attendees, status, email: {status, subject, sendAt, sentAt, error}, artifacts: {status, durationSec, recordingUrl, transcriptUrl, summary}, createdBy, createdByName, whatsapp, warnings }" }
+        "201": { description: "The Meeting: { id, kind, title, prepId, prepIds, jobKey, company, startsAt, endsAt, meetUrl, calendarUrl, record, recordingOn, attendees, status, email: {status, subject, sendAt, sentAt, error}, artifacts: {status, durationSec, recordingUrl, transcriptUrl}, createdBy, createdByName, whatsapp, warnings }" }
         "409": { description: "duplicate_meeting / meeting_conflict (send force to override)" }
         "422": { description: "invalid_meeting / invalid_attendee" }
 
   /meetings/bulk:
     post:
-      tags: [prep-kit]
+      tags: [meetings]
       x-phase: P5
       summary: "Several meetings at once (≤ 20): { items: [MeetingInput] } → { results: [{ ok, meeting?, error?, code? }] }."
       responses:
@@ -972,7 +974,7 @@ paths:
 
   /meetings/{meetingId}:
     delete:
-      tags: [prep-kit]
+      tags: [meetings]
       x-phase: P5
       summary: Cancel — the calendar event is removed; guests who got the email get a cancellation (scheduler or admin).
       parameters:
@@ -982,7 +984,7 @@ paths:
 
   /meetings/{meetingId}/resend:
     post:
-      tags: [prep-kit]
+      tags: [meetings]
       x-phase: P5
       summary: Send the meeting email (with the invite) to every guest again.
       parameters:
@@ -992,9 +994,9 @@ paths:
 
   /analytics/calls:
     get:
-      tags: [prep-kit]
+      tags: [call-recordings]
       x-phase: P5
-      summary: "Prep calls per mentor from the recordings' real durations: { from, to, members: [{ email, name, calls, totalSec, avgSec, phoneCalls, meetCalls }], team: { calls, totalSec, avgSec }, daily: [{ day, calls, totalSec }] }. Admins / leads see everyone."
+      summary: "Prep calls per mentor from the real durations (submitted phone calls + Meet prep / mock / guidance calls): { from, to, members: [{ email, name, calls, totalSec, avgSec, phoneCalls, meetCalls }], team: { calls, totalSec, avgSec }, daily: [{ day, calls, totalSec }] }. Admins / leads see everyone."
       parameters:
         - { name: from, in: query, schema: { type: string, format: date } }
         - { name: to, in: query, schema: { type: string, format: date } }
@@ -1422,7 +1424,7 @@ components:
           type: string
           enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest, prep_doc_ready, recording_ready, meeting_reminder, team_account]
         taskId: { type: string, description: "Task pushes" }
-        prepId: { type: string, description: "Prep pushes (prep_*, interview_checkin) and prep-kit pushes (prep_doc_ready, recording_ready, meeting_reminder when the meeting is a prep's)" }
+        prepId: { type: string, description: "Prep pushes (prep_*, interview_checkin) prep_doc_ready, recording_ready (the call was added to the sheet), meeting_reminder (when the meeting is a prep's)" }
         meetingId: { type: string, description: "meeting_reminder, recording_ready (Meet)" }
         meetUrl: { type: string, format: uri, description: "meeting_reminder: the Join action" }
         url: { type: string, format: uri, description: "prep_doc_ready: the document" }
