@@ -282,7 +282,8 @@ export interface CallAnalytics {
 /** Prep calls per mentor between two IST days, from the recordings' real durations. */
 export async function callAnalytics(from: string, to: string, onlyEmail: string | null): Promise<CallAnalytics> {
   const rows = await query<{ email: string; source: string; day: string; secs: number }>(
-    `select mentor_email email, 'phone' source, to_char(call_at at time zone 'Asia/Kolkata', 'YYYY-MM-DD') day, duration_sec secs
+    // "day" is a SQL keyword: every alias takes AS.
+    `select mentor_email as email, 'phone' as source, to_char(call_at at time zone 'Asia/Kolkata', 'YYYY-MM-DD') as day, duration_sec as secs
        from app.call_recordings where status <> 'failed'
         and (call_at at time zone 'Asia/Kolkata')::date between $1::date and $2::date
      union all

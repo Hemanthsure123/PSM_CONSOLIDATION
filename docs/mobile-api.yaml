@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.2.0
+  version: 1.3.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
     This file is the source of truth. Change it first, then the routes under
@@ -1420,9 +1420,12 @@ components:
       properties:
         type:
           type: string
-          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest]
+          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest, prep_doc_ready, recording_ready, meeting_reminder, team_account]
         taskId: { type: string, description: "Task pushes" }
-        prepId: { type: string, description: "Prep pushes (prep_*, interview_checkin)" }
+        prepId: { type: string, description: "Prep pushes (prep_*, interview_checkin) and prep-kit pushes (prep_doc_ready, recording_ready, meeting_reminder when the meeting is a prep's)" }
+        meetingId: { type: string, description: "meeting_reminder, recording_ready (Meet)" }
+        meetUrl: { type: string, format: uri, description: "meeting_reminder: the Join action" }
+        url: { type: string, format: uri, description: "prep_doc_ready: the document" }
         candidate: { type: string }
         round: { type: string }
         category: { type: string, enum: [academy, edge, external] }
