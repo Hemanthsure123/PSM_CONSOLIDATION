@@ -3,6 +3,7 @@ import { getDrive } from "@/lib/drive";
 import { docxToText, isZip } from "@/lib/docx-text";
 import { pdfBufferToText } from "@/lib/pdf-text";
 import { driveFileId } from "@/lib/mobile/preps/links";
+import { readTabsText } from "@/lib/prepdocs/tabs";
 
 /**
  * The text a prep document is built from: drill-down (hiring intelligence) documents, interview
@@ -101,8 +102,19 @@ export function redact(text: string, names: string[]): string {
   return out;
 }
 
+/** A Google Doc limited to some of its tabs (one tab per round, usually). */
+async function readDocTabs(url: string, tabs: string[]): Promise<{ title: string; modifiedAt: string | null; text: string }> {
+  const id = driveFileId(url);
+  if (!id) throw new Error("Not a Google Docs link.");
+  const [meta, body] = await Promise.all([
+    getDrive().files.get({ fileId: id, fields: "modifiedTime", supportsAllDrives: true }).catch(() => null),
+    readTabsText(id, tabs),
+  ]);
+  return { title: body.title, modifiedAt: meta?.data.modifiedTime ?? null, text: body.text.slice(0, MAX_DOC_CHARS) };
+}
+
 export async function readSources(
-  picks: { url: string; kind: "drilldown" | "transcript" }[],
+  picks: { url: string; kind: "drilldown" | "transcript"; tabs?: string[] }[],
   website: string | null,
   names: string[],
 ): Promise<SourceText[]> {
@@ -115,7 +127,7 @@ export async function readSources(
       const n = i++;
       const p = picks[n];
       try {
-        const r = await readDriveText(p.url);
+        const r = p.tabs?.length ? await readDocTabs(p.url, p.tabs) : await readDriveText(p.url);
         results[n] = { url: p.url, kind: p.kind, title: r.title, modifiedAt: r.modifiedAt, text: redact(r.text, names) };
       } catch (err) {
         results[n] = { url: p.url, kind: p.kind, title: "", modifiedAt: null, text: "", error: err instanceof Error ? err.message.slice(0, 200) : String(err) };

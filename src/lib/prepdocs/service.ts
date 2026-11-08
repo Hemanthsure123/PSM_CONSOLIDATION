@@ -11,6 +11,7 @@ import { generatePrepDoc, research } from "@/lib/prepdocs/generate";
 import { type PrepDoc, SECTION_IDS, SECTION_LABEL, type SectionId, selectSections } from "@/lib/prepdocs/model";
 import { renderHtml, renderNotionBlocks } from "@/lib/prepdocs/render";
 import { readSources } from "@/lib/prepdocs/sources";
+import { docTabs } from "@/lib/prepdocs/tabs";
 import { createGoogleDoc, findPrepDoc, readGoogleDocText, replaceGoogleDoc, shareViewOnly } from "@/lib/team/drive";
 import { teamStatus } from "@/lib/team/google";
 import { createNotionPage, notionConfigured, readNotionText, replaceNotionPage } from "@/lib/team/notion";
@@ -90,6 +91,19 @@ async function sourcesFor(p: PrepRow, sameJob: PrepRow[]): Promise<DocLinkDto[]>
       l.updatedAt = m.modifiedAt;
     }
   }
+  // Google Docs with several tabs (often one per round): list them so the mentor picks the right ones.
+  const docsLinks = links.filter((l) => /^https:\/\/docs\.google\.com\/document\//i.test(l.url) && driveFileId(l.url));
+  let next = 0;
+  const worker = async () => {
+    while (next < docsLinks.length) {
+      const l = docsLinks[next++];
+      const tabs = await docTabs(driveFileId(l.url)!, l.updatedAt);
+      if (tabs && tabs.length > 1) l.tabs = tabs;
+      // The Docs API couldn't be used: the whole document will be read.
+      if (tabs === null) l.tabsUnknown = true;
+    }
+  };
+  await Promise.race([Promise.all(Array.from({ length: Math.min(6, docsLinks.length) }, worker)), new Promise((r) => setTimeout(r, 10_000))]);
   return links.sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
 }
 
@@ -193,6 +207,8 @@ export interface StartBody {
   website?: unknown;
   linkedin?: unknown;
   sections?: unknown;
+  /** { [source url]: [tab id] } for Google Docs with several tabs. */
+  tabs?: unknown;
 }
 
 const cleanUrl = (v: unknown) => {
@@ -215,6 +231,16 @@ export async function startDocRun(user: RosterUser, key: string, body: StartBody
   const website = cleanUrl(body.website);
   const linkedin = cleanUrl(body.linkedin);
   if (!chosen.length && !website) throw new UserError(422, "Pick at least one drill-down, transcript or the company website.", "no_sources");
+  // A document with several tabs is read only from the tabs the mentor picked.
+  const tabsBody = body.tabs && typeof body.tabs === "object" ? (body.tabs as Record<string, unknown>) : {};
+  const tabsFor = new Map<string, string[]>();
+  for (const c of chosen) {
+    if (!c.tabs?.length) continue;
+    const valid = new Set(c.tabs.map((t) => t.id));
+    const picked = (Array.isArray(tabsBody[c.url]) ? (tabsBody[c.url] as unknown[]).map(String) : []).filter((id) => valid.has(id));
+    if (!picked.length) throw new UserError(422, `Pick which tabs of "${c.title || "the drill-down"}" to read.`, "no_tabs");
+    tabsFor.set(c.url, [...new Set(picked)]);
+  }
   const sections = (Array.isArray(body.sections) ? body.sections.map(String) : [...SECTION_IDS]).filter((s): s is SectionId => (SECTION_IDS as readonly string[]).includes(s));
   if (!sections.includes("topics")) throw new UserError(422, "Keep the topic sections: they hold the interview questions.", "invalid_sections");
   const jobKey = jobKeyOf(p);
@@ -225,7 +251,13 @@ export async function startDocRun(user: RosterUser, key: string, body: StartBody
   );
   if (busy.length) return (await getRun(busy[0].id))!;
   const existing = (await documentsFor(jobKey, roundKey)).find((d) => d.kind === kind);
-  const request = { prepKey: key, sources: chosen.map((c) => ({ url: c.url, kind: c.kind })), website, linkedin, sections };
+  const request = {
+    prepKey: key,
+    sources: chosen.map((c) => ({ url: c.url, kind: c.kind, ...(tabsFor.has(c.url) ? { tabs: tabsFor.get(c.url) } : {}) })),
+    website,
+    linkedin,
+    sections,
+  };
   const rows = await query<{ id: string }>(
     `insert into app.prep_doc_runs (document_id, job_key, round_key, kind, mode, status, step, request, requested_by)
      values ($1, $2, $3, $4, $5, 'queued', 'Waiting to start', $6, $7) returning id`,
@@ -246,7 +278,7 @@ async function runDoc(
   p: PrepRow,
   sameJob: PrepRow[],
   kind: DocKind,
-  request: { sources: { url: string; kind: "drilldown" | "transcript" }[]; website: string | null; linkedin: string | null; sections: SectionId[] },
+  request: { sources: { url: string; kind: "drilldown" | "transcript"; tabs?: string[] }[]; website: string | null; linkedin: string | null; sections: SectionId[] },
 ): Promise<void> {
   try {
     await step(id, "Reading the drill-downs and transcripts");

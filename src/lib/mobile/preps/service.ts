@@ -203,6 +203,10 @@ export interface DocLinkDto {
   own: boolean;
   /** Where it was seen: "TR1 · 2026-11-04 · Ritesh K." (other candidates of the same job). */
   seenOn: { round: string; interviewDay: string | null; candidate: string }[];
+  /** A Google Doc with several tabs (often one per round): which to read is chosen per document. */
+  tabs?: { id: string; title: string; level: number }[];
+  /** Its tabs couldn't be read (Docs API off, or not shared): the whole document is used. */
+  tabsUnknown?: boolean;
 }
 
 export function linksFor(p: PrepRow, sameJob: PrepRow[]): DocLinkDto[] {

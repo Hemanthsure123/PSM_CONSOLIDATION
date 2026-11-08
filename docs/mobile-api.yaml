@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.4.0
+  version: 1.5.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
     This file is the source of truth. Change it first, then the routes under
@@ -779,7 +779,8 @@ paths:
       x-phase: P5
       summary: "The job + round's prep document(s) and what they can be built from."
       description: >
-        { prepId, candidate, phone, company, round, documents: [PrepDocument], sources: [DocLink], sections: [{id,label}],
+        { prepId, candidate, phone, company, round, documents: [PrepDocument], sources: [DocLink + tabs?: [{id,title,level}] (Google Docs with
+        several tabs, often one per round) + tabsUnknown?: true (tabs couldn't be read; the whole document is used)], sections: [{id,label}],
         website, linkedin, google: {connected, account, status}, notion: {configured}, run: DocRun|null, whatsapp: string (the
         WhatsApp text with the document link) }. PrepDocument = { id, kind: gdoc|notion, url, title, version, round, updatedAt,
         updatedBy, sections, status: up_to_date|update_available, reasons, lastChanges, unverified }.
@@ -804,9 +805,10 @@ paths:
                 website: { type: string, format: uri }
                 linkedin: { type: string, format: uri }
                 sections: { type: array, items: { type: string, enum: [overview, start_here, about_company, topics, checklist, summary] }, description: "topics is required" }
+                tabs: { type: object, additionalProperties: { type: array, items: { type: string } }, description: "{ [source url]: [tab id] } — required (at least one tab) for every chosen source that lists tabs; only those tabs are read" }
       responses:
         "202": { description: "The run (poll /preps/runs/{runId}) — the same run when one is already in progress" }
-        "422": { description: "no_sources / invalid_sections" }
+        "422": { description: "no_sources / no_tabs / invalid_sections" }
         "503": { description: "team_not_connected / notion_not_configured" }
 
   /preps/{prepId}/documents/edit-access:
