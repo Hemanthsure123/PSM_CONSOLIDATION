@@ -134,3 +134,75 @@ export function istWhen(d: Date): string {
   const t = new Intl.DateTimeFormat("en-IN", { timeZone: "Asia/Kolkata", hour: "numeric", minute: "2-digit", hour12: true }).format(d).toUpperCase();
   return `${day}, ${t} IST`;
 }
+
+// ── Academy priority pool (a mentor's own candidates; no company or round) ───
+
+export interface PoolDraftContext {
+  /** One candidate's name; omitted for a group session. */
+  candidate?: string;
+  /** "Backend", "AI/ML" … */
+  track?: string;
+  mentor: string;
+  meetUrl?: string;
+  meetWhen?: string;
+}
+
+type PoolKind = "mock" | "guidance" | "custom";
+
+const POOL_SUBJECT: Record<PoolKind, (c: PoolDraftContext) => string> = {
+  mock: (c) => `Mock interview${c.track ? `: ${c.track}` : ""}`,
+  guidance: () => "Guidance session: placement preparation",
+  custom: () => "Meeting: NxtWave Placements",
+};
+
+const POOL_INTRO: Record<PoolKind, (c: PoolDraftContext) => string> = {
+  mock: (c) =>
+    `This is a mock interview${c.track ? ` for your ${c.track} track` : ""}. Treat it like a real company interview; you will get feedback at the end.`,
+  guidance: () =>
+    "This session is to guide you on your placement preparation: the companies we are lining up for you, what they look for, and how to prepare.",
+  custom: () => "Please find the meeting details below.",
+};
+
+/** Email that goes with a pool meeting invite. */
+export function poolMeetingEmail(kind: PoolKind, c: PoolDraftContext): Draft {
+  return {
+    subject: POOL_SUBJECT[kind](c),
+    body: lines(
+      c.candidate ? `Hi ${first(c.candidate)},` : "Hi everyone,",
+      "",
+      POOL_INTRO[kind](c),
+      "",
+      c.meetWhen ? `When: ${c.meetWhen}` : false,
+      c.meetUrl ? `Google Meet: ${c.meetUrl}` : false,
+      "",
+      "Please join from a laptop with a working camera and microphone, in a quiet place. The session may be recorded for review.",
+      "",
+      "Regards,",
+      c.mentor,
+      "NxtWave Placements",
+    ),
+  };
+}
+
+/** WhatsApp: the Meet link of a pool meeting. */
+export function poolWhatsappMeeting(kind: PoolKind, c: PoolDraftContext): string {
+  const what = kind === "mock" ? `mock interview${c.track ? ` (${c.track})` : ""}` : kind === "guidance" ? "guidance session" : "meeting";
+  return lines(
+    hi(c.candidate),
+    "",
+    `Your ${what} is scheduled${c.meetWhen ? ` on ${c.meetWhen}` : ""}.`,
+    c.meetUrl ? `Google Meet link: ${c.meetUrl}` : false,
+    "",
+    "Please join on time from a laptop with a working camera and microphone, in a quiet place.",
+    "",
+    `${c.mentor}`,
+    "NxtWave Placements",
+  );
+}
+
+export function poolDraftsFor(c: PoolDraftContext) {
+  return {
+    email: { mock: poolMeetingEmail("mock", c), guidance: poolMeetingEmail("guidance", c), custom: poolMeetingEmail("custom", c) },
+    whatsapp: { mock: poolWhatsappMeeting("mock", c), guidance: poolWhatsappMeeting("guidance", c), custom: poolWhatsappMeeting("custom", c) },
+  };
+}

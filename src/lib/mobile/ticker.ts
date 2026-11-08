@@ -1,6 +1,7 @@
 import "server-only";
 import { databaseConfigured } from "@/lib/db/client";
 import { syncAssignments } from "@/lib/mobile/assignments";
+import { SYNC_EVERY_MS, syncPoolIfStale } from "@/lib/mobile/pool/sync";
 import { syncPrepNotifications } from "@/lib/mobile/preps/notify";
 import { syncMeetings } from "@/lib/team/meetings";
 import { resumeRecordings } from "@/lib/team/recordings";
@@ -20,11 +21,22 @@ const short = (err: unknown) => (err instanceof Error ? err.message.slice(0, 200
 
 /** One pass of both syncs; a failure of one never stops the other. */
 export async function mobileTick(): Promise<{ tasks: { checked: number; pushed: number } | null; preps: { checked: number; pushed: number } | null }> {
-  const [tasks, preps, kit] = await Promise.allSettled([syncAssignments(), syncPrepNotifications(), prepWorkTick()]);
+  const [tasks, preps, kit, pool] = await Promise.allSettled([syncAssignments(), syncPrepNotifications(), prepWorkTick(), poolTick()]);
   if (tasks.status === "rejected") console.warn("[mobile] task tick failed:", short(tasks.reason));
+  if (pool.status === "rejected") console.warn("[mobile] pool tick failed:", short(pool.reason));
   if (preps.status === "rejected") console.warn("[mobile] prep tick failed:", short(preps.reason));
   if (kit.status === "rejected") console.warn("[mobile] prep documents, meetings and calls tick failed:", short(kit.reason));
   return { tasks: tasks.status === "fulfilled" ? tasks.value : null, preps: preps.status === "fulfilled" ? preps.value : null };
+}
+
+/** The Academy priority pool's copy of the sheet, every 10 minutes. Skipped until migration 015 exists. */
+async function poolTick(): Promise<void> {
+  try {
+    await syncPoolIfStale(SYNC_EVERY_MS, "ticker");
+  } catch (err) {
+    if (/relation "app.pool_\w+" does not exist/.test(short(err))) return;
+    throw err;
+  }
 }
 
 /** Meetings (due emails, reminders, Meet recordings) and interrupted call recordings. Skipped until migration 010 exists. */

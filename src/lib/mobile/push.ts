@@ -66,13 +66,54 @@ export interface PushRequest {
   jobId?: string;
 }
 
+/**
+ * The line the app's notification inbox shows for a push (the bell icon). Pushes that carry their
+ * own title / body keep them; the others get a plain sentence from their fields.
+ */
+export function inboxText(kind: PushKind, d: Record<string, string>): { title: string; body: string } {
+  const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+  if (d.title) return { title: clip(d.title, 200), body: clip(d.body ?? "", 1000) };
+  const who = [d.candidate, d.company, d.round].filter(Boolean).join(" · ");
+  const company = d.company || "a company";
+  const t: Record<PushKind, [string, string]> = {
+    assignment: [`New task · ${company}`, d.profilesRequired ? `${d.profilesRequired} profiles required.` : "Open the task to start."],
+    reminder: [`Reminder · ${company}`, "This task is still waiting to be started."],
+    overdue: [`Overdue · ${company}`, "This task is past its deadline."],
+    escalation: [`Escalation · ${company}`, "A task on your team needs attention."],
+    job_update: [`${company} · screening ${d.jobStatus ?? "updated"}`, d.earlyShortlist === "true" ? "The early shortlist is ready." : "Open the job for details."],
+    test: ["Test notification", "Notifications work on this phone."],
+    prep_assigned: [`Prep assigned · ${who || company}`, "Open the prep to get started."],
+    prep_reminder: [`Prep due soon · ${who || company}`, "Give the prep before the interview."],
+    prep_overdue: [`Prep overdue · ${who || company}`, "This prep is past its time."],
+    prep_escalation: [`Prep needs attention · ${who || company}`, "A prep on your team is overdue."],
+    prep_unassigned: [`No one on this prep · ${who || company}`, "Assign a mentor."],
+    interview_checkin: [`How did the interview go? · ${who || company}`, "Update the candidate's status."],
+    prep_digest: ["Your day", ""],
+    recording_ready: [`Call recording ready · ${who || company}`, "Its transcript and summary are in the sheet."],
+    meeting_reminder: ["Meeting soon", d.company ? `With ${d.company}.` : "Your meeting starts in 10 minutes."],
+    prep_doc_ready: [`Prep document ready · ${[d.company, d.round].filter(Boolean).join(" ") || "your prep"}`, "Open it to review."],
+    team_account: ["Team Google account needs attention", "An admin should reconnect it in Me → Team."],
+  };
+  const [title, body] = t[kind] ?? ["Notification", ""];
+  return { title: clip(title, 200), body: clip(body, 1000) };
+}
+
+/** Only the short string fields go into the inbox row (no URLs longer than needed, nothing nested). */
+function inboxData(d: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [k, v] of Object.entries(d)) if (typeof v === "string" && k !== "title" && k !== "body") out[k] = v.slice(0, 500);
+  return out;
+}
+
 /** Sends to every device of the user. Returns how many devices got it (0 = none signed in). */
 export async function pushToUser(p: PushRequest): Promise<{ delivered: number; skipped: boolean }> {
+  const text = inboxText(p.kind, p.data);
+  const data = JSON.stringify(inboxData(p.data));
   if (p.dedupeKey) {
     const claimed = await query<{ id: string }>(
-      `insert into app.notifications (user_email, kind, task_id, job_id, dedupe_key)
-       values ($1, $2, $3, $4, $5) on conflict (dedupe_key) do nothing returning id`,
-      [p.email, p.kind, p.taskId ?? null, p.jobId ?? null, p.dedupeKey],
+      `insert into app.notifications (user_email, kind, task_id, job_id, dedupe_key, title, body, data)
+       values ($1, $2, $3, $4, $5, $6, $7, $8) on conflict (dedupe_key) do nothing returning id`,
+      [p.email, p.kind, p.taskId ?? null, p.jobId ?? null, p.dedupeKey, text.title, text.body, data],
     );
     if (!claimed.length) return { delivered: 0, skipped: true };
   }
@@ -94,8 +135,8 @@ export async function pushToUser(p: PushRequest): Promise<{ delivered: number; s
     await query("update app.notifications set delivered = $2, failed = $3 where dedupe_key = $1", [p.dedupeKey, delivered, failed]);
   } else {
     await query(
-      "insert into app.notifications (user_email, kind, task_id, job_id, delivered, failed) values ($1, $2, $3, $4, $5, $6)",
-      [p.email, p.kind, p.taskId ?? null, p.jobId ?? null, delivered, failed],
+      "insert into app.notifications (user_email, kind, task_id, job_id, delivered, failed, title, body, data) values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+      [p.email, p.kind, p.taskId ?? null, p.jobId ?? null, delivered, failed, text.title, text.body, data],
     );
   }
   return { delivered, skipped: false };

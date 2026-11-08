@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.5.0
+  version: 1.6.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
     This file is the source of truth. Change it first, then the routes under
@@ -946,6 +946,7 @@ paths:
                 kind: { type: string, enum: [prep, guidance, mock, custom] }
                 prepId: { type: string, description: "Required for prep / mock" }
                 prepIds: { type: array, maxItems: 100, items: { type: string }, description: "Guidance (or custom) for several candidates: each row gets the emails and, after the call, its transcript and summary" }
+                poolIds: { type: array, maxItems: 100, items: { type: string }, description: "Academy priority pool candidates (UIDs): mock (exactly one), guidance or custom. No prep needed; nothing is written to any sheet." }
                 jobId: { type: string, description: "Guidance for a whole job" }
                 company: { type: string }
                 title: { type: string }
@@ -962,7 +963,7 @@ paths:
                     sendAt: { type: string, format: date-time }
                 force: { type: boolean, description: "Schedule despite duplicate_meeting / meeting_conflict" }
       responses:
-        "201": { description: "The Meeting: { id, kind, title, prepId, prepIds, jobKey, company, startsAt, endsAt, meetUrl, calendarUrl, record, recordingOn, attendees, status, email: {status, subject, sendAt, sentAt, error}, artifacts: {status, durationSec, recordingUrl, transcriptUrl}, createdBy, createdByName, whatsapp, warnings }" }
+        "201": { description: "The Meeting: { id, kind, title, prepId, prepIds, poolIds, jobKey, company, startsAt, endsAt, meetUrl, calendarUrl, record, recordingOn, attendees, status, email: {status, subject, sendAt, sentAt, error}, artifacts: {status, durationSec, recordingUrl, transcriptUrl}, createdBy, createdByName, whatsapp, warnings }" }
         "409": { description: "duplicate_meeting / meeting_conflict (send force to override)" }
         "422": { description: "invalid_meeting / invalid_attendee" }
 
@@ -1022,6 +1023,133 @@ paths:
       responses:
         "200": { description: "OK" }
         "403": { description: "admin_only" }
+
+  /pool:
+    get:
+      tags: [pool]
+      x-phase: P6
+      summary: "Academy priority pool: the candidates the user mentors (admins and leads: everyone). Read from the database (the sheet is copied every 10 minutes). ETag-aware."
+      parameters:
+        - { name: If-None-Match, in: header, schema: { type: string } }
+      responses:
+        "200": { description: "PoolList", content: { application/json: { schema: { $ref: "#/components/schemas/PoolList" } } } }
+        "304": { description: "Unchanged" }
+
+  /pool/sync:
+    post:
+      tags: [pool]
+      x-phase: P6
+      summary: "Re-read the Academy sheet now (at most once a minute): { status: succeeded|failed|skipped|fresh, syncedAt, added, updated, removed, issues, message? }. A failed read keeps the last copy."
+      responses:
+        "200": { description: "OK" }
+
+  /pool/{uid}:
+    get:
+      tags: [pool]
+      x-phase: P6
+      summary: One candidate with every assessment attempt, interviews (EDGE drill-down by phone), resumes, meetings and history.
+      parameters:
+        - { name: uid, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "PoolDetail", content: { application/json: { schema: { $ref: "#/components/schemas/PoolDetail" } } } }
+        "404": { description: "not_found (not in the user's pool)" }
+    patch:
+      tags: [pool]
+      x-phase: P6
+      summary: "The mentor's choices. Send only what changes; null clears priority / track. version = the version last seen."
+      parameters:
+        - { name: uid, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [version]
+              properties:
+                version: { type: integer, minimum: 0 }
+                priority: { type: [string, "null"], enum: [p0, p1, p2, p3, null] }
+                track: { type: [string, "null"], enum: [frontend, backend, fullstack, aiml, null] }
+                tags: { type: array, maxItems: 20, items: { type: string, maxLength: 40 } }
+      responses:
+        "200": { description: "PoolDetail" }
+        "409": { description: "version_conflict: someone else changed the candidate first (refresh and retry)" }
+        "422": { description: "invalid_priority / invalid_track / invalid_tags" }
+
+  /pool/{uid}/contact:
+    post:
+      tags: [pool]
+      x-phase: P6
+      summary: "The user called / messaged / emailed the candidate from the app: { channel: call|whatsapp|email }. 204."
+      parameters:
+        - { name: uid, in: path, required: true, schema: { type: string } }
+      responses:
+        "204": { description: "Logged" }
+
+  /pool/{uid}/resumes:
+    post:
+      tags: [pool]
+      x-phase: P6
+      summary: "Add an updated resume (multipart: file = PDF/DOC/DOCX up to 10 MB, stack, best true|false, note?). Saved to the team Google Drive. Marking best unmarks the previous best of that stack."
+      parameters:
+        - { name: uid, in: path, required: true, schema: { type: string } }
+      responses:
+        "201": { description: "PoolDetail" }
+        "413": { description: "file_too_large" }
+        "415": { description: "invalid_file" }
+        "503": { description: "team_not_connected / team_reconnect" }
+
+  /pool/resumes/{resumeId}:
+    patch:
+      tags: [pool]
+      x-phase: P6
+      summary: "{ stack?, best?, note? } -> PoolDetail"
+      parameters:
+        - { name: resumeId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "PoolDetail" }
+    delete:
+      tags: [pool]
+      x-phase: P6
+      summary: Remove (hidden; the Drive file is kept for audit) -> PoolDetail
+      parameters:
+        - { name: resumeId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "PoolDetail" }
+
+  /pool/resumes/{resumeId}/file:
+    get:
+      tags: [pool]
+      x-phase: P6
+      summary: The resume file (Content-Type and Content-Disposition set), streamed through the server.
+      parameters:
+        - { name: resumeId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "The file" }
+
+  /pool/meeting-setup:
+    post:
+      tags: [pool]
+      x-phase: P6
+      summary: "{ ids: [uid] } -> { members: [{ uid, name, email, phone, track, mentor }], kinds, google: { connected, account, status }, email: { mock|guidance|custom: { subject, body } }, whatsapp: { mock|guidance|custom }, placeholders }. Then POST /meetings with poolIds."
+      responses:
+        "200": { description: "OK" }
+
+  /me/notifications:
+    get:
+      tags: [me]
+      x-phase: P6
+      summary: "The notification inbox (bell icon), newest first, 50 a page: { items: [{ id, at, kind, title, body, data: PushMessage fields, read }], unread, hasMore }."
+      parameters:
+        - { name: before, in: query, schema: { type: string }, description: "id of the last item of the previous page" }
+      responses:
+        "200": { description: "OK" }
+    post:
+      tags: [me]
+      x-phase: P6
+      summary: "Mark read: { ids?: [id], all?: true } -> { unread }."
+      responses:
+        "200": { description: "OK" }
 
 components:
   securitySchemes:
@@ -1414,6 +1542,92 @@ components:
             canEdit: { type: boolean }
             interviewStatusOptions: { type: array, items: { type: string } }
 
+    PoolTrack:
+      type: string
+      enum: [frontend, backend, fullstack, aiml]
+    Priority:
+      type: string
+      description: "p0 Strong > p1 Good > p2 Average > p3 Poor"
+      enum: [p0, p1, p2, p3]
+    PoolScore:
+      type: object
+      properties:
+        key: { type: string }
+        label: { type: string }
+        kind: { type: string, enum: [exam, interview] }
+        score: { type: number }
+        maxScore: { type: number }
+        percent: { type: integer }
+        takenOn: { type: [string, "null"], format: date }
+        result: { type: string }
+        passed: { type: [boolean, "null"] }
+        recordingUrl: { type: [string, "null"] }
+        attempt: { type: string }
+    PoolInterview:
+      type: object
+      properties:
+        prepId: { type: string }
+        company: { type: string }
+        round: { type: string }
+        day: { type: [string, "null"], format: date }
+        time: { type: string }
+        status: { type: string }
+        state: { type: string }
+        prepStatus: { type: string }
+        prepBy: { type: array, items: { type: string } }
+    PoolItem:
+      type: object
+      properties:
+        uid: { type: string }
+        name: { type: string }
+        phone: { type: [string, "null"] }
+        email: { type: [string, "null"] }
+        yog: { type: [integer, "null"] }
+        location: { type: [string, "null"] }
+        college: { type: [string, "null"] }
+        mentor: { type: object, properties: { name: { type: string }, email: { type: [string, "null"] } } }
+        track: { oneOf: [{ $ref: "#/components/schemas/PoolTrack" }, { type: "null" }] }
+        sheetTrack: { oneOf: [{ $ref: "#/components/schemas/PoolTrack" }, { type: "null" }] }
+        sheetTechStack: { type: [string, "null"] }
+        priority: { oneOf: [{ $ref: "#/components/schemas/Priority" }, { type: "null" }] }
+        tags: { type: array, items: { type: string } }
+        version: { type: integer }
+        standing: { type: [string, "null"] }
+        scorePercent: { type: [integer, "null"] }
+        assessments: { type: integer }
+        topScores: { type: array, items: { $ref: "#/components/schemas/PoolScore" } }
+        interviews: { type: [object, "null"], properties: { count: { type: integer }, upcoming: { type: integer }, last: { oneOf: [{ $ref: "#/components/schemas/PoolInterview" }, { type: "null" }] } } }
+        resumes: { type: integer }
+        bestResumes: { type: integer }
+        lastContact: { type: [object, "null"], properties: { at: { type: string, format: date-time }, channel: { type: string }, by: { type: string } } }
+        updatedAt: { type: string, format: date-time }
+    PoolList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/PoolItem" } }
+        unmatchedMentors: { type: array, items: { type: object, properties: { name: { type: string }, candidates: { type: integer } } } }
+        mentors: { type: array, items: { type: object, properties: { name: { type: string }, email: { type: [string, "null"] } } } }
+        tagSuggestions: { type: array, items: { type: string } }
+        tracks: { type: array, items: { type: object, properties: { key: { type: string }, label: { type: string } } } }
+        scope: { type: string, enum: [all, mine] }
+        syncedAt: { type: [string, "null"], format: date-time }
+        interviewsAvailable: { type: boolean }
+    PoolResume:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        stack: { type: string }
+        best: { type: boolean }
+        fileName: { type: string }
+        mime: { type: string }
+        sizeBytes: { type: integer }
+        note: { type: [string, "null"] }
+        uploadedBy: { type: string }
+        uploadedByName: { type: string }
+        createdAt: { type: string, format: date-time }
+    PoolDetail:
+      type: object
+      description: "PoolItem's profile fields plus course, specialization, assessments (every attempt), latestAssessments, interviews (null = drill-down unavailable), resumes, meetings [{ id, kind, title, startsAt, endsAt, status, meetUrl, createdByName }], history [{ at, action, value, by, byName }], updatedBy, updatedAt."
     PushMessage:
       description: |
         FCM **data** message (not a notification message), so the app always builds the notification

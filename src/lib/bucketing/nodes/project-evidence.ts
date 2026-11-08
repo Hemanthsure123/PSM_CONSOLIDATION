@@ -54,7 +54,7 @@ function sameName(profileName: string, resumeNames: string[]): boolean {
   return want.length > 0 && want.every((w) => have.has(w));
 }
 
-/** "achal-sayee" for "Achal Sayee" (two name tokens inside the login, or the whole one-word name). */
+/** "asha-rao" for "Asha Rao" (two name tokens inside the login, or the whole one-word name). */
 function loginCarriesName(login: string, resumeNames: string[]): boolean {
   const letters = login.toLowerCase().replace(/[^a-z]/g, "");
   const toks = Array.from(new Set(resumeNames.flatMap((n) => n.toLowerCase().normalize("NFKD").split(/[^a-z]+/).filter((w) => w.length >= 3))));

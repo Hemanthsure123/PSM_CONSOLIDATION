@@ -5,6 +5,8 @@ import { query } from "@/lib/db/client";
 import { UserError } from "@/lib/mobile/http";
 import { normRound, type PrepRow } from "@/lib/mobile/preps/parse";
 import { readPrepSnapshot } from "@/lib/mobile/preps/sheet";
+import { logPoolMeeting, poolMembersFor, type PoolMember } from "@/lib/mobile/pool/service";
+import { TRACK_LABEL } from "@/lib/mobile/pool/parse";
 import { pushToUser } from "@/lib/mobile/push";
 import { listRoster, type RosterUser } from "@/lib/mobile/roster";
 import { jobKeyOf } from "@/lib/prepdocs/service";
@@ -14,7 +16,7 @@ import { withTeam } from "@/lib/team/google";
 import { sendEmail } from "@/lib/team/mail";
 import { logMessageInSheet, messageLine, recordCallInSheet } from "@/lib/team/sheetlog";
 import { type CallSummary, summariseCall } from "@/lib/team/summary";
-import { istRange, istWhen, type MeetingKind, whatsappMeeting } from "@/lib/team/templates";
+import { istRange, istWhen, type MeetingKind, poolWhatsappMeeting, whatsappMeeting } from "@/lib/team/templates";
 
 /**
  * Meetings created as the team account: a Google Calendar event with a Meet link, Meet's auto
@@ -34,6 +36,8 @@ export interface MeetingInput {
   prepId?: unknown;
   /** Guidance for several candidates: their preps (the emails go to each; the call is logged on each row). */
   prepIds?: unknown;
+  /** Academy priority pool candidates (UIDs): a mock interview or guidance meet for a mentor's own candidates. */
+  poolIds?: unknown;
   jobId?: unknown;
   company?: unknown;
   title?: unknown;
@@ -52,6 +56,8 @@ export interface MeetingDto {
   prepId: string | null;
   /** Every prep the meeting is for (one for a prep call, several for a guidance session). */
   prepIds: string[];
+  /** The Academy pool candidates (UIDs) the meeting is for. */
+  poolIds: string[];
   jobKey: string | null;
   company: string;
   startsAt: string;
@@ -83,6 +89,7 @@ interface MeetingRow {
   title: string;
   prep_key: string | null;
   prep_keys: string[];
+  pool_uids: string[] | null;
   job_key: string | null;
   company: string;
   starts_at: Date;
@@ -222,6 +229,15 @@ function defaultTitle(kind: MeetingKind, company: string, prep: PrepRow | null):
 }
 
 /** Creates the calendar event + Meet link, switches on recording, sends or schedules the email. */
+/** "Mock interview: Backend · Asha Rao", "Guidance session · 6 candidates". */
+function poolTitle(kind: MeetingKind, pool: PoolMember[]): string {
+  const one = pool.length === 1 ? pool[0] : null;
+  const track = one?.track ? TRACK_LABEL[one.track] : "";
+  if (kind === "mock") return `Mock interview${track ? `: ${track}` : ""}${one ? ` · ${one.name}` : ""}`;
+  if (kind === "guidance") return one ? `Guidance session · ${one.name}` : `Guidance session · ${pool.length} candidates`;
+  return one ? `Meeting · ${one.name}` : "Meeting";
+}
+
 export async function createMeeting(user: RosterUser, input: MeetingInput): Promise<MeetingDto> {
   const kind = str(input.kind) as MeetingKind;
   if (!MEETING_KINDS.includes(kind)) throw new UserError(422, "Pick the meeting type.", "invalid_meeting");
@@ -249,13 +265,19 @@ export async function createMeeting(user: RosterUser, input: MeetingInput): Prom
     if (sendAt.getTime() > start.getTime()) throw new UserError(422, "The email must go out before the meeting starts.", "invalid_meeting");
   }
 
-  const group = kind === "guidance" || kind === "custom" ? await prepsOf(input.prepIds) : [];
+  const pool = await poolMembersFor(user, input.poolIds);
+  if (pool.length && kind === "prep") throw new UserError(422, "Pool candidates get a mock interview, a guidance meet or a custom meeting.", "invalid_meeting");
+  if (pool.length && kind === "mock" && pool.length > 1) throw new UserError(422, "A mock interview is for one candidate. Use a guidance meet for several.", "invalid_meeting");
+  const group = !pool.length && (kind === "guidance" || kind === "custom") ? await prepsOf(input.prepIds) : [];
   const companies = [...new Set(group.map((p) => p.company))];
   const jobs = [...new Set(group.map((p) => p.jobId).filter(Boolean))];
-  const ctx = group.length
-    ? { prep: null, jobKey: jobs.length === 1 ? jobs[0] : null, company: companies.length === 1 ? companies[0] : str(input.company, 200) }
-    : await context(kind, str(input.prepId, 40), str(input.jobId, 80), str(input.company, 200));
-  const title = str(input.title, 200) || defaultTitle(kind, ctx.company, ctx.prep);
+  const ctx = pool.length
+    ? { prep: null, jobKey: null, company: "" }
+    : group.length
+      ? { prep: null, jobKey: jobs.length === 1 ? jobs[0] : null, company: companies.length === 1 ? companies[0] : str(input.company, 200) }
+      : await context(kind, str(input.prepId, 40), str(input.jobId, 80), str(input.company, 200));
+  const title = str(input.title, 200) || (pool.length ? poolTitle(kind, pool) : defaultTitle(kind, ctx.company, ctx.prep));
+  const poolUids = pool.map((m) => m.uid);
   const prepKey = ctx.prep?.key ?? null;
   const prepKeys = prepKey ? [prepKey] : group.map((p) => p.key);
 
@@ -316,11 +338,12 @@ export async function createMeeting(user: RosterUser, input: MeetingInput): Prom
     row = (
       await query<MeetingRow>(
         `insert into app.meetings (kind, title, prep_key, prep_keys, job_key, company, starts_at, ends_at, calendar_event_id, meet_space, meet_code, meet_url,
-           record, recording_on, attendees, email_subject, email_body, email_status, email_send_at, created_by)
-         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) returning *`,
+           record, recording_on, attendees, email_subject, email_body, email_status, email_send_at, created_by, pool_uids)
+         values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) returning *`,
         [
           kind, title, prepKey, prepKeys, ctx.jobKey, ctx.company, start, end, created.event.id, created.art.space, created.code, created.meetUrl,
           record, record ? created.art.on : null, JSON.stringify(guests), subject, body, mode === "scheduled" ? "scheduled" : "none", sendAt, user.email,
+          poolUids,
         ],
       )
     )[0];
@@ -328,7 +351,8 @@ export async function createMeeting(user: RosterUser, input: MeetingInput): Prom
     await withTeam((auth) => google.calendar({ version: "v3", auth }).events.delete({ calendarId: "primary", eventId: created.event.id!, sendUpdates: "none" })).catch(() => undefined);
     throw err;
   }
-  await audit(user.email, "meeting_created", row.id, { kind, prepKey, preps: prepKeys.length, jobKey: ctx.jobKey, startsAt: start.toISOString(), guests: guests.length, record, email: mode });
+  await audit(user.email, "meeting_created", row.id, { kind, prepKey, preps: prepKeys.length, pool: poolUids.length, jobKey: ctx.jobKey, startsAt: start.toISOString(), guests: guests.length, record, email: mode });
+  await logPoolMeeting(user, poolUids, `${KIND_LABEL[kind]} · ${istRange(start, end)}`).catch(() => undefined);
   const warnings = created.art.warning ? [created.art.warning] : [];
   if (mode === "now") {
     const sent = await sendMeetingEmails(row, user.email);
@@ -454,6 +478,7 @@ function toDto(r: MeetingRow, roster: RosterUser[], warnings: string[], calendar
     title: r.title,
     prepId: r.prep_key,
     prepIds: keysOf(r),
+    poolIds: r.pool_uids ?? [],
     jobKey: r.job_key,
     company: r.company,
     startsAt: r.starts_at.toISOString(),
@@ -479,13 +504,20 @@ function toDto(r: MeetingRow, roster: RosterUser[], warnings: string[], calendar
     },
     createdBy: r.created_by,
     createdByName: creator?.name ?? r.created_by,
-    whatsapp: whatsappMeeting(r.kind, {
-      candidate: r.attendees.length === 2 || r.kind !== "guidance" ? candidate?.name : undefined,
-      company: r.company,
-      mentor: creator?.name ?? "NxtWave Placements",
-      meetUrl: r.meet_url ?? undefined,
-      meetWhen: istRange(r.starts_at, r.ends_at),
-    }),
+    whatsapp: r.pool_uids?.length && r.kind !== "prep"
+      ? poolWhatsappMeeting(r.kind, {
+          candidate: r.pool_uids.length === 1 ? candidate?.name : undefined,
+          mentor: creator?.name ?? "NxtWave Placements",
+          meetUrl: r.meet_url ?? undefined,
+          meetWhen: istRange(r.starts_at, r.ends_at),
+        })
+      : whatsappMeeting(r.kind, {
+          candidate: r.attendees.length === 2 || r.kind !== "guidance" ? candidate?.name : undefined,
+          company: r.company,
+          mentor: creator?.name ?? "NxtWave Placements",
+          meetUrl: r.meet_url ?? undefined,
+          meetWhen: istRange(r.starts_at, r.ends_at),
+        }),
     warnings,
   };
 }
