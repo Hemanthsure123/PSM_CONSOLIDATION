@@ -1,14 +1,18 @@
 import "server-only";
+import { google, type drive_v3 } from "googleapis";
 import { getDrive } from "@/lib/drive";
 import { docxToText, isZip } from "@/lib/docx-text";
 import { pdfBufferToText } from "@/lib/pdf-text";
 import { driveFileId } from "@/lib/mobile/preps/links";
-import { readTabsText } from "@/lib/prepdocs/tabs";
+import { docsAvailable, readTabsText } from "@/lib/prepdocs/tabs";
+import { withTeam } from "@/lib/team/google";
 
 /**
  * The text a prep document is built from: drill-down (hiring intelligence) documents, interview
- * transcripts and the company website. Google files are read through the service account (it
- * already reads the drill-down links). Personal details are removed before any model sees them.
+ * transcripts and the company website. Google Docs are read with the Docs API as the team account
+ * (every tab, tables included); other Drive files, and Docs when that account isn't connected, are
+ * read through the service account, then the team account's Drive if the file isn't shared with the
+ * service account. Personal details are removed before any model sees them.
  */
 
 export interface SourceText {
@@ -28,21 +32,35 @@ const MAX_SITE_CHARS = 20_000;
 export async function readDriveText(url: string): Promise<{ title: string; modifiedAt: string | null; text: string }> {
   const id = driveFileId(url);
   if (!id) throw new Error("Not a Google Drive or Docs link.");
-  const drive = getDrive();
-  const meta = await drive.files.get({ fileId: id, fields: "name,mimeType,modifiedTime,size", supportsAllDrives: true });
-  const mime = meta.data.mimeType ?? "";
+  let meta: drive_v3.Schema$File;
+  let drive = getDrive();
+  try {
+    meta = (await drive.files.get({ fileId: id, fields: "name,mimeType,modifiedTime,size", supportsAllDrives: true })).data;
+  } catch (err) {
+    // Not shared with the service account: the team account may still see it.
+    if (!(await docsAvailable())) throw err;
+    const viaTeam = await withTeam(async (auth) => {
+      const d = google.drive({ version: "v3", auth });
+      return { d, meta: (await d.files.get({ fileId: id, fields: "name,mimeType,modifiedTime,size", supportsAllDrives: true })).data };
+    });
+    drive = viaTeam.d;
+    meta = viaTeam.meta;
+  }
+  const mime = meta.mimeType ?? "";
+  const modifiedAt = meta.modifiedTime ?? null;
+  if (mime === "application/vnd.google-apps.document" && (await docsAvailable())) {
+    const doc = await readTabsText(id, null);
+    return { title: meta.name ?? doc.title, modifiedAt, text: doc.text.slice(0, MAX_DOC_CHARS) };
+  }
   let text = "";
-  if (mime === "application/vnd.google-apps.document") {
+  if (mime === "application/vnd.google-apps.document" || mime === "application/vnd.google-apps.presentation") {
     const res = await drive.files.export({ fileId: id, mimeType: "text/plain" }, { responseType: "text" });
     text = String(res.data ?? "");
   } else if (mime === "application/vnd.google-apps.spreadsheet") {
     const res = await drive.files.export({ fileId: id, mimeType: "text/csv" }, { responseType: "text" });
     text = String(res.data ?? "");
-  } else if (mime === "application/vnd.google-apps.presentation") {
-    const res = await drive.files.export({ fileId: id, mimeType: "text/plain" }, { responseType: "text" });
-    text = String(res.data ?? "");
   } else {
-    if (Number(meta.data.size ?? 0) > 25 * 1024 * 1024) throw new Error("The file is larger than 25 MB.");
+    if (Number(meta.size ?? 0) > 25 * 1024 * 1024) throw new Error("The file is larger than 25 MB.");
     const res = await drive.files.get({ fileId: id, alt: "media", supportsAllDrives: true }, { responseType: "arraybuffer" });
     const buf = Buffer.from(res.data as ArrayBuffer);
     if (mime === "application/pdf") text = await pdfBufferToText(buf);
@@ -50,7 +68,7 @@ export async function readDriveText(url: string): Promise<{ title: string; modif
     else if (mime.startsWith("text/")) text = buf.toString("utf8");
     else throw new Error(`This file type can't be read (${mime || "unknown"}).`);
   }
-  return { title: meta.data.name ?? "", modifiedAt: meta.data.modifiedTime ?? null, text: text.slice(0, MAX_DOC_CHARS) };
+  return { title: meta.name ?? "", modifiedAt, text: text.slice(0, MAX_DOC_CHARS) };
 }
 
 /** A public web page → readable text (scripts, styles and tags removed). */

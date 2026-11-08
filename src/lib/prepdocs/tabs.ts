@@ -1,14 +1,13 @@
 import "server-only";
 import { google, type docs_v1 } from "googleapis";
-import { env } from "@/lib/env";
 import { teamStatus, withTeam } from "@/lib/team/google";
 
 /**
  * Google Docs tabs. A hiring-intelligence document often keeps one tab per round (TR1, TR2, HR…),
- * so a prep document for TR1 must be written from the TR1 tab only. Tabs are read with the Docs
- * API: first as the service account (the same identity that reads the drill-down links), then as
- * the team Google account when the service account can't (the API is off in its project, or the
- * document isn't shared with it). Without either, a document is read whole, as before.
+ * so a prep document for TR1 must be written from the TR1 tab only. The Docs API is called only as
+ * the team Google account (mockinterviews2@…, OAuth client in the psm-team-workspace project, where
+ * the Docs API is on and which can read the drill-down documents). Without that account connected,
+ * tabs aren't listed and a document is read whole through Drive, as before.
  */
 
 export interface DocTab {
@@ -19,31 +18,18 @@ export interface DocTab {
 }
 
 const TTL = 10 * 60_000;
-const g = globalThis as unknown as { __docsApi?: docs_v1.Docs; __docTabs?: Map<string, { at: number; tabs: DocTab[] | null }> };
+const g = globalThis as unknown as { __docTabs?: Map<string, { at: number; tabs: DocTab[] | null }> };
 const cache = (g.__docTabs ??= new Map());
 
-function serviceDocs(): docs_v1.Docs {
-  g.__docsApi ??= google.docs({
-    version: "v1",
-    auth: new google.auth.JWT({
-      email: env.gcp.clientEmail,
-      key: env.gcp.privateKey,
-      scopes: ["https://www.googleapis.com/auth/documents.readonly"],
-      ...(env.drive.impersonateUser ? { subject: env.drive.impersonateUser } : {}),
-    }),
-  });
-  return g.__docsApi;
+/** True when the team account can be used for the Docs API right now. */
+export async function docsAvailable(): Promise<boolean> {
+  const team = await teamStatus().catch(() => null);
+  return Boolean(team?.connected);
 }
 
-/** Runs [work] as the service account, then as the team account if that one can't. */
-async function withDocs<T>(work: (docs: docs_v1.Docs) => Promise<T>): Promise<T> {
-  try {
-    return await work(serviceDocs());
-  } catch (first) {
-    const team = await teamStatus().catch(() => null);
-    if (!team?.connected) throw first;
-    return withTeam((auth) => work(google.docs({ version: "v1", auth })));
-  }
+/** Runs [work] with the Docs API as the team account (psm-team-workspace). */
+function withDocs<T>(work: (docs: docs_v1.Docs) => Promise<T>): Promise<T> {
+  return withTeam((auth) => work(google.docs({ version: "v1", auth })));
 }
 
 function flatten(tabs: docs_v1.Schema$Tab[] | undefined, level = 0, out: DocTab[] = []): DocTab[] {
@@ -64,6 +50,7 @@ export async function docTabs(fileId: string, modifiedAt: string | null): Promis
   const hit = cache.get(key);
   if (hit && Date.now() - hit.at < TTL) return hit.tabs;
   let tabs: DocTab[] | null = null;
+  if (!(await docsAvailable())) return null;
   try {
     const res = await withDocs((docs) =>
       docs.documents.get(
@@ -110,14 +97,18 @@ function collect(tabs: docs_v1.Schema$Tab[] | undefined, wanted: Set<string>, ou
   }
 }
 
-/** The text of the chosen tabs only, each under its title. Throws when the document can't be read. */
-export async function readTabsText(fileId: string, tabIds: string[]): Promise<{ title: string; modifiedAt: string | null; text: string }> {
+/**
+ * The text of the chosen tabs only (all tabs when [tabIds] is null), each under its title.
+ * Throws when the document can't be read.
+ */
+export async function readTabsText(fileId: string, tabIds: string[] | null): Promise<{ title: string; modifiedAt: string | null; text: string }> {
   const res = await withDocs((docs) => docs.documents.get({ documentId: fileId, includeTabsContent: true }, { timeout: 30_000 }));
   const parts: { title: string; text: string }[] = [];
-  collect(res.data.tabs, new Set(tabIds), parts);
+  const wanted = new Set(tabIds ?? flatten(res.data.tabs).map((t) => t.id));
+  collect(res.data.tabs, wanted, parts);
   if (!parts.length) throw new Error("The chosen tabs are no longer in the document. Refresh and pick again.");
   return {
-    title: `${res.data.title ?? ""} (${parts.map((p) => p.title).join(", ")})`,
+    title: tabIds ? `${res.data.title ?? ""} (${parts.map((p) => p.title).join(", ")})` : (res.data.title ?? ""),
     modifiedAt: null,
     text: parts.map((p) => `## ${p.title}\n${p.text.trim()}`).join("\n\n"),
   };
