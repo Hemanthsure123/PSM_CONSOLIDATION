@@ -323,6 +323,9 @@ async function runDoc(
     });
     if ("error" in out) throw new Error(out.error);
     const doc = selectSections(out.doc, request.sections);
+    // The title comes from the sheet, not the model: a company name can itself contain " - "
+    // ("A.P. Moller - Maersk"), which the model would misread as company + role.
+    doc.title = `${p.company} | ${normRound(p.round) || "Interview"} Preparation Guide`;
     if (request.linkedin && !doc.links.some((l) => l.url === request.linkedin)) doc.links.push({ label: "LinkedIn", url: request.linkedin });
     if (request.website && !doc.links.some((l) => l.url === request.website)) doc.links.unshift({ label: "Website", url: request.website });
 
