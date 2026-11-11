@@ -6,6 +6,7 @@ import type {
   AcDataset,
   AcEligibility,
   AcInterview,
+  AcMasterFill,
   AcOldBucket,
   AcOldRound,
   AcPlacementInfo,
@@ -37,6 +38,59 @@ export interface AcRawSources {
   s1: { url: string; title: string; tab: AcGrid };
   s2: { url: string; title: string; tabs: AcGrid[] };
   s3: { url: string; title: string; tab: AcGrid | null };
+  /**
+   * The master tracking sheet (Assessed Pool › "> 8LPA Assessed Pool"): sheet 1 can be a copy of
+   * some of its rows (new candidates) with columns left blank or broken (#REF!). Each sheet 1 cell
+   * that is blank or a sheet error is filled from the master row with the same UID (else mobile),
+   * from the column with the same name. Values sheet 1 holds are kept.
+   */
+  master?: { url: string; title: string; tab: AcGrid } | null;
+}
+
+/** Fill sheet 1's blank / broken cells from the master sheet (same column name, matched by UID then mobile). */
+export function fillFromMaster(sheet: string[][], master: string[][]): { values: string[][]; matched: number; missing: number; cells: number } {
+  const hr = detectHeaderRow(sheet);
+  const mhr = detectHeaderRow(master);
+  const { base, labels } = columnLabels(sheet, hr);
+  const m = columnLabels(master, mhr);
+  const mByLabel = new Map(m.labels.map((l, i) => [l.toLowerCase(), i]));
+  const mUid = findCol(m.base, /^(uid|user\s*id)$/i);
+  const mPhone = findCol(m.base, MOBILE_HEADER);
+  const uidCol = findCol(base, /^(uid|user\s*id)$/i);
+  const phoneCol = findCol(base, MOBILE_HEADER);
+  const byUid = new Map<string, string[]>();
+  const byPhone = new Map<string, string[]>();
+  for (const r of master.slice(mhr + 1)) {
+    const u = mUid >= 0 ? lc(r?.[mUid]) : "";
+    const ph = mPhone >= 0 ? mobileKey(r?.[mPhone]) : "";
+    if (u && !byUid.has(u)) byUid.set(u, r);
+    if (ph.length === 10 && !byPhone.has(ph)) byPhone.set(ph, r);
+  }
+  const map = labels.map((l) => mByLabel.get(l.toLowerCase()) ?? -1);
+  let matched = 0;
+  let missing = 0;
+  let cells = 0;
+  const values = sheet.map((row, ri) => {
+    if (ri <= hr || !(row ?? []).some((c) => norm(c))) return row;
+    const u = uidCol >= 0 ? lc(row[uidCol]) : "";
+    const ph = phoneCol >= 0 ? mobileKey(row[phoneCol]) : "";
+    const mr = (u && byUid.get(u)) || (ph.length === 10 && byPhone.get(ph)) || null;
+    if (!mr) {
+      missing++;
+      return row;
+    }
+    matched++;
+    const out = Array.from({ length: Math.max(row.length, labels.length) }, (_, i) => row[i] ?? "");
+    map.forEach((mi, i) => {
+      if (mi < 0 || clean(out[i])) return;
+      const v = clean(mr[mi]);
+      if (!v) return;
+      out[i] = v;
+      cells++;
+    });
+    return out;
+  });
+  return { values, matched, missing, cells };
 }
 
 const norm = (v: unknown) => String(v ?? "").replace(/\s+/g, " ").trim();
@@ -117,6 +171,9 @@ const findCol = (base: string[], re: RegExp, from = 0) => {
   return -1;
 };
 
+/** The candidate's mobile column ("StudentNumber" in the assessed pool). */
+const MOBILE_HEADER = /^(number|student\s*number|mobile( number)?|phone( number)?|contact( number)?)$/i;
+
 /** A spreadsheet error shown instead of a value (a broken formula): never data. */
 export const SHEET_ERROR = /^#(REF!|N\/A|VALUE!|DIV\/0!|NAME\?|NUM!|NULL!|ERROR!|SPILL!|CALC!)/i;
 const clean = (v: unknown) => (SHEET_ERROR.test(norm(v)) ? "" : norm(v));
@@ -133,17 +190,76 @@ function filledCols(base: string[], rows: string[][], re: RegExp): { i: number; 
     }));
 }
 
-/** The matching column holding the most values ("Placement Status" can repeat with one copy left empty); -1 = none. */
-function fullestCol(base: string[], rows: string[][], re: RegExp): number {
+/**
+ * The matching column holding the most values ("Placement status" can repeat with one copy left
+ * empty); `fits` keeps only columns whose values look right. -1 = none.
+ */
+function fullestCol(base: string[], rows: string[][], re: RegExp, fits?: (v: string) => boolean): number {
   let best = -1;
   let most = -1;
   for (const c of filledCols(base, rows, re)) {
-    if (c.filled > most) {
-      most = c.filled;
+    const n = fits ? rows.filter((r) => fits(clean((r ?? [])[c.i]))).length : c.filled;
+    if (n > most && (!fits || n > 0)) {
+      most = n;
       best = c.i;
     }
   }
   return best;
+}
+
+/** The matching column that holds Yes / No answers (most of them); -1 = none. */
+function yesNoCol(base: string[], rows: string[][], re: RegExp): number {
+  let best = -1;
+  let most = 0;
+  for (const c of filledCols(base, rows, re)) {
+    const yn = rows.filter((r) => /^(yes|no)\b/i.test(clean((r ?? [])[c.i]))).length;
+    if (yn > most && yn >= c.filled * 0.6) {
+      most = yn;
+      best = c.i;
+    }
+  }
+  return best;
+}
+
+const LOOKS: Record<"level" | "score" | "verdict" | "clearance", (v: string) => boolean> = {
+  level: (v) => /^(l\s*[0-4]|below\s*l\s*\d)\b/i.test(v),
+  score: (v) => /^-?\d+(\.\d+)?%?$/.test(v),
+  verdict: (v) => /hire|reject/i.test(v),
+  clearance: (v) => /cleared/i.test(v),
+};
+
+/**
+ * A competency block's columns by what they hold: the column named for each part when its values
+ * fit, else the block column whose values fit best (the Frontend block's headers sit one column
+ * off its data in the assessed pool: "Clearance Status" holds the L1-L4 levels). -1 = none.
+ */
+function byContent(block: number[], rows: string[][], named: Record<keyof typeof LOOKS, number>): Record<keyof typeof LOOKS, number> {
+  const share = (i: number, k: keyof typeof LOOKS) => {
+    const vals = rows.map((r) => clean((r ?? [])[i])).filter(Boolean);
+    return vals.length ? vals.filter(LOOKS[k]).length / vals.length : -1;
+  };
+  const out = { ...named };
+  const taken = new Set<number>();
+  for (const k of ["level", "verdict", "clearance", "score"] as const) {
+    if (named[k] >= 0 && share(named[k], k) >= 0.6) {
+      taken.add(named[k]);
+      continue;
+    }
+    let best = -1;
+    let top = 0.6;
+    for (const i of block) {
+      if (taken.has(i)) continue;
+      const sh = share(i, k);
+      if (sh >= top) {
+        top = sh;
+        best = i;
+      }
+    }
+    // Nothing fits: keep the named column only when it is empty (nothing filled yet), else none.
+    out[k] = best >= 0 ? best : named[k] >= 0 && share(named[k], k) < 0 ? named[k] : -1;
+    if (out[k] >= 0) taken.add(out[k]);
+  }
+  return out;
 }
 
 /** "Frontend Levels" → Frontend; competency → the bucket it speaks for (DSA / SE speak for none). */
@@ -279,7 +395,14 @@ function latestInterview(rows: string[][], statusCol: number): string[] {
 /** Read and join the three sheets. Never throws on messy data; problems come back as warnings. */
 export function buildDataset(src: AcRawSources, loadedAt = new Date().toISOString()): AcDataset {
   const warnings: string[] = [];
-  const g1 = src.s1.tab.values;
+  let g1 = src.s1.tab.values;
+  let master: AcMasterFill | null = null;
+  if (src.master?.tab?.values.length) {
+    const f = fillFromMaster(g1, src.master.tab.values);
+    g1 = f.values;
+    master = { url: src.master.url, title: src.master.title, tab: src.master.tab.name, matched: f.matched, missing: f.missing, cells: f.cells };
+    if (f.missing) warnings.push(`${f.missing} sheet 1 candidate${f.missing === 1 ? " is" : "s are"} not in the master sheet (${src.master.tab.name}) — their blank columns stay blank.`);
+  }
   const hr = detectHeaderRow(g1);
   const { base, labels } = columnLabels(g1, hr);
   const col = (re: RegExp) => findCol(base, re);
@@ -296,15 +419,18 @@ export function buildDataset(src: AcRawSources, loadedAt = new Date().toISOStrin
     uid: col(/^(uid|user\s*id)$/i),
     name: col(/^(name|student name|candidate name)$/i),
     email: col(/e-?mail/i),
-    mobile: col(/^(number|mobile( number)?|phone( number)?|contact( number)?)$/i),
+    mobile: col(MOBILE_HEADER),
     resume: col(/^resume/i),
     active: col(/active\s*pool/i),
-    placement: fullestCol(base, dataRows, /placement info|placement status|placed\b/i),
+    // "Placement status": Placed / Not Placed. "Placement Status" (Yes / No) is the placed flag below.
+    placement: fullestCol(base, dataRows, /placement info|placement status|placed\b/i, (v) => /placed/i.test(v)),
+    support: col(/^placement support/i),
+    placedFlag: yesNoCol(base, dataRows, /^placement status$/i),
     dsaOffline: col(/^dsa offline/i),
     oldBucket: col(/old assessment/i),
   };
   if (C.uid < 0 && C.email < 0) warnings.push(`Sheet 1 "${src.s1.tab.name}" has no UID or email column — rows can't be joined.`);
-  if (C.active < 0) warnings.push(`Sheet 1 has no "Active Pool" column — nobody counts as active.`);
+  if (C.active < 0) warnings.push(`Sheet 1 has no "Active Pool" column — the scope "Active Pool = Yes" leaves everyone out.`);
   if (C.resume < 0) warnings.push(`Sheet 1 has no "Resume" column — candidates are bucketed from assessments and preference only.`);
 
   // Competency blocks: "<Name> Levels" with its Overall Score / Verdict Band / Clearance Status just before it.
@@ -319,7 +445,15 @@ export function buildDataset(src: AcRawSources, loadedAt = new Date().toISOStrin
       }
       return -1;
     };
-    comp.push({ name: competencyName(m[1]), level: i, score: near(/overall score/i), verdict: near(/verdict/i), clearance: near(/clearance/i) });
+    // The block: from the group label above it (else 4 columns back) to its "Levels" column.
+    let start = Math.max(0, i - 4);
+    for (let k = i - 1; k >= Math.max(0, i - 6); k--) {
+      if (/\slevels?$/i.test(base[k]) || /recording/i.test(base[k])) break;
+      start = k;
+    }
+    const block = Array.from({ length: i - start + 1 }, (_, k) => start + k);
+    const named = { level: i, score: near(/overall score/i), verdict: near(/verdict/i), clearance: near(/clearance/i) };
+    comp.push({ name: competencyName(m[1]), ...byContent(block, dataRows, named) });
   });
   // Old-process rounds: "<prefix> Score" + "<prefix> Status" (Bucket A TR 1, Bucket B TR 2, C Bucket TR 1).
   const rounds: { label: string; score: number; status: number }[] = [];
@@ -471,8 +605,11 @@ export function buildDataset(src: AcRawSources, loadedAt = new Date().toISOStrin
       resumeUrl: /^https?:\/\//i.test(cell(C.resume)) ? cell(C.resume) : "",
       activePool: /^yes\b/i.test(clean(r[C.active])),
       activePoolRaw: C.active >= 0 ? clean(r[C.active]) : "",
-      placement: placementOf(C.placement >= 0 ? clean(r[C.placement]) : ""),
+      placement: placementOf(C.placement >= 0 && clean(r[C.placement]) ? clean(r[C.placement]) : /^yes\b/i.test(clean(r[C.placedFlag])) ? "Placed" : /^no\b/i.test(clean(r[C.placedFlag])) ? "Not placed" : ""),
       placementRaw: C.placement >= 0 ? clean(r[C.placement]) : "",
+      supportRaw: C.support >= 0 ? clean(r[C.support]) : "",
+      placedFlagRaw: C.placedFlag >= 0 ? clean(r[C.placedFlag]) : "",
+      supportNotPlaced: C.support >= 0 || C.placedFlag >= 0 ? /^yes\b/i.test(clean(r[C.support])) && /^no\b/i.test(clean(r[C.placedFlag])) : null,
       preference: [...new Set(prefCols.map((p) => clean(r[p.i])).filter(Boolean))].join(" | "),
       dsaOffline,
       oldBucket,
@@ -498,6 +635,7 @@ export function buildDataset(src: AcRawSources, loadedAt = new Date().toISOStrin
       s1: { url: src.s1.url, title: src.s1.title, tabs: [src.s1.tab.name] },
       s2: { url: src.s2.url, title: src.s2.title, tabs: s2Tabs.map((t) => t.name) },
       s3: { url: src.s3.url, title: src.s3.title, tabs: s3 ? [s3.name] : [] },
+      ...(master ? { master } : {}),
     },
     columns,
     candidates,

@@ -17,7 +17,7 @@ import { NativeSelect } from "@/components/ui/select";
 import { Stat, StatGrid } from "@/components/ui/stat";
 import { AcNudgePanel, AcRulesCard, AcSignalsPanel } from "@/components/academy/academy-rules";
 import { AC_CONCURRENCY_OPTIONS, AcademyResults } from "@/components/academy/academy-results";
-import { previewAcademySheet, readAcademyTabs, type AcademySheetPreview } from "@/actions/academy";
+import { previewAcademySheet, readAcademyMaster, readAcademyTabs, type AcademySheetPreview } from "@/actions/academy";
 import { runQueue } from "@/lib/parallel-queue";
 import { buildDataset, pickCompetencyTabs, pickMasterTab, pickOldProcessTab } from "@/lib/academy/parse";
 import { inScope, needsRead, rankAcademy, scopeLabel, summarizeAcademy } from "@/lib/academy/scoring";
@@ -51,7 +51,7 @@ const SHEETS: { key: SheetKey; label: string; hint: string; placeholder: string 
   {
     key: "s1",
     label: "Sheet 1 — assessed pool",
-    hint: "Eligibility, Active Pool, placement, preference and resume links are read from this sheet only.",
+    hint: "The candidates to bucket: the master \"> 8LPA Assessed Pool\" or a sheet of new candidates copied from it — its blank or broken (#REF!) cells are filled from the master by UID.",
     placeholder: "Assessed Pool (Sahana Working New Criteria)",
   },
   { key: "s2", label: "Sheet 2 — competency interviews", hint: "Frontend / DSA / Backend / SE interview detail, joined by UID.", placeholder: "Post Offline Competency Interview Evaluation" },
@@ -78,10 +78,11 @@ async function loadSheets(
     s3: chosen.s3 !== undefined && (chosen.s3 === "" || tabsOf("s3").some((t) => t.name === chosen.s3)) ? chosen.s3 : pickOldProcessTab(tabsOf("s3")),
   };
   if (!tabs.s1) return { ok: false, error: "Sheet 1 has no tabs." };
-  const [r1, r2, r3] = await Promise.all([
+  const [r1, r2, r3, rm] = await Promise.all([
     readAcademyTabs(links.s1.trim(), [tabs.s1]),
     previews.s2 && tabs.s2.length ? readAcademyTabs(links.s2.trim(), tabs.s2) : Promise.resolve({ ok: true as const, data: { title: previews.s2?.title ?? "", grids: [] } }),
     previews.s3 && tabs.s3 ? readAcademyTabs(links.s3.trim(), [tabs.s3]) : Promise.resolve({ ok: true as const, data: { title: previews.s3?.title ?? "", grids: [] } }),
+    readAcademyMaster(),
   ]);
   if (!r1.ok) return { ok: false, error: `Sheet 1: ${r1.error}` };
   if (!r2.ok) return { ok: false, error: `Sheet 2: ${r2.error}` };
@@ -90,7 +91,10 @@ async function loadSheets(
     s1: { url: links.s1.trim(), title: r1.data.title, tab: r1.data.grids[0] },
     s2: { url: links.s2.trim(), title: r2.data.title, tabs: r2.data.grids },
     s3: { url: links.s3.trim(), title: r3.data.title, tab: r3.data.grids[0] ?? null },
+    // Sheet 1's blanks come from the master tracking sheet — unless sheet 1 is the master itself.
+    master: rm.ok && !(previews.s1?.spreadsheetId === rm.data.spreadsheetId && tabs.s1 === rm.data.grid.name) ? { url: rm.data.url, title: rm.data.title, tab: rm.data.grid } : null,
   });
+  if (!rm.ok) dataset.warnings.push(`The master sheet couldn't be read (${rm.error}) — sheet 1's blank columns stay blank.`);
   if (!dataset.candidates.length) return { ok: false, error: `Sheet 1 › ${tabs.s1} has no candidate rows (no UID / email column found).` };
   return { ok: true, dataset, previews, tabs };
 }
@@ -526,6 +530,11 @@ export function AcademyBucketing({ runId, onDone }: Props) {
             <Badge variant="secondary">Sheet 2 interviews for {preview.s2} of {preview.s.inScope}</Badge>
             <Badge variant="secondary">Sheet 3 old process for {preview.s3} of {preview.s.inScope}</Badge>
             <Badge variant="secondary">{dataset.columns.length} columns joined</Badge>
+            {dataset.sources.master ? (
+              <Badge variant="secondary">
+                Master sheet: {dataset.sources.master.matched} matched · {dataset.sources.master.cells} blank cells filled
+              </Badge>
+            ) : null}
           </div>
         </Panel>
       ) : null}

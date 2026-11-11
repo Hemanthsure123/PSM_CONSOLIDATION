@@ -54,7 +54,7 @@ export function tabRows(rows: AcRanked[], tab: AcTab): AcRanked[] {
   return rows.filter((r) => r.placement === tab).sort((a, b) => a.rank - b.rank);
 }
 
-const PRIORITY_LABEL = { P1: "P1 · Active, not placed", P2: "P2 · Active, placed", "": "" } as const;
+const PRIORITY_LABEL = { P1: "P1 · Placement support, not placed", P2: "P2 · Rest of the pool", "": "" } as const;
 
 function platformLine(p: DsaPlatformResult | undefined): string {
   if (!p || !p.url) return "";
@@ -241,8 +241,8 @@ function summarySheet(title: string, ds: AcDataset, rows: AcRanked[], rules: AcR
     ["Candidates in sheet 1", s.candidates],
     ["Eligible (L3/L4 competency, DSA Offline cleared, or old Bucket A)", s.eligible],
     [`In scope (${scopeLabel(rules)})`, s.inScope],
-    ["  P1 · Active, not placed", s.p1],
-    ["  P2 · Active, placed", s.p2],
+    ["  P1 · Placement Support from Nxtwave = Yes and Placement Status = No", s.p1],
+    ["  P2 · the rest in scope", s.p2],
     ...AC_BUCKETS.map((b) => [`${AC_BUCKET_LABEL[b]}`, s.byPlacement[b]] as [string, number]),
     ["Mixed (verify over call on priority)", s.byPlacement.mixed],
     ["Needs evidence / pending", s.needsEvidence + s.pending],
@@ -268,7 +268,7 @@ function summarySheet(title: string, ds: AcDataset, rows: AcRanked[], rules: AcR
     ],
     ["Mixed rule", `Second bucket within ${rules.mixedMargin} points of the first, both at least ${rules.mixedMinScore}${rules.feBeAsFullStack ? "; Frontend / Backend / Full Stack close together = Full Stack" : ""}`],
     ["Ranking inside a bucket", `P1 before P2, then priority score = fit ${rules.rankWeights.fit} · assessments ${rules.rankWeights.assessment}${rules.signals.dsa ? ` · DSA ${rules.rankWeights.dsa}` : ""} (weighted average; fit × (0.5 + 0.5 × evidence coverage), so a bucket read only from the preference note ranks lower), then old bucket A > B > C > D`],
-    ["Placed candidates", rules.includePlaced ? "Bucketed after the not-placed ones (P2)" : "Not bucketed"],
+    ["Placed candidates", rules.includePlaced ? "Bucketed after the P1 candidates (P2)" : "Not bucketed"],
     ["", ""],
     ...AC_BUCKETS.map((b) => [`${AC_BUCKET_LABEL[b]} covers`, AC_BUCKET_SCOPE[b]] as [string, string]),
     ...ds.warnings.map((w) => ["Warning", w] as [string, string]),

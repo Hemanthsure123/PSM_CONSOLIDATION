@@ -107,6 +107,12 @@ export interface AcCandidate {
   activePoolRaw: string;
   placement: AcPlacementInfo;
   placementRaw: string;
+  /** "Placement Support from Nxtwave" as written (absent in runs saved before it was read). */
+  supportRaw?: string;
+  /** "Placement Status" (Yes / No: placed or not) as written. */
+  placedFlagRaw?: string;
+  /** Placement Support = Yes and Placement Status = No — the candidates to prioritise; null = the sheet has neither column. */
+  supportNotPlaced?: boolean | null;
   preference: string;
   dsaOffline: string;
   oldBucket: AcOldBucket;
@@ -134,9 +140,22 @@ export interface AcSourceInfo {
   tabs: string[];
 }
 
+/** How sheet 1's blank / broken cells were filled from the master tracking sheet. */
+export interface AcMasterFill {
+  url: string;
+  title: string;
+  tab: string;
+  /** Sheet 1 candidates found in the master. */
+  matched: number;
+  /** Sheet 1 candidates not in the master. */
+  missing: number;
+  /** Cells filled from the master. */
+  cells: number;
+}
+
 export interface AcDataset {
   loadedAt: string;
-  sources: { s1: AcSourceInfo; s2: AcSourceInfo; s3: AcSourceInfo };
+  sources: { s1: AcSourceInfo; s2: AcSourceInfo; s3: AcSourceInfo; master?: AcMasterFill };
   /** Output columns in order: sheet 1, then sheet 2 (per tab), then sheet 3. */
   columns: AcColumn[];
   candidates: AcCandidate[];

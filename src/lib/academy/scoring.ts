@@ -569,6 +569,16 @@ export function inActivePool(c: Pick<AcCandidate, "activePool" | "activePoolRaw"
   return !/^\s*no\b/i.test(c.activePoolRaw);
 }
 
+/**
+ * P1 = the candidates to place first: Placement Support from Nxtwave = Yes and Placement Status = No.
+ * A sheet with neither column: P1 = not placed. Everyone else in scope is P2.
+ */
+export function priorityTier(c: AcCandidate): "P1" | "P2" {
+  if (c.supportNotPlaced === true) return "P1";
+  if (c.supportNotPlaced === false) return "P2";
+  return c.placement === "placed" ? "P2" : "P1";
+}
+
 /** Bucketed under these rules (eligibility and Active Pool; placed candidates are left to `includePlaced`). */
 export function inScope(c: AcCandidate, rules: AcRules): boolean {
   return (!rules.scope.eligibleOnly || c.eligibility.eligible) && inActivePool(c, rules.scope.activePool);
@@ -787,7 +797,7 @@ export function rankAcademy(candidates: AcCandidate[], results: Record<string, A
     const e = results[c.id];
     const assessment = assessmentScore(c);
     const dsa = dsaStrength(c, e, rules.signals.dsa);
-    const priority: AcRanked["priority"] = inScope(c, rules) ? (c.placement === "placed" ? "P2" : "P1") : "";
+    const priority: AcRanked["priority"] = inScope(c, rules) ? priorityTier(c) : "";
     const base: Omit<AcRanked, "reasons" | "rank"> = {
       id: c.id,
       candidate: c,

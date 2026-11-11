@@ -176,7 +176,7 @@ export function AcRulesCard({ rules, onChange }: { rules: AcRules; onChange: (r:
           <SettingRow
             id="ac-placed"
             title="Bucket already-placed candidates"
-            description="Active Pool candidates who are placed are ranked after the not-placed ones (P2)."
+            description="Placed candidates are ranked after the P1 candidates (P2)."
             checked={rules.includePlaced}
             onCheckedChange={(v) => set({ includePlaced: v })}
           />
@@ -203,7 +203,7 @@ export function AcRulesCard({ rules, onChange }: { rules: AcRules; onChange: (r:
           <p className="flex items-center gap-1 text-[13px] font-medium">
             Ranking inside a bucket
             <InfoHint align="start">
-              P1 (Active, not placed) always comes before P2 (Active, placed). Inside each, the priority score is the weighted average of stack
+              P1 (Placement Support from Nxtwave = Yes and Placement Status = No) always comes before P2 (the rest). Inside each, the priority score is the weighted average of stack
               fit, the best internal assessment (competency score, DSA Offline, old bucket A 70 · B 45 · C 30 · D 15 moved by its TR rounds) and DSA.
               Fit is discounted when little evidence backs the bucket (only the preference note: 55%). Ties go to the better old bucket.
             </InfoHint>

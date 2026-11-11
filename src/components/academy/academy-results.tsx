@@ -578,8 +578,8 @@ export function AcademyResults({
           </div>
           <p className="text-[13px] text-muted-foreground">
             Sheet 1: <span className="tabular-nums">{sum.candidates}</span> candidates · <span className="tabular-nums">{sum.eligible}</span> eligible ·{" "}
-            <span className="font-medium text-foreground tabular-nums">{sum.inScope}</span> in scope — {scopeLabel(rules).toLowerCase()} (P1 not placed{" "}
-            <span className="tabular-nums">{sum.p1}</span> · P2 placed <span className="tabular-nums">{sum.p2}</span>) ·{" "}
+            <span className="font-medium text-foreground tabular-nums">{sum.inScope}</span> in scope — {scopeLabel(rules).toLowerCase()} (P1 placement support, not placed{" "}
+            <span className="tabular-nums">{sum.p1}</span> · P2 rest <span className="tabular-nums">{sum.p2}</span>) ·{" "}
             <span className="tabular-nums">{sum.toVerify}</span> tagged to verify over call
             {rules.trust.enabled ? (
               <>
@@ -661,7 +661,7 @@ export function AcademyResults({
           <span className="inline-flex items-center gap-1">
             Buckets
             <InfoHint label="How the buckets are ranked" align="start">
-              Each bucket lists P1 (Active, not placed) first, then P2 (Active, placed); inside each, by priority score (stack fit, best internal
+              Each bucket lists P1 (Placement Support from Nxtwave = Yes and Placement Status = No) first, then P2 (the rest); inside each, by priority score (stack fit, best internal
               assessment, DSA). The bars show the four bucket scores; the candidate&apos;s own bucket is in blue.
             </InfoHint>
           </span>

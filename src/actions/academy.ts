@@ -2,6 +2,7 @@
 
 import { getSheets, extractSpreadsheetId, withSheetsRetry } from "@/lib/sheets";
 import { coerceCell } from "@/lib/utils";
+import { poolSource, sheetUrl } from "@/lib/pool/sources";
 import type { ActionResult } from "@/lib/types";
 
 /**
@@ -71,6 +72,19 @@ export async function readAcademyTabs(url: string, tabs: string[]): Promise<Acti
   } catch (err) {
     return { ok: false, error: describe(err) };
   }
+}
+
+/**
+ * The master tracking sheet (Assessed Pool › "> 8LPA Assessed Pool", the same source as the app's
+ * Academy pool). Sheet 1's blank / broken cells are filled from it, so a sheet of new candidates
+ * copied from it gets their placement support, status, preference and call remarks.
+ */
+export async function readAcademyMaster(): Promise<ActionResult<{ url: string; spreadsheetId: string; title: string; grid: { name: string; values: string[][] } }>> {
+  const src = poolSource("academy");
+  const url = sheetUrl(src);
+  const r = await readAcademyTabs(url, [src.tab]);
+  if (!r.ok) return r;
+  return { ok: true, data: { url, spreadsheetId: src.spreadsheetId, title: r.data.title, grid: r.data.grids[0] } };
 }
 
 function describe(err: unknown): string {

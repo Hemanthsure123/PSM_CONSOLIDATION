@@ -6,7 +6,7 @@ import "./server-only-shim";
  *
  *   npx tsx scripts/academy-selftest.ts
  */
-import { buildDataset, columnLabels, detectHeaderRow, readEligibility, type AcGrid } from "@/lib/academy/parse";
+import { buildDataset, columnLabels, detectHeaderRow, fillFromMaster, readEligibility, type AcGrid } from "@/lib/academy/parse";
 import { verifyFlags } from "@/lib/academy/trust-agent";
 import { identityCheck } from "@/lib/academy/evaluator";
 import {
@@ -25,6 +25,7 @@ import {
   trustScore,
   MIXED_TAG,
   inActivePool,
+  priorityTier,
   needsRead,
 } from "@/lib/academy/scoring";
 import { buildAcademyCsv, buildAcademyWorkbook, exportHeaders, tabRows } from "@/lib/academy/export";
@@ -354,6 +355,53 @@ check("default scope: everyone but Active Pool = No, eligibility not a gate", eq
   check("competency: a sheet 2 Frontend L3 counts when sheet 1 has no level", sig !== null && sig.scores.frontend === 80, JSON.stringify(sig?.scores));
   const both = { ...by("u1"), interviews: [{ tab: "Frontend Development", status: "completed", level: "L2", integrityScore: "", integrityNote: "", remarks: "" }] };
   check("competency: sheet 1's level wins over sheet 2", competencySignal(both)!.scores.frontend === 100);
+}
+
+// ── The master tracking sheet, placement support, a shifted competency block ──
+
+{
+  const H = ["UID", "Name", "StudentNumber", "Student Preference/Call Remarks", "Placement Support from Nxtwave", "Placement Status", "Placement status", "Active Pool", "Resume",
+    "Overall Score (out of 100)", "Verdict Band", "Clearance Status", "Frontend Levels", "Competency (FE) TR1 Recording"];
+  const G = Array(H.length).fill("");
+  G[9] = "Frontend (Last Updated on Oct 15,2026)";
+  // The Frontend block's data sits one column left of its headers: verdict under "Overall Score", level under "Clearance Status".
+  const master: AcGrid = {
+    name: "> 8LPA Assessed Pool",
+    values: [
+      G,
+      H,
+      ["m1", "Lata", "9100000001", "Roles/Tech: Backend | Location: Pune", "Yes", "No", "Not Placed", "", "", "Strong Hire", "Cleared", "L4", "Yes", "rec"],
+      ["m2", "Mohan", "9100000002", "Roles/Tech: Frontend", "Yes", "Yes", "Placed", "", "", "Reject", "Not Cleared", "Below L1", "", ""],
+      ["m3", "Nila", "9100000003", "", "No", "No", "Not Placed", "", "", "", "", "", "", ""],
+    ],
+  };
+  const copy: AcGrid = {
+    name: "Sheet1",
+    values: [
+      G,
+      H,
+      ["m1", "Lata", "9100000001", "#REF!", "", "", "Not Placed", "", "https://drive.google.com/file/d/X", "", "", "", "", ""],
+      ["", "Nila", "+91 91000 00003", "#REF!", "", "", "", "", "", "", "", "", "", ""],
+      ["m9", "New", "9100000009", "", "", "", "", "", "", "", "", "", "", ""],
+    ],
+  };
+  const E = { url: "", title: "", tabs: [] as AcGrid[] };
+  const md = buildDataset({ s1: { url: "m", title: "Master", tab: master }, s2: E, s3: { url: "", title: "", tab: null } });
+  const mc = (id: string) => md.candidates.find((x) => x.id === id)!;
+  check("StudentNumber is the mobile column", mc("m1").mobile === "9100000001");
+  check("shifted Frontend block: the level is read from the column holding L1-L4", mc("m1").competencies.find((k) => k.name === "Frontend")!.level === "L4" && mc("m1").eligibility.eligible, JSON.stringify(mc("m1").competencies[0]));
+  check("shifted Frontend block: verdict read by its values", mc("m1").competencies[0].verdict === "Strong Hire");
+  check("support Yes + Placement Status No → flagged; others not", mc("m1").supportNotPlaced === true && mc("m2").supportNotPlaced === false && mc("m3").supportNotPlaced === false);
+  check("priority: support + not placed is P1, the rest P2", priorityTier(mc("m1")) === "P1" && priorityTier(mc("m2")) === "P2" && priorityTier(mc("m3")) === "P2");
+  check("priority: a sheet without the columns → not placed is P1", priorityTier({ ...mc("m3"), supportNotPlaced: null, placement: "not-placed" }) === "P1");
+
+  const f = fillFromMaster(copy.values, master.values);
+  check("master fill: matched by UID, then by mobile; a new UID is missing", f.matched === 2 && f.missing === 1, JSON.stringify({ matched: f.matched, missing: f.missing }));
+  const nd = buildDataset({ s1: { url: "c", title: "New", tab: copy }, s2: E, s3: { url: "", title: "", tab: null }, master: { url: "m", title: "Master", tab: master } });
+  const nc = (name: string) => nd.candidates.find((x) => x.name === name)!;
+  check("master fill: blank / #REF! cells filled, sheet 1 values kept", nc("Lata").preference.includes("Backend") && nc("Lata").supportNotPlaced === true && nc("Lata").resumeUrl.endsWith("/X") && nc("Lata").competencies[0].level === "L4");
+  check("master fill: matched by mobile when the UID is blank", nc("Nila").uid === "m3" && nc("Nila").supportNotPlaced === false);
+  check("master fill: counted and warned", nd.sources.master?.matched === 2 && nd.sources.master?.missing === 1 && nd.warnings.some((w) => /not in the master sheet/.test(w)));
 }
 
 const headers = exportHeaders(ds);
