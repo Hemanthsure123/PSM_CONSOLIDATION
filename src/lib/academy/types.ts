@@ -343,7 +343,15 @@ export interface AcRules {
    * Below relyAt, resume and GitHub count at half weight and the candidate is tagged.
    */
   trust: { enabled: boolean; relyAt: number };
+  /**
+   * Who is bucketed. activePool: "yes" = only Active Pool = Yes; "not-no" = everyone except
+   * Active Pool = No (a blank counts as active — new sheets leave the column empty); "all" = every row.
+   * eligibleOnly: only candidates with an L3 / L4 level, DSA Offline cleared or old Bucket A.
+   */
+  scope: { activePool: AcPoolScope; eligibleOnly: boolean };
 }
+
+export type AcPoolScope = "yes" | "not-no" | "all";
 
 export const DEFAULT_AC_RULES: AcRules = {
   signals: { resume: true, github: true, competency: true, preference: true, dsa: true },
@@ -355,6 +363,7 @@ export const DEFAULT_AC_RULES: AcRules = {
   rankWeights: { fit: 45, assessment: 35, dsa: 20 },
   nudge: { enabled: true, minBackendShare: 50, minBackendScore: 50, maxMoves: 0 },
   trust: { enabled: true, relyAt: 60 },
+  scope: { activePool: "not-no", eligibleOnly: false },
 };
 
 /** Rules saved by an older version, filled in with today's defaults. */
@@ -368,6 +377,7 @@ export function withDefaultRules(r: Partial<AcRules> | undefined): AcRules {
     rankWeights: { ...d.rankWeights, ...r?.rankWeights },
     nudge: { ...d.nudge, ...r?.nudge },
     trust: { ...d.trust, ...r?.trust },
+    scope: { ...d.scope, ...r?.scope },
   };
 }
 

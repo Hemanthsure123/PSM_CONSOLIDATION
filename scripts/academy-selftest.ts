@@ -24,6 +24,8 @@ import {
   itemBackendShare,
   trustScore,
   MIXED_TAG,
+  inActivePool,
+  needsRead,
 } from "@/lib/academy/scoring";
 import { buildAcademyCsv, buildAcademyWorkbook, exportHeaders, tabRows } from "@/lib/academy/export";
 import { buildXlsx, crc32, safeSheetName } from "@/lib/academy/xlsx";
@@ -262,7 +264,8 @@ const results: Record<string, AcEvaluation> = {
   u6: evalOf("u6", [item("fullstack", ["react", "nodejs", "mongodb"], "internship", "production"), item("fullstack", ["react", "nodejs", "sql"])]),
   u7: evalOf("u7", []),
 };
-const rules: AcRules = DEFAULT_AC_RULES;
+// The checks below use the original scope (Active Pool = Yes and eligible); the defaults are tested after them.
+const rules: AcRules = { ...DEFAULT_AC_RULES, scope: { activePool: "yes", eligibleOnly: true } };
 const rows = rankAcademy(ds.candidates, results, rules);
 const row = (id: string) => rows.find((r) => r.id === id)!;
 check("u1 → Full Stack", row("u1").placement === "fullstack", `${row("u1").placement} ${JSON.stringify(row("u1").scores)}`);
@@ -294,6 +297,64 @@ check("assessment: Bucket A + Strong Hire = 90", row("u2").assessment.score === 
 check("DSA: old coding exam 96/120 = 80", row("u2").dsa.score === 80, String(row("u2").dsa.score));
 const sum = summarizeAcademy(rows);
 check("summary counts", sum.inScope === 5 && sum.p1 === 4 && sum.p2 === 1 && sum.byPlacement.mixed === 1, JSON.stringify(sum));
+
+// ── Scope (defaults: everyone except Active Pool = No, eligible or not) ───────
+
+check("default scope: everyone but Active Pool = No, eligibility not a gate", eq(DEFAULT_AC_RULES.scope, { activePool: "not-no", eligibleOnly: false }));
+{
+  const d = rankAcademy(ds.candidates, results, DEFAULT_AC_RULES);
+  const at = (id: string) => d.find((r) => r.id === id)!;
+  check("defaults: u4 (not eligible) is bucketed or ranked, not left out", at("u4").status !== "Not eligible" && at("u4").priority === "P1", `${at("u4").status} ${at("u4").priority}`);
+  check("defaults: u5 (Active Pool = No) stays out", at("u5").status === "Not in active pool");
+  check("inActivePool: blank counts with not-no, not with yes", inActivePool({ activePool: false, activePoolRaw: "" }, "not-no") && !inActivePool({ activePool: false, activePoolRaw: "" }, "yes"));
+  check("inActivePool: 'No' / 'no ' out, 'all' keeps them", !inActivePool({ activePool: false, activePoolRaw: "no " }, "not-no") && inActivePool({ activePool: false, activePoolRaw: "No" }, "all"));
+  check("needsRead follows the scope", needsRead(rankAcademy(ds.candidates, {}, DEFAULT_AC_RULES), DEFAULT_AC_RULES).every((r) => r.id !== "u5"));
+}
+
+// ── A new sheet: blank Active Pool, a broken preference formula, a repeated placement column ──
+
+{
+  const H = ["UID", "Name", "Email Address", "StudentNumber", "Student Preference/Call Remarks", "Placement Status", "Placement status", "Call Remarks", "Active Pool", "Resume", "Old Assessment Checks", "DSA Offline"];
+  const rowOf = (v: Record<string, string>) => H.map((h, i) => v[`${i}`] ?? v[h] ?? "");
+  const grid: AcGrid = {
+    name: "Sheet1",
+    values: [
+      H,
+      rowOf({ UID: "n1", Name: "Hari", "Student Preference/Call Remarks": "#REF!", "6": "Not Placed", "Call Remarks": "Roles/Tech: AI /ML | Location: anywhere", "Old Assessment Checks": "Bucket - A" }),
+      rowOf({ UID: "n2", Name: "Isha", "Student Preference/Call Remarks": "#REF!", "6": "Placed", "Call Remarks": "Placed in Some AI Labs but rejected the offer", "Old Assessment Checks": "Bucket - B", "DSA Offline": "27th Oct-Cleared" }),
+      rowOf({ UID: "n3", Name: "Jai", "Student Preference/Call Remarks": "#REF!", "6": "Not Placed", "Old Assessment Checks": "Bucket - D" }),
+      rowOf({ UID: "n4", Name: "Kiran", "Student Preference/Call Remarks": "#REF!", "Active Pool": "No", "Old Assessment Checks": "Bucket - A" }),
+    ],
+  };
+  const nd = buildDataset({ s1: { url: "x", title: "New", tab: grid }, s2: { url: "", title: "", tabs: [] }, s3: { url: "", title: "", tab: null } });
+  const c = (id: string) => nd.candidates.find((x) => x.id === id)!;
+  check("new sheet: a #REF! preference column is warned about", nd.warnings.some((w) => /#REF! in every row/.test(w)), nd.warnings.join(" / "));
+  check("new sheet: preference read from Call Remarks, never '#REF!'", c("n1").preference === "Roles/Tech: AI /ML | Location: anywhere" && !nd.candidates.some((x) => /#REF/.test(x.preference)));
+  check("new sheet: the filled 'Placement status' copy is used", c("n1").placement === "not-placed" && c("n2").placement === "placed", `${c("n1").placement} ${c("n2").placement}`);
+  check("preference: a placement / offer note names no stack", preferenceSignal(c("n2").preference) === null);
+  const nr = rankAcademy(nd.candidates, {}, DEFAULT_AC_RULES);
+  const at = (id: string) => nr.find((r) => r.id === id)!;
+  check("new sheet: blank Active Pool is in scope, 'No' is not", at("n1").priority === "P1" && at("n4").status === "Not in active pool");
+  check("new sheet: no resume + preference → bucketed (AI-ML) and tagged", at("n1").placement === "aiml" && /No resume/.test(at("n1").tag), `${at("n1").status} ${at("n1").placement}`);
+  const needs = nr.filter((r) => r.status === "Needs evidence");
+  check(
+    "no stack evidence → still ranked by assessments and DSA (P1 before P2)",
+    needs.length === 2 && needs.every((r) => r.priorityScore > 0) && at("n3").rank === 1 && at("n2").rank === 2,
+    needs.map((r) => `${r.id} ${r.priority} ${r.priorityScore} #${r.rank}`).join(", "),
+  );
+  check("Needs evidence tab ordered by rank", eq(tabRows(nr, "needs").map((r) => r.id), [...needs].sort((a, b) => a.rank - b.rank).map((r) => r.id)));
+}
+
+// ── Sheet 2 interview levels fill what sheet 1 leaves blank ───────────────────
+
+{
+  const base = by("u7");
+  const withIv = { ...base, competencies: base.competencies.map((k) => ({ ...k, level: "", score: null })), interviews: [{ tab: "Frontend Development", status: "completed", level: "L3", integrityScore: "", integrityNote: "", remarks: "" }] };
+  const sig = competencySignal(withIv);
+  check("competency: a sheet 2 Frontend L3 counts when sheet 1 has no level", sig !== null && sig.scores.frontend === 80, JSON.stringify(sig?.scores));
+  const both = { ...by("u1"), interviews: [{ tab: "Frontend Development", status: "completed", level: "L2", integrityScore: "", integrityNote: "", remarks: "" }] };
+  check("competency: sheet 1's level wins over sheet 2", competencySignal(both)!.scores.frontend === 100);
+}
 
 const headers = exportHeaders(ds);
 check("export headers unique", new Set(headers.map((h) => h.toLowerCase())).size === headers.length);

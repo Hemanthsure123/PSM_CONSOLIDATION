@@ -8,6 +8,7 @@ import {
   type AcEvaluation,
   type AcGithubRepo,
   type AcPlacement,
+  type AcPoolScope,
   type AcResumeItem,
   type AcRules,
   type AcScores,
@@ -16,6 +17,7 @@ import {
   type AcTrustFlag,
   type AcTrustSeverity,
 } from "@/lib/academy/types";
+import { competencyBucket, competencyName } from "@/lib/academy/parse";
 
 /**
  * Academy bucketing — the program's decisions, in the browser. Pure: changing a
@@ -300,6 +302,16 @@ export function competencySignal(c: AcCandidate): CompetencySignal | null {
     if (k.bucket === "frontend" || k.bucket === "backend") observes.fullstack = 1;
     used.push(`${k.name} ${k.level || `${k.score}/100`}`);
   }
+  // A stack sheet 1 has no level for: the latest sheet 2 interview of that stack (new sheets leave the levels blank).
+  for (const iv of c.interviews ?? []) {
+    const bucket = competencyBucket(competencyName(iv.tab));
+    const v = bucket && observes[bucket] < 1 ? levelValue(iv.level) : null;
+    if (!bucket || v === null) continue;
+    s[bucket] = Math.max(s[bucket], v);
+    observes[bucket] = 1;
+    if (bucket === "frontend" || bucket === "backend") observes.fullstack = 1;
+    used.push(`${iv.tab} interview ${iv.level}`);
+  }
   if (!used.length) return null;
   // A frontend (or backend) interview proves most of what full-stack work needs, not the other side:
   // it counts 0.8 toward Full Stack (both together count their average), so the interview backs the
@@ -316,7 +328,7 @@ const PREF_PATTERNS: [AcBucket, RegExp][] = [
   ["frontend", /front[\s-]*end|\breact(?:\.?js)?\b(?![\s-]*native)|\bui developer\b|\bweb developer\b|\bangular\b|\bvue(?:\.?js)?\b/gi],
 ];
 /** Parts of the preference note that are about logistics, not stacks. */
-const PREF_NOISE = /^\s*"?\s*(location|preferred location|ctc|expected|package|bond|noc|immediate|opportunity|availability|current|exam|stipend|priority)/i;
+const PREF_NOISE = /^\s*"?\s*(location|preferred location|ctc|expected|package|bond|noc|immediate|opportunity|availability|current|exam|stipend|priority|placed|offer)/i;
 const PREF_RANK = [100, 80, 65, 50];
 
 export interface PreferenceSignal {
@@ -550,6 +562,26 @@ export const SIGNAL_LABEL: Record<AcSignalKey, string> = { resume: "Resume", git
 
 export const MIXED_TAG = "Verify over call on priority";
 
+/** Active Pool by the rules' scope: "Yes" only, anything but "No" (a blank counts), or every row. */
+export function inActivePool(c: Pick<AcCandidate, "activePool" | "activePoolRaw">, scope: AcPoolScope): boolean {
+  if (scope === "all") return true;
+  if (scope === "yes") return c.activePool;
+  return !/^\s*no\b/i.test(c.activePoolRaw);
+}
+
+/** Bucketed under these rules (eligibility and Active Pool; placed candidates are left to `includePlaced`). */
+export function inScope(c: AcCandidate, rules: AcRules): boolean {
+  return (!rules.scope.eligibleOnly || c.eligibility.eligible) && inActivePool(c, rules.scope.activePool);
+}
+
+/** "Everyone except Active Pool = No · eligible or not" — for the screens and the workbook. */
+export function scopeLabel(rules: AcRules): string {
+  const pool = { yes: "Active Pool = Yes", "not-no": "Everyone except Active Pool = No (blank counts)", all: "Every row (Active Pool ignored)" }[rules.scope.activePool];
+  return `${pool} · ${rules.scope.eligibleOnly ? "eligible only (L3 / L4, DSA Offline cleared or old Bucket A)" : "eligible or not"}`;
+}
+
+const OUT_OF_SCOPE = new Set<AcStatus>(["Not eligible", "Not in active pool", "Placed – not bucketed"]);
+
 export interface AcRanked {
   id: string;
   candidate: AcCandidate;
@@ -736,6 +768,16 @@ function priorityOf(fit: number, coverage: number, assessment: Basis, dsa: Basis
   return Math.round(base * factor * 10) / 10;
 }
 
+/** Priority score with no stack to fit: assessments and DSA only (a Needs-evidence candidate is still ranked). */
+function readinessOf(assessment: Basis, dsa: Basis, trust: AcTrust | null, rules: AcRules): number {
+  const w = rules.rankWeights;
+  const parts: [number, number][] = [[w.assessment, assessment.score], ...(rules.signals.dsa ? ([[w.dsa, dsa.score]] as [number, number][]) : [])];
+  const W = parts.reduce((x, [k]) => x + k, 0);
+  const base = W ? parts.reduce((x, [k, v]) => x + k * v, 0) / W : 0;
+  const factor = trust && trust.score !== null ? 0.6 + 0.4 * (trust.score / 100) : 1;
+  return Math.round(base * factor * 10) / 10;
+}
+
 const half = (s: SignalInput): SignalInput => (s ? { ...s, observes: Object.fromEntries(AC_BUCKETS.map((b) => [b, (s.observes ?? ALL_OBSERVED)[b] * 0.5])) as AcScores } : s);
 
 /** Bucket every candidate and rank each bucket. */
@@ -745,7 +787,7 @@ export function rankAcademy(candidates: AcCandidate[], results: Record<string, A
     const e = results[c.id];
     const assessment = assessmentScore(c);
     const dsa = dsaStrength(c, e, rules.signals.dsa);
-    const priority: AcRanked["priority"] = c.activePool ? (c.placement === "placed" ? "P2" : "P1") : "";
+    const priority: AcRanked["priority"] = inScope(c, rules) ? (c.placement === "placed" ? "P2" : "P1") : "";
     const base: Omit<AcRanked, "reasons" | "rank"> = {
       id: c.id,
       candidate: c,
@@ -769,8 +811,8 @@ export function rankAcademy(candidates: AcCandidate[], results: Record<string, A
       tag: "",
       suggested: null,
     };
-    if (!c.eligibility.eligible) return { ...base, rank: 0, reasons: ["Sheet 1: no L3 / L4 competency, DSA Offline not cleared, not old Bucket A"] };
-    if (!c.activePool) return { ...base, status: "Not in active pool", rank: 0, reasons: [`Active Pool: ${c.activePoolRaw || "blank"}`] };
+    if (rules.scope.eligibleOnly && !c.eligibility.eligible) return { ...base, rank: 0, reasons: ["Sheet 1: no L3 / L4 competency, DSA Offline not cleared, not old Bucket A"] };
+    if (!inActivePool(c, rules.scope.activePool)) return { ...base, status: "Not in active pool", rank: 0, reasons: [`Active Pool: ${c.activePoolRaw || "blank"}`] };
     if (c.placement === "placed" && !rules.includePlaced) return { ...base, status: "Placed – not bucketed", rank: 0, reasons: ["Already placed (switched off in the rules)"] };
 
     const signals = {
@@ -800,6 +842,7 @@ export function rankAcademy(candidates: AcCandidate[], results: Record<string, A
         used: fallback.used,
         suggested: s.placement && s.placement !== "mixed" ? s.placement : s.mixedWith[0] ?? null,
         tag: "Resume read failed — re-run",
+        priorityScore: readinessOf(assessment, dsa, trust, rules),
         rank: 0,
         reasons: [`Resume: ${e.error}`],
       };
@@ -814,6 +857,7 @@ export function rankAcademy(candidates: AcCandidate[], results: Record<string, A
         scores,
         used,
         tag: "No stack evidence — collect resume / verify over call",
+        priorityScore: readinessOf(assessment, dsa, trust, rules),
         rank: 0,
         reasons: [
           !c.resumeUrl
@@ -822,6 +866,7 @@ export function rankAcademy(candidates: AcCandidate[], results: Record<string, A
               ? `Resume can't be read: ${e.error}`
               : "The resume shows no frontend, backend, AI-ML or full-stack work",
           "No competency level or stack preference to go on",
+          `Ranked by assessments and DSA: ${assessment.basis}${rules.signals.dsa ? ` · ${dsa.basis}` : ""}`,
         ],
       };
     }
@@ -887,8 +932,9 @@ export function rankAcademy(candidates: AcCandidate[], results: Record<string, A
   const oldTier = (r: AcRanked) => ({ A: 1, B: 2, C: 3, D: 4, "": 5 })[r.candidate.oldBucket];
   const byPlacement = new Map<string, AcRanked[]>();
   for (const r of rows) {
-    if (!r.placement) continue;
-    byPlacement.set(r.placement, [...(byPlacement.get(r.placement) ?? []), r]);
+    const group = r.placement ?? (r.status === "Needs evidence" ? "needs" : null);
+    if (!group) continue;
+    byPlacement.set(group, [...(byPlacement.get(group) ?? []), r]);
   }
   for (const list of byPlacement.values()) {
     list.sort(
@@ -929,7 +975,7 @@ export interface AcSummary {
 export function summarizeAcademy(rows: AcRanked[]): AcSummary {
   const byPlacement: Record<AcPlacement, number> = { frontend: 0, backend: 0, aiml: 0, fullstack: 0, mixed: 0 };
   for (const r of rows) if (r.placement) byPlacement[r.placement]++;
-  const inScope = rows.filter((r) => r.candidate.eligibility.eligible && r.candidate.activePool && r.status !== "Placed – not bucketed");
+  const inScope = rows.filter((r) => !OUT_OF_SCOPE.has(r.status));
   const trust: Record<AcTrustBand, number> = { High: 0, Medium: 0, Low: 0, Unverified: 0 };
   for (const r of inScope) if (r.trust) trust[r.trust.band]++;
   return {
@@ -957,7 +1003,7 @@ export function summarizeAcademy(rows: AcRanked[]): AcSummary {
 export function needsRead(rows: AcRanked[], rules: AcRules): AcRanked[] {
   return rows.filter((r) => {
     const c = r.candidate;
-    if (!c.eligibility.eligible || !c.activePool || !c.resumeUrl || !rules.signals.resume) return false;
+    if (!inScope(c, rules) || !c.resumeUrl || !rules.signals.resume) return false;
     if (c.placement === "placed" && !rules.includePlaced) return false;
     const e = r.result;
     if (!e) return true;
@@ -969,7 +1015,7 @@ export function needsRead(rows: AcRanked[], rules: AcRules): AcRanked[] {
 export function staleReads(rows: AcRanked[], rules: AcRules): AcRanked[] {
   return rows.filter((r) => {
     const e = r.result;
-    if (!e || e.status === "error" || !r.candidate.activePool || !r.candidate.eligibility.eligible) return false;
+    if (!e || e.status === "error" || !inScope(r.candidate, rules)) return false;
     if (e.version < AC_EVAL_VERSION) return true;
     if (e.status !== "ok") return false;
     return (rules.signals.github && !e.read.github) || (rules.signals.dsa && !e.read.dsa) || (rules.trust.enabled && !e.read.trust);

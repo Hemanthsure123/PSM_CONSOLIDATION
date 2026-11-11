@@ -1,7 +1,7 @@
 import { toCsv } from "@/lib/utils";
 import type { DsaPlatformResult } from "@/lib/dsa-types";
 import { bestRating } from "@/lib/dsa-scoring";
-import { summarizeAcademy, SIGNAL_LABEL, type AcRanked } from "@/lib/academy/scoring";
+import { scopeLabel, summarizeAcademy, SIGNAL_LABEL, type AcRanked } from "@/lib/academy/scoring";
 import {
   AC_BUCKETS,
   AC_BUCKET_LABEL,
@@ -44,7 +44,13 @@ export function tabRows(rows: AcRanked[], tab: AcTab): AcRanked[] {
       r.placement ? AC_TABS.indexOf(r.placement) : { "Needs evidence": 5, Pending: 6, "Placed – not bucketed": 7, "Not in active pool": 8, "Not eligible": 9 }[r.status as string] ?? 10;
     return [...rows].sort((a, b) => order(a) - order(b) || a.rank - b.rank || a.candidate.sheetRow - b.candidate.sheetRow);
   }
-  if (tab === "needs") return rows.filter((r) => r.status === "Needs evidence" || r.status === "Pending").sort((a, b) => a.candidate.sheetRow - b.candidate.sheetRow);
+  if (tab === "needs") {
+    // Needs evidence first, by their rank (assessments and DSA), then the resumes still to read.
+    const order = (r: AcRanked) => (r.status === "Needs evidence" ? 0 : 1);
+    return rows
+      .filter((r) => r.status === "Needs evidence" || r.status === "Pending")
+      .sort((a, b) => order(a) - order(b) || (a.rank || 1e9) - (b.rank || 1e9) || a.candidate.sheetRow - b.candidate.sheetRow);
+  }
   return rows.filter((r) => r.placement === tab).sort((a, b) => a.rank - b.rank);
 }
 
@@ -83,7 +89,7 @@ function computed(r: AcRanked): Record<string, string> {
     Tag: r.tag,
     Priority: PRIORITY_LABEL[r.priority],
     "Bucket Confidence": r.confidence,
-    "Priority Score": r.placement ? String(r.priorityScore) : "",
+    "Priority Score": r.placement || r.status === "Needs evidence" ? String(r.priorityScore) : "",
     "Bucket Fit": r.placement ? String(r.fit) : "",
     "Evidence Coverage (%)": r.placement ? String(Math.round(r.coverage * 100)) : "",
     ...Object.fromEntries(AC_BUCKETS.map((b) => [`${AC_BUCKET_LABEL[b]} Score`, r.used.length ? String(r.scores[b]) : ""])),
@@ -234,7 +240,7 @@ function summarySheet(title: string, ds: AcDataset, rows: AcRanked[], rules: AcR
     ["", ""],
     ["Candidates in sheet 1", s.candidates],
     ["Eligible (L3/L4 competency, DSA Offline cleared, or old Bucket A)", s.eligible],
-    ["Eligible and Active Pool = Yes (in scope)", s.inScope],
+    [`In scope (${scopeLabel(rules)})`, s.inScope],
     ["  P1 · Active, not placed", s.p1],
     ["  P2 · Active, placed", s.p2],
     ...AC_BUCKETS.map((b) => [`${AC_BUCKET_LABEL[b]}`, s.byPlacement[b]] as [string, number]),

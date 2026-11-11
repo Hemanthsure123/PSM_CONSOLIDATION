@@ -20,7 +20,7 @@ import { AC_CONCURRENCY_OPTIONS, AcademyResults } from "@/components/academy/aca
 import { previewAcademySheet, readAcademyTabs, type AcademySheetPreview } from "@/actions/academy";
 import { runQueue } from "@/lib/parallel-queue";
 import { buildDataset, pickCompetencyTabs, pickMasterTab, pickOldProcessTab } from "@/lib/academy/parse";
-import { needsRead, rankAcademy, summarizeAcademy } from "@/lib/academy/scoring";
+import { inScope, needsRead, rankAcademy, scopeLabel, summarizeAcademy } from "@/lib/academy/scoring";
 import { getAcRun, lastAcLinks, newAcRunId, rememberAcLinks, saveAcDataset, saveAcResult, saveAcRunMeta } from "@/lib/academy/store";
 import { DEFAULT_AC_RULES, failedAcEvaluation, withDefaultRules, type AcCandidate, type AcDataset, type AcEvalRequest, type AcEvaluation, type AcRules, type AcRunMeta } from "@/lib/academy/types";
 
@@ -364,7 +364,7 @@ export function AcademyBucketing({ runId, onDone }: Props) {
     if (!dataset) return null;
     const rows = rankAcademy(dataset.candidates, {}, rules);
     const s = summarizeAcademy(rows);
-    const scope = dataset.candidates.filter((c) => c.eligibility.eligible && c.activePool && (rules.includePlaced || c.placement !== "placed"));
+    const scope = dataset.candidates.filter((c) => inScope(c, rules) && (rules.includePlaced || c.placement !== "placed"));
     return {
       s,
       withResume: scope.filter((c) => c.resumeUrl).length,
@@ -515,11 +515,11 @@ export function AcademyBucketing({ runId, onDone }: Props) {
       ))}
 
       {dataset && preview ? (
-        <Panel icon={<Users />} title="What was found" description="Eligibility from sheet 1: an L3 / L4 competency, DSA Offline cleared, or old Bucket A.">
+        <Panel icon={<Users />} title="What was found" description={scopeLabel(rules)}>
           <StatGrid cols={4}>
             <Stat label="In sheet 1" value={preview.s.candidates} />
             <Stat label="Eligible" value={preview.s.eligible} />
-            <Stat label="Eligible + Active Pool" value={preview.s.inScope} tone="highlight" hint={`P1 ${preview.s.p1} · P2 ${preview.s.p2}`} />
+            <Stat label="In scope" value={preview.s.inScope} tone="highlight" hint={`P1 ${preview.s.p1} · P2 ${preview.s.p2}`} />
             <Stat label="Resumes to read" value={preview.toRead} hint={`${preview.noResume} without a resume`} />
           </StatGrid>
           <div className="mt-4 flex flex-wrap gap-1.5 text-[13px]">

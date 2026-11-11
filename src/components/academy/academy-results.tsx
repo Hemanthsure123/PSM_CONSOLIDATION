@@ -39,7 +39,7 @@ import { Stat, StatGrid } from "@/components/ui/stat";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { AcNudgePanel, AcRulesCard, AcSignalsPanel } from "@/components/academy/academy-rules";
 import { AC_TABS, AC_TAB_LABEL, buildAcademyCsv, buildAcademyWorkbook, tabRows, type AcTab } from "@/lib/academy/export";
-import { itemBackendShare, needsRead, rankAcademy, SIGNAL_LABEL, staleReads, summarizeAcademy, type AcRanked, type AcSignalKey, type AcTrust } from "@/lib/academy/scoring";
+import { inScope, itemBackendShare, needsRead, rankAcademy, scopeLabel, SIGNAL_LABEL, staleReads, summarizeAcademy, type AcRanked, type AcSignalKey, type AcTrust } from "@/lib/academy/scoring";
 import { AC_BUCKETS, AC_BUCKET_LABEL, AC_PLACEMENT_LABEL, type AcBucket, type AcCandidate, type AcDataset, type AcEvaluation, type AcPlacement, type AcRules, type AcStack } from "@/lib/academy/types";
 import { cn, slugify } from "@/lib/utils";
 
@@ -475,10 +475,10 @@ export function AcademyResults({
   const sum = React.useMemo(() => summarizeAcademy(ranking), [ranking]);
   const toRead = React.useMemo(() => needsRead(ranking, rules), [ranking, rules]);
   const stale = React.useMemo(() => staleReads(ranking, rules), [ranking, rules]);
-  const inScope = (r: AcRanked) => r.candidate.activePool && r.candidate.eligibility.eligible;
-  const failed = ranking.filter((r) => inScope(r) && r.result?.status === "error" && r.result.retryable);
-  const unreadable = ranking.filter((r) => inScope(r) && r.result?.status === "error" && !r.result.retryable);
-  const readable = ranking.filter((r) => r.candidate.eligibility.eligible && r.candidate.activePool && r.candidate.resumeUrl && r.status !== "Placed – not bucketed");
+  const scoped = (r: AcRanked) => inScope(r.candidate, rules);
+  const failed = ranking.filter((r) => scoped(r) && r.result?.status === "error" && r.result.retryable);
+  const unreadable = ranking.filter((r) => scoped(r) && r.result?.status === "error" && !r.result.retryable);
+  const readable = ranking.filter((r) => scoped(r) && r.candidate.resumeUrl && r.status !== "Placed – not bucketed");
   const readDone = readable.length - toRead.length;
   const pct = readable.length ? Math.round((readDone / readable.length) * 100) : 100;
 
@@ -578,7 +578,7 @@ export function AcademyResults({
           </div>
           <p className="text-[13px] text-muted-foreground">
             Sheet 1: <span className="tabular-nums">{sum.candidates}</span> candidates · <span className="tabular-nums">{sum.eligible}</span> eligible ·{" "}
-            <span className="font-medium text-foreground tabular-nums">{sum.inScope}</span> eligible and in the Active Pool (P1 not placed{" "}
+            <span className="font-medium text-foreground tabular-nums">{sum.inScope}</span> in scope — {scopeLabel(rules).toLowerCase()} (P1 not placed{" "}
             <span className="tabular-nums">{sum.p1}</span> · P2 placed <span className="tabular-nums">{sum.p2}</span>) ·{" "}
             <span className="tabular-nums">{sum.toVerify}</span> tagged to verify over call
             {rules.trust.enabled ? (

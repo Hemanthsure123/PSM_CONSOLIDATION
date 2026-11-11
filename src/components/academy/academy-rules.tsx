@@ -7,8 +7,15 @@ import { Field } from "@/components/ui/field";
 import { InfoHint } from "@/components/ui/info-hint";
 import { Input } from "@/components/ui/input";
 import { Panel } from "@/components/ui/panel";
+import { NativeSelect } from "@/components/ui/select";
 import { SettingList, SettingRow } from "@/components/ui/setting-row";
-import type { AcRules } from "@/lib/academy/types";
+import type { AcPoolScope, AcRules } from "@/lib/academy/types";
+
+const POOL_SCOPES: { value: AcPoolScope; label: string }[] = [
+  { value: "not-no", label: "Everyone except Active Pool = No (blank counts)" },
+  { value: "yes", label: "Only Active Pool = Yes" },
+  { value: "all", label: "Every row (ignore Active Pool)" },
+];
 
 const SIGNALS: { key: keyof AcRules["signals"]; title: string; description: string; info: string; icon: React.ReactNode }[] = [
   {
@@ -108,7 +115,7 @@ export function AcSignalsPanel({ rules, onChange, collapsed }: { rules: AcRules;
 /** The bucketing rules — rarely changed, so closed by default. Changing one re-buckets instantly. */
 export function AcRulesCard({ rules, onChange }: { rules: AcRules; onChange: (r: AcRules) => void }) {
   const set = (patch: Partial<AcRules>) => onChange({ ...rules, ...patch });
-  const summary = `Mixed within ${rules.mixedMargin} pts (both ≥ ${rules.mixedMinScore})${rules.feBeAsFullStack ? " · FE + BE = Full Stack" : ""}${rules.includePlaced ? "" : " · placed left out"}`;
+  const summary = `${POOL_SCOPES.find((p) => p.value === rules.scope.activePool)?.label ?? ""}${rules.scope.eligibleOnly ? " · eligible only" : ""} · Mixed within ${rules.mixedMargin} pts (both ≥ ${rules.mixedMinScore})${rules.feBeAsFullStack ? " · FE + BE = Full Stack" : ""}${rules.includePlaced ? "" : " · placed left out"}`;
   return (
     <Disclosure title="Bucketing rules" summary={summary}>
       <div className="space-y-5">
@@ -121,6 +128,35 @@ export function AcRulesCard({ rules, onChange }: { rules: AcRules; onChange: (r:
             Stack, beside a close AI-ML it makes Mixed (Full Stack + AI-ML).
           </InfoHint>
         </p>
+        <div className="space-y-3">
+          <Field
+            label="Who is bucketed"
+            htmlFor="ac-scope-pool"
+            hint="New sheets often leave Active Pool empty — a blank then counts as active"
+            className="sm:max-w-md"
+          >
+            <NativeSelect
+              id="ac-scope-pool"
+              value={rules.scope.activePool}
+              onChange={(e) => set({ scope: { ...rules.scope, activePool: e.target.value as AcPoolScope } })}
+            >
+              {POOL_SCOPES.map((p) => (
+                <option key={p.value} value={p.value}>
+                  {p.label}
+                </option>
+              ))}
+            </NativeSelect>
+          </Field>
+          <SettingList>
+            <SettingRow
+              id="ac-eligible-only"
+              title="Only eligible candidates"
+              description="An L3 / L4 level, DSA Offline cleared or old Bucket A in sheet 1. Off: everyone in scope is bucketed and eligibility is a column."
+              checked={rules.scope.eligibleOnly}
+              onCheckedChange={(v) => set({ scope: { ...rules.scope, eligibleOnly: v } })}
+            />
+          </SettingList>
+        </div>
         <div className="grid gap-4 sm:grid-cols-2">
           <Field label="Mixed when within (points)" htmlFor="ac-margin" hint="Second bucket this close to the first">
             <Input id="ac-margin" type="number" min={0} max={50} className="tabular-nums" value={rules.mixedMargin} onChange={(e) => set({ mixedMargin: num(e.target.value, 0, 50) })} />

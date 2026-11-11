@@ -117,6 +117,35 @@ const findCol = (base: string[], re: RegExp, from = 0) => {
   return -1;
 };
 
+/** A spreadsheet error shown instead of a value (a broken formula): never data. */
+export const SHEET_ERROR = /^#(REF!|N\/A|VALUE!|DIV\/0!|NAME\?|NUM!|NULL!|ERROR!|SPILL!|CALC!)/i;
+const clean = (v: unknown) => (SHEET_ERROR.test(norm(v)) ? "" : norm(v));
+
+/** Every column whose header matches, with how many rows hold a real value (sheet errors don't count). */
+function filledCols(base: string[], rows: string[][], re: RegExp): { i: number; filled: number; errors: number }[] {
+  return base
+    .map((b, i) => ({ b, i }))
+    .filter(({ b }) => re.test(b))
+    .map(({ i }) => ({
+      i,
+      filled: rows.filter((r) => clean((r ?? [])[i])).length,
+      errors: rows.filter((r) => SHEET_ERROR.test(norm((r ?? [])[i]))).length,
+    }));
+}
+
+/** The matching column holding the most values ("Placement Status" can repeat with one copy left empty); -1 = none. */
+function fullestCol(base: string[], rows: string[][], re: RegExp): number {
+  let best = -1;
+  let most = -1;
+  for (const c of filledCols(base, rows, re)) {
+    if (c.filled > most) {
+      most = c.filled;
+      best = c.i;
+    }
+  }
+  return best;
+}
+
 /** "Frontend Levels" → Frontend; competency → the bucket it speaks for (DSA / SE speak for none). */
 export function competencyName(raw: string): string {
   const s = raw.trim();
@@ -254,6 +283,15 @@ export function buildDataset(src: AcRawSources, loadedAt = new Date().toISOStrin
   const hr = detectHeaderRow(g1);
   const { base, labels } = columnLabels(g1, hr);
   const col = (re: RegExp) => findCol(base, re);
+  const dataRows = g1.slice(hr + 1).filter((r) => (r ?? []).some((c) => norm(c)));
+  // The student's stack preference: the preference note and the call remarks ("Roles/Tech: …").
+  const prefCols = filledCols(base, dataRows, /preference|call remarks/i);
+  for (const p of prefCols) {
+    if (p.errors && !p.filled) {
+      const shown = norm(dataRows.find((r) => SHEET_ERROR.test(norm((r ?? [])[p.i])))?.[p.i]);
+      warnings.push(`Sheet 1 "${base[p.i]}" (column ${columnLetter(p.i)}) shows ${shown} in every row — a broken formula; fix it in the sheet. Other preference / call remarks columns are used.`);
+    }
+  }
   const C = {
     uid: col(/^(uid|user\s*id)$/i),
     name: col(/^(name|student name|candidate name)$/i),
@@ -261,8 +299,7 @@ export function buildDataset(src: AcRawSources, loadedAt = new Date().toISOStrin
     mobile: col(/^(number|mobile( number)?|phone( number)?|contact( number)?)$/i),
     resume: col(/^resume/i),
     active: col(/active\s*pool/i),
-    placement: col(/placement info|placement status|placed\b/i),
-    preference: col(/preference/i),
+    placement: fullestCol(base, dataRows, /placement info|placement status|placed\b/i),
     dsaOffline: col(/^dsa offline/i),
     oldBucket: col(/old assessment/i),
   };
@@ -370,8 +407,8 @@ export function buildDataset(src: AcRawSources, loadedAt = new Date().toISOStrin
     const competencies: AcCompetency[] = comp.map((c) => ({
       name: c.name,
       bucket: competencyBucket(c.name),
-      level: cell(c.level),
-      score: num(cell(c.score)),
+      level: clean(r[c.level]),
+      score: num(clean(r[c.score])),
       verdict: cell(c.verdict),
       clearance: cell(c.clearance),
     }));
@@ -432,11 +469,11 @@ export function buildDataset(src: AcRawSources, loadedAt = new Date().toISOStrin
       email,
       mobile: cell(C.mobile) || (C.mobile >= 0 ? values[`s1:${C.mobile}`] ?? "" : ""),
       resumeUrl: /^https?:\/\//i.test(cell(C.resume)) ? cell(C.resume) : "",
-      activePool: /^yes\b/i.test(cell(C.active)),
-      activePoolRaw: cell(C.active),
-      placement: placementOf(cell(C.placement)),
-      placementRaw: cell(C.placement),
-      preference: cell(C.preference),
+      activePool: /^yes\b/i.test(clean(r[C.active])),
+      activePoolRaw: C.active >= 0 ? clean(r[C.active]) : "",
+      placement: placementOf(C.placement >= 0 ? clean(r[C.placement]) : ""),
+      placementRaw: C.placement >= 0 ? clean(r[C.placement]) : "",
+      preference: [...new Set(prefCols.map((p) => clean(r[p.i])).filter(Boolean))].join(" | "),
       dsaOffline,
       oldBucket,
       competencies,
