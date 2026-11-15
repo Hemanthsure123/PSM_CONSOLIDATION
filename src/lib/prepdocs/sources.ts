@@ -17,7 +17,7 @@ import { withTeam } from "@/lib/team/google";
 
 export interface SourceText {
   url: string;
-  kind: "drilldown" | "transcript" | "website";
+  kind: "drilldown" | "transcript" | "rsa" | "website";
   title: string;
   modifiedAt: string | null;
   text: string;
@@ -49,8 +49,12 @@ export async function readDriveText(url: string): Promise<{ title: string; modif
   const mime = meta.mimeType ?? "";
   const modifiedAt = meta.modifiedTime ?? null;
   if (mime === "application/vnd.google-apps.document" && (await docsAvailable())) {
-    const doc = await readTabsText(id, null);
-    return { title: meta.name ?? doc.title, modifiedAt, text: doc.text.slice(0, MAX_DOC_CHARS) };
+    // Every tab and table through the Docs API; if that fails, the plain export below still works.
+    const doc = await readTabsText(id, null).catch((err) => {
+      console.warn("[prep-docs] Docs API read failed, exporting instead:", err instanceof Error ? err.message.slice(0, 120) : err);
+      return null;
+    });
+    if (doc) return { title: meta.name ?? doc.title, modifiedAt, text: doc.text.slice(0, MAX_DOC_CHARS) };
   }
   let text = "";
   if (mime === "application/vnd.google-apps.document" || mime === "application/vnd.google-apps.presentation") {
@@ -132,7 +136,7 @@ async function readDocTabs(url: string, tabs: string[]): Promise<{ title: string
 }
 
 export async function readSources(
-  picks: { url: string; kind: "drilldown" | "transcript"; tabs?: string[] }[],
+  picks: { url: string; kind: "drilldown" | "transcript" | "rsa"; tabs?: string[] }[],
   website: string | null,
   names: string[],
 ): Promise<SourceText[]> {

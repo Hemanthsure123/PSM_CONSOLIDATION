@@ -1,13 +1,13 @@
 /**
  * Self-test for the prep actions' pure parts (documents, meetings, calls) (no network, no database):
  *   npx tsx scripts/prep-actions-selftest.ts
- * Prep document normalising / rendering (HTML, Notion limits), source redaction, email MIME and
+ * Prep document normalising / rendering (text, Notion limits), source redaction, email MIME and
  * calendar invites (header injection, line folding), message drafts, call summary cells.
  */
 import "./server-only-shim";
 import assert from "node:assert/strict";
 import { normalizePrepDoc, selectSections } from "@/lib/prepdocs/model";
-import { renderHtml, renderNotionBlocks, renderText } from "@/lib/prepdocs/render";
+import { renderNotionBlocks, renderText } from "@/lib/prepdocs/render";
 import { redact } from "@/lib/prepdocs/sources";
 import { buildIcs, buildMime } from "@/lib/team/mail";
 import { istLabel, messageLine, withEntry } from "@/lib/team/sheetlog";
@@ -28,45 +28,45 @@ function test(name: string, fn: () => void) {
 const EMOJI = /\p{Extended_Pictographic}/u;
 
 const raw = {
-  title: "Stan SDE Intern 🚀 Technical Round 1 Prep",
-  subtitle: "Read this before your interview",
+  sourceLine: "Built from a previously appeared candidate's round 🚀",
   overview: [
-    { label: "Company", value: "Stan" },
-    { label: "Round", value: "Technical Round 1" },
-  ],
-  links: [
-    { label: "Website", url: "https://stan.store" },
-    { label: "Bad", url: "javascript:alert(1)" },
+    { label: "What this round is", value: "A 45-minute technical round." },
+    { label: "What they test", value: "Arrays, hashing and your project." },
   ],
   startHere: ["Revise arrays and hashing first.", "Practise explaining your project in 2 minutes."],
   aboutCompany: ["Stan helps creators sell online."],
-  whyItMatters: "They ask about product thinking.",
-  sayAloud: "I like building tools creators use every day.",
   sections: Array.from({ length: 6 }, (_, i) => ({
-    title: `Topic ${i + 1}`,
-    tags: ["Must know", "Not a tag"],
-    why: "Asked in every report.",
+    title: `${i + 1}. Topic ${i + 1}`,
+    tag: i < 5 ? "HIGHEST PRIORITY" : "Must know",
+    intro: "Asked in every report.",
     topics: [{ name: "Two pointers", revise: "Sorted array pair sum." }],
-    questionsKind: "asked",
-    questions: [`Question ${i + 1}: find two numbers that add up to a target.`, "x".repeat(2500)],
-    method: ["Clarify", "Brute force", "Optimise"],
-    callout: i === 0 ? { kind: "priority", text: "Most asked." } : null,
+    asked: [`Find two numbers in a sorted array that add up to a target`, "Explain how a hash map handles collisions"],
+    practise: [],
+    grid: null,
+    box: i === 0 ? { label: "Not a label", body: ["Most asked."] } : null,
   })),
-  checklistBefore: ["Test your camera."],
-  checklistDuring: ["Think aloud."],
-  summary: "Focus on arrays, hashing and your project.",
+  checklist: { beforeHeading: "The night before", before: ["Test your camera."], duringHeading: "In the round", during: ["Think aloud."] },
+  inShort: "In short: focus on arrays, hashing and your project.",
+  sources: [
+    { title: "Website", url: "https://stan.store" },
+    { title: "Bad", url: "javascript:alert(1)" },
+  ],
   changes: [],
   unverified: [],
   noInterviewReports: false,
 };
 
-test("normalizePrepDoc removes emojis and unsafe links", () => {
+test("normalizePrepDoc removes emojis, unsafe links and numbering; keeps the vocabularies", () => {
   const doc = normalizePrepDoc(raw);
   assert.ok(doc);
   assert.equal(EMOJI.test(JSON.stringify(doc)), false);
-  assert.equal(doc.links.some((l) => l.url.startsWith("javascript:")), false);
+  assert.equal(doc.sources.some((l) => l.url.startsWith("javascript:")), false);
   assert.ok(doc.sections.length >= 5);
-  assert.ok(doc.sections.every((s) => s.questions.length >= 1));
+  assert.equal(doc.sections[0].title, "Topic 1");
+  assert.equal(doc.sections.filter((s) => s.tag).length, 3, "at most 3 priority tags");
+  assert.equal(doc.sections[5].tag, "", "unknown tag dropped");
+  assert.equal(doc.sections[0].box?.label, "WHAT TO KEEP IN MIND", "unknown box label replaced");
+  assert.equal(doc.inShort.startsWith("In short"), false);
 });
 
 test("normalizePrepDoc rejects junk", () => {
@@ -78,21 +78,20 @@ test("selectSections keeps the chosen parts only", () => {
   const doc = normalizePrepDoc(raw)!;
   const only = selectSections(doc, ["topics"]);
   assert.equal(only.startHere.length, 0);
-  assert.equal(only.checklistBefore.length, 0);
+  assert.equal(only.checklist.before.length, 0);
+  assert.equal(only.inShort, "");
   assert.ok(only.sections.length > 0);
 });
 
-test("renderHtml escapes text and includes every question", () => {
-  const doc = normalizePrepDoc({ ...raw, summary: "<script>alert(1)</script>" })!;
-  const html = renderHtml(doc);
-  assert.equal(html.includes("<script>"), false);
-  assert.ok(html.includes("&lt;script&gt;"));
-  for (const s of doc.sections) for (const q of s.questions) assert.ok(html.includes(q.slice(0, 40).replace(/&/g, "&amp;")), `missing question ${q.slice(0, 20)}`);
-  assert.ok(renderText(doc).includes("SUMMARY"));
+test("renderText includes every question and the fixed headings", () => {
+  const doc = normalizePrepDoc(raw)!;
+  const text = renderText(doc);
+  for (const s of doc.sections) for (const q of s.asked) assert.ok(text.includes(q), `missing question ${q.slice(0, 20)}`);
+  assert.ok(text.includes("START HERE") && text.includes("IN SHORT") && text.includes("Questions asked in real interviews"));
 });
 
 test("Notion blocks respect the 2,000-character rich-text limit", () => {
-  const blocks = renderNotionBlocks(normalizePrepDoc(raw)!);
+  const blocks = renderNotionBlocks(normalizePrepDoc({ ...raw, startHere: ["x".repeat(2500)] })!);
   assert.ok(blocks.length > 10);
   const walk = (v: unknown): void => {
     if (Array.isArray(v)) return v.forEach(walk);

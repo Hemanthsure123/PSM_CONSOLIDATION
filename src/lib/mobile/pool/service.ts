@@ -17,6 +17,7 @@ import {
 import { lastPoolSync } from "@/lib/mobile/pool/sync";
 import { assessmentInfo, type AssessmentScore } from "@/lib/pool/scores/catalogue";
 import { scoresFor } from "@/lib/pool/scores/queries";
+import { rsaDocumentsForPhone } from "@/lib/rsa/list";
 
 /**
  * Academy priority pool — what the app reads and what mentors change.
@@ -395,7 +396,7 @@ export async function poolDetail(user: RosterUser, uid: string) {
   const roster = await listRoster();
   const r = await visibleCandidate(user, uid, roster);
   const candidateId = Number(r.candidate_id);
-  const [scores, interviews, resumes, events, meetings] = await Promise.all([
+  const [scores, interviews, resumes, events, meetings, rsaDocuments] = await Promise.all([
     candidateId > 0 ? scoresFor([candidateId]) : Promise.resolve({} as Record<number, AssessmentScore[]>),
     interviewsByPhone([r.phone ?? ""]),
     query<ResumeRow>(
@@ -410,6 +411,7 @@ export async function poolDetail(user: RosterUser, uid: string) {
       "select id, kind, title, starts_at, ends_at, status, meet_url, created_by from app.meetings where $1 = any(pool_uids) order by starts_at desc limit 30",
       [uid],
     ),
+    rsaDocumentsForPhone(r.phone ?? "").catch(() => []),
   ]);
   const all = (candidateId > 0 ? scores[candidateId] ?? [] : []).map(scoreDto);
   const latest = latestPerAssessment(candidateId > 0 ? scores[candidateId] ?? [] : []);
@@ -437,6 +439,8 @@ export async function poolDetail(user: RosterUser, uid: string) {
     assessments: all.sort((a, b) => a.label.localeCompare(b.label) || (b.takenOn ?? "").localeCompare(a.takenOn ?? "")),
     latestAssessments: latest,
     interviews: interviews ? interviews.get(r.phone ?? "") ?? [] : null,
+    /** Past RSA documents (empty: the app shows no RSA section). */
+    rsaDocuments,
     resumes: resumes.map((x) => resumeDto(x, roster)),
     meetings: meetings.map((m) => ({
       id: m.id,

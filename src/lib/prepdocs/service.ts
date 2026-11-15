@@ -7,12 +7,14 @@ import { type DocLinkDto, linksFor } from "@/lib/mobile/preps/service";
 import { readPrepSnapshot, writePrepCells } from "@/lib/mobile/preps/sheet";
 import { pushToUser } from "@/lib/mobile/push";
 import type { RosterUser } from "@/lib/mobile/roster";
-import { generatePrepDoc, research } from "@/lib/prepdocs/generate";
+import { generatePrepDoc, research, researchPlan } from "@/lib/prepdocs/generate";
 import { type PrepDoc, SECTION_IDS, SECTION_LABEL, type SectionId, selectSections } from "@/lib/prepdocs/model";
-import { renderHtml, renderNotionBlocks } from "@/lib/prepdocs/render";
+import { renderDocx, renderNotionBlocks } from "@/lib/prepdocs/render";
 import { readSources } from "@/lib/prepdocs/sources";
 import { docTabs } from "@/lib/prepdocs/tabs";
-import { createGoogleDoc, findPrepDoc, readGoogleDocText, replaceGoogleDoc, shareViewOnly } from "@/lib/team/drive";
+import { roundIn, rsaDocsForRound } from "@/lib/rsa/list";
+import { rsaEntries, sameDoc } from "@/lib/rsa/sheet";
+import { createGoogleDocFromDocx, findPrepDoc, readGoogleDocText, replaceGoogleDocFromDocx, shareViewOnly } from "@/lib/team/drive";
 import { teamStatus } from "@/lib/team/google";
 import { createNotionPage, notionConfigured, readNotionText, replaceNotionPage } from "@/lib/team/notion";
 
@@ -26,7 +28,7 @@ export type DocKind = "gdoc" | "notion";
 
 export interface DocSource {
   url: string;
-  kind: "drilldown" | "transcript" | "website";
+  kind: "drilldown" | "transcript" | "rsa" | "website";
   title: string;
   modifiedAt: string | null;
 }
@@ -80,9 +82,46 @@ async function loadPrep(key: string) {
   return { p, sameJob };
 }
 
-/** The drill-downs and transcripts for the job, with their names and last-change times. */
+const companyKey = (s: string) => s.split(/\s+-\s+|\s*\|\s*/)[0].toLowerCase().replace(/[^a-z0-9]+/g, "");
+
+/**
+ * RSA documents for this company AND round (hiring intelligence from earlier candidates' calls):
+ * the app's own, and the RSA sheet's rows for the company whose document names the same round.
+ * Strictly company- and round-specific; their names are only used to remove them from the text.
+ */
+async function rsaSourcesFor(p: PrepRow): Promise<{ links: DocLinkDto[]; names: string[] }> {
+  const round = normRound(p.round);
+  const [mine, entries] = await Promise.all([
+    rsaDocsForRound(jobKeyOf(p), roundKeyOf(p.round)),
+    rsaEntries().catch((err) => {
+      console.warn("[prep-docs] RSA sheet not read:", err instanceof Error ? err.message.slice(0, 160) : err);
+      return [];
+    }),
+  ]);
+  const links: DocLinkDto[] = [];
+  const names = new Set<string>();
+  const add = (url: string, candidate: string, updatedAt: string | null) => {
+    if (links.some((l) => sameDoc(l.url, url))) return;
+    links.push({ url, kind: "rsa", title: "", updatedAt, own: false, seenOn: [] });
+    if (candidate) names.add(candidate);
+  };
+  for (const m of mine) add(m.url, m.candidate, m.updatedAt);
+  const key = companyKey(p.company);
+  const sameCompany = entries.filter((e) => key && companyKey(e.company) === key && !links.some((l) => sameDoc(l.url, e.url))).slice(-30);
+  if (sameCompany.length) {
+    const meta = await docMetaFor(sameCompany.map((e) => e.url));
+    for (const e of sameCompany) {
+      const name = meta.get(driveFileId(e.url) ?? "")?.name ?? "";
+      if (round && roundIn(name).toLowerCase() === round.toLowerCase()) add(e.url, e.candidate, null);
+    }
+  }
+  return { links: links.slice(0, 12), names: [...names] };
+}
+
+/** The drill-downs, transcripts and RSAs for the job + round, with their names and last-change times. */
 async function sourcesFor(p: PrepRow, sameJob: PrepRow[]): Promise<DocLinkDto[]> {
-  const links = linksFor(p, sameJob);
+  const rsa = await rsaSourcesFor(p).catch(() => ({ links: [] as DocLinkDto[], names: [] as string[] }));
+  const links = [...linksFor(p, sameJob), ...rsa.links];
   const meta = await docMetaFor(links.map((l) => l.url));
   for (const l of links) {
     const m = meta.get(driveFileId(l.url) ?? "");
@@ -112,8 +151,9 @@ function toDto(r: DocRow, available: DocLinkDto[]): PrepDocumentDto {
   const used = new Map(r.sources.map((s) => [s.url, s]));
   for (const a of available) {
     const before = used.get(a.url);
-    const name = a.title || (a.kind === "transcript" ? "A transcript" : "A drill-down");
-    if (!before) reasons.push(`New ${a.kind === "transcript" ? "transcript" : "drill-down"}: ${name}`);
+    const name = a.title || (a.kind === "transcript" ? "A transcript" : a.kind === "rsa" ? "An RSA document" : "A drill-down");
+    const what = a.kind === "transcript" ? "transcript" : a.kind === "rsa" ? "RSA" : "drill-down";
+    if (!before) reasons.push(`New ${what}: ${name}`);
     else if (a.updatedAt && before.modifiedAt && a.updatedAt > before.modifiedAt) reasons.push(`${name} changed on ${a.updatedAt.slice(0, 10)}`);
   }
   return {
@@ -151,6 +191,7 @@ export async function prepDocsOverview(key: string) {
     latestRun(jobKeyOf(p), roundKeyOf(p.round)),
   ]);
   const inputs = docs.find((d) => d.inputs?.website || d.inputs?.linkedin)?.inputs ?? {};
+  const { company, role } = splitCompany(p.company);
   return {
     company: p.company,
     round: p.round,
@@ -162,7 +203,15 @@ export async function prepDocsOverview(key: string) {
     google: team ? { connected: team.connected, account: team.account, status: team.status } : { connected: false, account: "", status: "not_configured" },
     notion: { configured: notionConfigured() },
     run,
+    /** What company research would search, shown for confirmation before anything is searched. */
+    researchPlan: researchPlan(company, role, normRound(p.round), [inputs.website ?? "", inputs.linkedin ?? ""].filter(Boolean)),
   };
+}
+
+/** "Stan - SDE Intern" → company "Stan", role "SDE Intern". */
+function splitCompany(full: string): { company: string; role: string } {
+  const [companyName, ...roleParts] = full.split(/\s+-\s+/);
+  return { company: companyName.trim() || full, role: roleParts.join(" - ").trim() };
 }
 
 // ── Runs ─────────────────────────────────────────────────────────────────────
@@ -209,6 +258,8 @@ export interface StartBody {
   sections?: unknown;
   /** { [source url]: [tab id] } for Google Docs with several tabs. */
   tabs?: unknown;
+  /** "on" = the mentor confirmed the research plan; anything else = no web research. */
+  research?: unknown;
 }
 
 const cleanUrl = (v: unknown) => {
@@ -257,6 +308,7 @@ export async function startDocRun(user: RosterUser, key: string, body: StartBody
     website,
     linkedin,
     sections,
+    research: body.research === "on",
   };
   const rows = await query<{ id: string }>(
     `insert into app.prep_doc_runs (document_id, job_key, round_key, kind, mode, status, step, request, requested_by)
@@ -278,11 +330,14 @@ async function runDoc(
   p: PrepRow,
   sameJob: PrepRow[],
   kind: DocKind,
-  request: { sources: { url: string; kind: "drilldown" | "transcript"; tabs?: string[] }[]; website: string | null; linkedin: string | null; sections: SectionId[] },
+  request: { sources: { url: string; kind: "drilldown" | "transcript" | "rsa"; tabs?: string[] }[]; website: string | null; linkedin: string | null; sections: SectionId[]; research: boolean },
 ): Promise<void> {
   try {
-    await step(id, "Reading the drill-downs and transcripts");
-    const names = [...new Set(sameJob.map((r) => r.candidate))];
+    await step(id, "Reading the drill-downs, transcripts and RSAs");
+    // Every person named in the material is removed before the model reads it (candidates on the
+    // job's rows and the candidates of the RSA documents).
+    const rsaNames = request.sources.some((s) => s.kind === "rsa") ? (await rsaSourcesFor(p).catch(() => ({ names: [] as string[] }))).names : [];
+    const names = [...new Set([...sameJob.map((r) => r.candidate), ...rsaNames])];
     const sources = await readSources(request.sources, request.website, names);
     const usable = sources.filter((s) => s.text.trim());
     if (!usable.length) throw new Error(`None of the chosen sources could be read (${sources.map((s) => s.error).filter(Boolean).join("; ").slice(0, 200)}).`);
@@ -301,43 +356,50 @@ async function runDoc(
       if (adopt) existingText = await readGoogleDocText(adopt.id).catch(() => null);
     }
 
-    // "Stan - SDE Intern" → company "Stan", role "SDE Intern".
-    const [companyName, ...roleParts] = p.company.split(/\s+-\s+/);
-    const company = companyName.trim() || p.company;
-    const role = roleParts.join(" - ").trim();
-
-    await step(id, "Researching the company");
-    const notes = await research(company, role, normRound(p.round), request.website);
+    const { company, role } = splitCompany(p.company);
+    const round = normRound(p.round);
+    let notes = null;
+    if (request.research) {
+      await step(id, "Researching the company (confirmed plan)");
+      notes = await research(researchPlan(company, role, round, [request.website ?? "", request.linkedin ?? ""].filter(Boolean)));
+    }
 
     await step(id, "Writing the document");
     const out = await generatePrepDoc({
       company,
       role,
-      round: normRound(p.round),
+      round,
       process: p.process,
       websiteUrl: request.website,
       linkedinUrl: request.linkedin,
       sources,
       research: notes,
+      researchRequested: request.research,
       existingText,
     });
     if ("error" in out) throw new Error(out.error);
     const doc = selectSections(out.doc, request.sections);
-    // The title comes from the sheet, not the model: a company name can itself contain " - "
+    // The title block comes from the sheet, not the model: a company name can itself contain " - "
     // ("A.P. Moller - Maersk"), which the model would misread as company + role.
-    doc.title = `${p.company} | ${normRound(p.round) || "Interview"} Preparation Guide`;
-    if (request.linkedin && !doc.links.some((l) => l.url === request.linkedin)) doc.links.push({ label: "LinkedIn", url: request.linkedin });
-    if (request.website && !doc.links.some((l) => l.url === request.website)) doc.links.unshift({ label: "Website", url: request.website });
+    doc.title = company.toUpperCase();
+    doc.subtitle = [role, round || "Interview", "Preparation Guide"].filter(Boolean).join(" · ");
+    // Links only if given (§4): the supplied website and LinkedIn join the sources line.
+    if (request.website && !doc.sources.some((l) => l.url === request.website)) doc.sources.unshift({ title: "Company website", url: request.website });
+    if (request.linkedin && !doc.sources.some((l) => l.url === request.linkedin)) doc.sources.push({ title: "LinkedIn", url: request.linkedin });
+    // The Drive name stays "<Company - Role> | <Round> Preparation Guide" (how existing documents are found).
+    const fileName = `${p.company} | ${round || "Interview"} Preparation Guide`;
 
     await step(id, kind === "gdoc" ? "Saving to Google Docs" : "Saving to Notion");
     let saved: { id: string; url: string };
     if (kind === "gdoc") {
       const target = existing?.external_id ?? adopt?.id;
-      saved = target ? await replaceGoogleDoc(target, doc.title, renderHtml(doc)) : await createGoogleDoc(doc.title, renderHtml(doc));
+      const docx = await renderDocx(doc, company);
+      // An update rewrites the same file: the link stays the same.
+      saved = target ? await replaceGoogleDocFromDocx(target, fileName, docx) : await createGoogleDocFromDocx(fileName, docx);
       await step(id, "Sharing (view-only link)");
       await shareViewOnly(saved.id);
     } else {
-      saved = existing ? await replaceNotionPage(existing.external_id, doc.title, renderNotionBlocks(doc)) : await createNotionPage(doc.title, renderNotionBlocks(doc));
+      saved = existing ? await replaceNotionPage(existing.external_id, fileName, renderNotionBlocks(doc)) : await createNotionPage(fileName, renderNotionBlocks(doc));
     }
 
     const used: DocSource[] = sources.filter((s) => s.text.trim()).map((s) => ({ url: s.url, kind: s.kind, title: s.title, modifiedAt: s.modifiedAt }));
@@ -349,19 +411,22 @@ async function runDoc(
          last_changes = excluded.last_changes, unverified = excluded.unverified, content = excluded.content, updated_by = excluded.updated_by, updated_at = now()
        returning id`,
       [
-        jobKey, p.company, normRound(p.round), roundKey, kind, saved.id, saved.url, doc.title, JSON.stringify(used), request.sections,
+        jobKey, p.company, normRound(p.round), roundKey, kind, saved.id, saved.url, fileName, JSON.stringify(used), request.sections,
         JSON.stringify({ website: request.website, linkedin: request.linkedin }), JSON.stringify(doc.changes), JSON.stringify(doc.unverified), JSON.stringify(doc), user.email,
       ],
     );
     const result = {
       documentId: rows[0].id,
       url: saved.url,
-      title: doc.title,
+      title: fileName,
       changes: doc.changes,
       unverified: doc.unverified,
       sections: request.sections,
       model: out.model,
       skipped: sources.filter((s) => !s.text.trim()).map((s) => `${s.title || s.url}: ${s.error ?? "empty"}`),
+      pageBudget: out.budget,
+      cuts: out.cuts,
+      research: request.research ? (notes ? { sources: notes.sources.length, empty: notes.empty } : "unavailable") : "off",
     };
     // The drill-down row's "Prep Document" cell (the source behind EDGE): add the link, never overwrite.
     await linkInSheet(p.key, saved.url).catch((err) => console.warn("[prep-docs] sheet link not written:", err instanceof Error ? err.message.slice(0, 160) : err));
@@ -371,7 +436,7 @@ async function runDoc(
       user.email,
       adopt || existingText ? "prep_document_updated" : "prep_document_created",
       saved.url,
-      JSON.stringify({ kind, jobKey, round: p.round, sources: used.length, model: out.model }),
+      JSON.stringify({ kind, jobKey, round: p.round, sources: used.length, model: out.model, research: request.research, format: 2 }),
     ]).catch(() => undefined);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

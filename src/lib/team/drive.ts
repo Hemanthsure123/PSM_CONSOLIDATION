@@ -114,6 +114,36 @@ export async function replaceGoogleDoc(id: string, title: string, html: string):
   });
 }
 
+const DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
+
+/** A .docx built by the server, converted into a Google Doc on upload (fonts, tables and spacing are kept). */
+export async function createGoogleDocFromDocx(title: string, docx: Buffer, folderId?: string): Promise<{ id: string; url: string }> {
+  const parent = folderId ?? (await rootFolder());
+  return withTeam(async (auth) => {
+    const res = await drive(auth).files.create({
+      requestBody: { name: title, mimeType: "application/vnd.google-apps.document", parents: [parent] },
+      media: { mimeType: DOCX, body: Readable.from([docx]) },
+      fields: "id,webViewLink",
+      supportsAllDrives: true,
+    });
+    return { id: res.data.id!, url: res.data.webViewLink ?? `https://docs.google.com/document/d/${res.data.id}/edit` };
+  });
+}
+
+/** Replaces a Google Doc's content and title from a .docx, in place (same file, same link). */
+export async function replaceGoogleDocFromDocx(id: string, title: string, docx: Buffer): Promise<{ id: string; url: string }> {
+  return withTeam(async (auth) => {
+    const res = await drive(auth).files.update({
+      fileId: id,
+      requestBody: { name: title },
+      media: { mimeType: DOCX, body: Readable.from([docx]) },
+      fields: "id,webViewLink",
+      supportsAllDrives: true,
+    });
+    return { id: res.data.id!, url: res.data.webViewLink ?? `https://docs.google.com/document/d/${id}/edit` };
+  });
+}
+
 export async function readGoogleDocText(id: string): Promise<string> {
   return withTeam(async (auth) => {
     const res = await drive(auth).files.export({ fileId: id, mimeType: "text/plain" }, { responseType: "text" });

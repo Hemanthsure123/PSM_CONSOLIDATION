@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.6.0
+  version: 1.7.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
     This file is the source of truth. Change it first, then the routes under
@@ -660,7 +660,7 @@ paths:
     get:
       tags: [preps]
       x-phase: P4
-      summary: One prep's page.
+      summary: "One prep's page. rsaDocuments: the candidate's past RSA documents [{ url, title, company, round, date, own }] (the RSA sheet by phone + the app's own); empty = show no RSA section."
       parameters: [{ $ref: "#/components/parameters/PrepId" }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PrepDetail" } } } }
@@ -782,7 +782,10 @@ paths:
         { prepId, candidate, phone, company, round, documents: [PrepDocument], sources: [DocLink + tabs?: [{id,title,level}] (Google Docs with
         several tabs, often one per round) + tabsUnknown?: true (tabs couldn't be read; the whole document is used)], sections: [{id,label}],
         website, linkedin, google: {connected, account, status}, notion: {configured}, run: DocRun|null, whatsapp: string (the
-        WhatsApp text with the document link) }. PrepDocument = { id, kind: gdoc|notion, url, title, version, round, updatedAt,
+        WhatsApp text with the document link), researchPlan: { company, role, round, queries: [string], suppliedLinks: [string] }
+        (what company research would search — the app shows it and the mentor confirms before anything is searched) }.
+        sources[].kind is drilldown | transcript | rsa (an RSA document of an earlier candidate for the same company AND round).
+        PrepDocument = { id, kind: gdoc|notion, url, title, version, round, updatedAt,
         updatedBy, sections, status: up_to_date|update_available, reasons, lastChanges, unverified }.
       parameters: [{ $ref: "#/components/parameters/PrepId" }]
       responses:
@@ -806,8 +809,9 @@ paths:
                 linkedin: { type: string, format: uri }
                 sections: { type: array, items: { type: string, enum: [overview, start_here, about_company, topics, checklist, summary] }, description: "topics is required" }
                 tabs: { type: object, additionalProperties: { type: array, items: { type: string } }, description: "{ [source url]: [tab id] } — required (at least one tab) for every chosen source that lists tabs; only those tabs are read" }
+                research: { type: string, enum: ["on", "off"], default: "off", description: "on = the mentor confirmed researchPlan; only questions from sources that name the company are used, and the sources line lists only pages the search returned. Absent = off." }
       responses:
-        "202": { description: "The run (poll /preps/runs/{runId}) — the same run when one is already in progress" }
+        "202": { description: "The run (poll /preps/runs/{runId}) — the same run when one is already in progress. Documents use format v2 (the team's master prompt): title block, overview, START HERE, [About], numbered sections with real vs practice questions, checklist, IN SHORT, [sources]; at most 7 pages." }
         "422": { description: "no_sources / no_tabs / invalid_sections" }
         "503": { description: "team_not_connected / notion_not_configured" }
 
@@ -826,7 +830,7 @@ paths:
     get:
       tags: [prep-document]
       x-phase: P5
-      summary: "Progress of a document run: { id, status: queued|running|done|failed, step, error, mode: create|update, kind, result: { url, title, changes, unverified, sections, model, skipped }, createdAt }."
+      summary: "Progress of a document run: { id, status: queued|running|done|failed, step, error, mode: create|update, kind, result: { url, title, changes, unverified, sections, model, skipped, pageBudget, cuts, research }, createdAt }."
       parameters:
         - { name: runId, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
@@ -917,6 +921,64 @@ paths:
         "200": { description: "{ id, callAt, durationSec, status: transcribing }" }
         "413": { description: "recording_too_large" }
         "415": { description: "Not audio (invalid_recording)" }
+
+  /preps/{prepId}/rsa:
+    get:
+      tags: [rsa]
+      x-phase: P7
+      summary: "The prep's RSA (Rejection Selection Analysis) document and what it is built from."
+      description: >
+        { prepId, candidate, company, round, phone, product, drilldowns: [DocLink + tabs?/tabsUnknown?] (the job's drill-downs, own first),
+        resumeUrl (the row's resume link, or the one the RSA used), rsa: null | { id, url, title, version, updatedAt, updatedBy (name),
+        drilldownUrl, tabs, resumeUrl, remarks, sheetStatus: pending|added|exists|failed, sheetError, unconfirmed: [string] },
+        hasRecording (a recording is already saved: an update or retry may omit it), run: RsaRun|null, google: {connected, account, status},
+        preparedBy (the signed-in member's name) }.
+      parameters: [{ $ref: "#/components/parameters/PrepId" }]
+      responses:
+        "200": { description: "OK" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [rsa]
+      x-phase: P7
+      summary: >
+        Create the RSA document, or update it in place (same Google Doc, same link, no second row in the RSA sheet). Generated only from the
+        drill-down, the call recording, the resume and the remarks (remarks take priority). Files are saved to the team Drive before the
+        response; the transcript is kept in Drive, never in the database. Runs in the background, about a minute.
+      parameters: [{ $ref: "#/components/parameters/PrepId" }]
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [drilldownUrl]
+              properties:
+                drilldownUrl: { type: string, format: uri, description: "One of GET rsa's drilldowns" }
+                tabs: { type: string, description: "JSON array of tab ids — required when the drill-down lists tabs" }
+                recording: { type: string, format: binary, description: "The RSA call (audio, ≤ 40 MB). Required unless hasRecording" }
+                callAt: { type: string, format: date-time }
+                resumeUrl: { type: string, format: uri, description: "The resume the company has (or send resume)" }
+                resume: { type: string, format: binary, description: "PDF or .docx, ≤ 10 MB (or send resumeUrl)" }
+                remarks: { type: string, maxLength: 4000 }
+      responses:
+        "202": { description: "RsaRun (poll /preps/rsa-runs/{runId}) — the same run when one is already in progress" }
+        "413": { description: "recording_too_large / resume_too_large / upload_too_large" }
+        "415": { description: "invalid_recording / invalid_resume" }
+        "422": { description: "no_drilldown / invalid_drilldown / no_tabs / no_resume / no_recording / remarks_too_long" }
+        "409": { description: "run_in_progress (another run for this prep just started)" }
+        "502": { description: "drive_failed (the recording or resume couldn't be saved to the team Drive; nothing was started)" }
+        "503": { description: "team_not_connected" }
+
+  /preps/rsa-runs/{runId}:
+    get:
+      tags: [rsa]
+      x-phase: P7
+      summary: "RsaRun: { id, status: queued|running|done|failed, step, error, mode: create|update, result: { rsaId, url, title, version, sheetStatus: added|exists|failed, warnings: [string] } | null, createdAt }."
+      parameters:
+        - { name: runId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "OK" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /meetings:
     get:
@@ -1047,7 +1109,7 @@ paths:
     get:
       tags: [pool]
       x-phase: P6
-      summary: One candidate with every assessment attempt, interviews (EDGE drill-down by phone), resumes, meetings and history.
+      summary: "One candidate with every assessment attempt, interviews (EDGE drill-down by phone), resumes, meetings, history and rsaDocuments (past RSA documents by phone; empty = no RSA section)."
       parameters:
         - { name: uid, in: path, required: true, schema: { type: string } }
       responses:

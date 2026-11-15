@@ -22,6 +22,7 @@
     "@langchain/langgraph": "^1.4.21",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "docx": "9.14.0",
     "googleapis": "^144.0.0",
     "lucide-react": "^0.460.0",
     "next": "14.2.18",

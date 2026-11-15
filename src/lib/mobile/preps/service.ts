@@ -26,6 +26,7 @@ import {
 import { type CellWrite, istSerialNow, readDropdowns, readPrepSnapshot, writePrepCells, type PrepSnapshot } from "@/lib/mobile/preps/sheet";
 import { mentorsOf, rememberAction, trackPreps, type Tracked } from "@/lib/mobile/preps/track";
 import { listRoster, matchMentor, type RosterUser } from "@/lib/mobile/roster";
+import { rsaDocumentsForPhone } from "@/lib/rsa/list";
 
 /**
  * The /preps endpoints (docs/mobile-api.yaml): interviews and preps from the drill-down tab for
@@ -196,7 +197,8 @@ async function statsOf(snap: PrepSnapshot, tracked: Map<string, Tracked>, today:
 
 export interface DocLinkDto {
   url: string;
-  kind: "drilldown" | "transcript";
+  /** "rsa": an RSA document of an earlier candidate for the same company and round. */
+  kind: "drilldown" | "transcript" | "rsa";
   title: string;
   updatedAt: string | null;
   /** This candidate's own row has this link. */
@@ -241,13 +243,14 @@ export async function prepDetail(user: RosterUser, key: string) {
   const cls = (await classifyMany([{ phone: p.phone, product: p.product }])).get(classKey(p.phone, p.product))!;
   const sameJob = p.jobId ? snap.preps.filter((r) => r.jobId === p.jobId) : snap.preps.filter((r) => r.company === p.company);
   const links = linksFor(p, sameJob);
-  const [tags, meta, events] = await Promise.all([
+  const [tags, meta, events, rsaDocuments] = await Promise.all([
     detailTags(p.phone, cls),
     docMetaFor(links.map((l) => l.url)),
     query<{ at: Date; actor_email: string; action: string; value: string }>(
       "select at, actor_email, action, value from app.prep_events where prep_key = $1 order by at desc limit 20",
       [key],
     ).catch(() => []),
+    rsaDocumentsForPhone(p.phone, key).catch(() => []),
   ]);
   for (const l of links) {
     const m = meta.get(driveFileId(l.url) ?? "");
@@ -292,6 +295,8 @@ export async function prepDetail(user: RosterUser, key: string) {
     completion: p.completion,
     links,
     journey,
+    /** The candidate's past RSA documents (empty: the app shows no RSA section). */
+    rsaDocuments,
     activity: events.map((e) => ({ at: e.at.toISOString(), by: names.get(e.actor_email) ?? e.actor_email, action: e.action, value: e.value })),
     canEdit: canEditPrep(user, mentorsOf(p, roster), p.prepBy),
     interviewStatusOptions: interviewOptions((await readDropdowns(snap)).candidateStatus),
