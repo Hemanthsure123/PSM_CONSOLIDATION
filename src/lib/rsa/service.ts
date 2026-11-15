@@ -2,6 +2,7 @@ import "server-only";
 import { query } from "@/lib/db/client";
 import { runLlmChain } from "@/lib/llm-router";
 import { UserError } from "@/lib/mobile/http";
+import { classifyMany, classKey } from "@/lib/mobile/preps/enrich";
 import { docMetaFor, driveFileId } from "@/lib/mobile/preps/links";
 import { normRound, type PrepRow } from "@/lib/mobile/preps/parse";
 import { type DocLinkDto, linksFor } from "@/lib/mobile/preps/service";
@@ -28,7 +29,7 @@ import {
 } from "@/lib/rsa/model";
 import { RSA_INSTRUCTION, RSA_SYSTEM } from "@/lib/rsa/prompt";
 import { renderRsaDocx, rsaText } from "@/lib/rsa/render";
-import { addRsaRow, sameDoc } from "@/lib/rsa/sheet";
+import { addRsaRow, fillRsaProduct, sameDoc } from "@/lib/rsa/sheet";
 import { createGoogleDocFromDocx, downloadFile, readGoogleDocText, replaceGoogleDocFromDocx, shareViewOnly, shareWith, subFolder, uploadFile } from "@/lib/team/drive";
 import { teamStatus } from "@/lib/team/google";
 import { transcribe } from "@/lib/team/stt";
@@ -177,6 +178,19 @@ async function uidFor(phone: string): Promise<string | null> {
     [phone],
   ).catch(() => []);
   return rows[0]?.uid?.trim() || null;
+}
+
+/**
+ * The candidate's product as the RSA sheet writes it (Academy, Academy Assessed, Edge 2.0, Edge),
+ * from our pool when the drill-down row has no Product. "" when unknown.
+ */
+async function productFor(phone: string): Promise<string> {
+  if (!/^\d{10}$/.test(phone)) return "";
+  const cls = (await classifyMany([{ phone, product: "" }]).catch(() => null))?.get(classKey(phone, ""));
+  if (!cls || cls.source === "none" || cls.source === "sheet") return "";
+  if (cls.category === "academy") return cls.source === "assessed" ? "Academy Assessed" : "Academy";
+  if (cls.category === "edge") return cls.edgeVersion === "2.0" ? "Edge 2.0" : "Edge";
+  return "";
 }
 
 // ── Overview ────────────────────────────────────────────────────────────────
@@ -512,6 +526,7 @@ async function runRsa(id: string, user: RosterUser, key: string, request: RunReq
     await shareViewOnly(saved.id);
 
     const uid = await uidFor(p.phone);
+    const product = p.product.trim() || (await productFor(p.phone));
     const rows = await query<{ id: string; version: number }>(
       `insert into app.rsa_documents (prep_key, candidate, phone, uid, company, round, job_key, round_key, product, drilldown_url, drilldown_tabs, resume_url,
          remarks, recording_file_id, recording_url, transcript_file_id, external_id, url, title, content, created_by, updated_by)
@@ -525,7 +540,7 @@ async function runRsa(id: string, user: RosterUser, key: string, request: RunReq
        returning id, version`,
       [
         key, p.candidate.slice(0, 200), /^\d{10}$/.test(p.phone) ? p.phone : "", uid, p.company.slice(0, 300), round.slice(0, 100), jobKeyOf(p), roundKeyOf(p.round),
-        p.product.slice(0, 100), request.drilldownUrl, request.tabs, request.resume.url, request.remarks, request.recording.fileId, request.recording.url,
+        product.slice(0, 100), request.drilldownUrl, request.tabs, request.resume.url, request.remarks, request.recording.fileId, request.recording.url,
         transcript.fileId, saved.id, saved.url, doc.fileName.slice(0, 300), JSON.stringify(doc), user.email,
       ],
     );
@@ -544,11 +559,13 @@ async function runRsa(id: string, user: RosterUser, key: string, request: RunReq
         candidate: p.candidate,
         mobile: p.phoneRaw.trim() || p.phone,
         resume: request.resume.url,
-        product: p.product,
+        product,
         drilldown: request.drilldownUrl,
         rsaDoc: saved.url,
       });
       sheetStatus = r.status;
+      // A row added before the product was known gets its empty Product cell filled.
+      if (r.status === "exists" && product) await fillRsaProduct(saved.url, product).catch(() => false);
       if (r.missing.length) warnings.push(`The RSA sheet has no column for: ${r.missing.join(", ")}`);
     } catch (err) {
       sheetError = err instanceof Error ? err.message.slice(0, 300) : String(err);

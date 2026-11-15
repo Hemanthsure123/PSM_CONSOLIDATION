@@ -140,6 +140,35 @@ export function rsaRow(header: string[], v: RsaRowValues): { row: string[]; miss
   return { row, missing };
 }
 
+const columnLetter = (i: number) => {
+  let out = "";
+  for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) out = String.fromCharCode(65 + ((n - 1) % 26)) + out;
+  return out;
+};
+
+/**
+ * Fills the Product cell of the document's row when it is EMPTY (rows the app added before the
+ * product was known). Nothing else in the row is touched, and a filled cell is never changed.
+ */
+export async function fillRsaProduct(rsaDoc: string, product: string): Promise<boolean> {
+  if (!product.trim()) return false;
+  const values = await readValues(true);
+  const parsed = parseRsaSheet(values);
+  const col = parsed.columns.product;
+  const entry = parsed.entries.find((e) => sameDoc(e.url, rsaDoc));
+  if (col < 0 || !entry) return false;
+  if (String(values[entry.row - 1]?.[col] ?? "").trim()) return false;
+  const { spreadsheetId, tab } = rsaSheet();
+  await getSheetsWriter().spreadsheets.values.update({
+    spreadsheetId,
+    range: `${quote(tab)}!${columnLetter(col)}${entry.row}`,
+    valueInputOption: "RAW",
+    requestBody: { values: [[product]] },
+  });
+  g.__rsaSheet = undefined;
+  return true;
+}
+
 /**
  * Adds the document's row unless its link is already there. Never overwrites a row: the sheet
  * inserts a new row after the table. "exists" = a row with this document already exists.

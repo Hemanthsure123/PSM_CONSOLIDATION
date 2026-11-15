@@ -51,6 +51,24 @@ export const LAST_COLUMN = 26;
 
 const squeeze = (v: unknown) => String(v ?? "").toLowerCase().replace(/\s+/g, " ").trim();
 
+/** A Product cell: Academy, Academy Assessed, Edge, Edge 2.0, External, NIAT … */
+const PRODUCT_VALUE = /^(academy( assessed)?|edge( ?\d(\.\d)?)?|external|niat)$/i;
+
+/**
+ * The Product column when its header was overwritten (it read "w" on 2026-11-16): the first of
+ * columns A–C whose filled cells are mostly product names. Read-only; 0 when none fits.
+ */
+export function productColumnByValues(rows: unknown[][], cols: PrepColumns): number {
+  if (cols.product) return cols.product;
+  const taken = new Set(Object.values(cols).filter((c) => c > 0));
+  for (let c = 1; c <= 3; c++) {
+    if (taken.has(c)) continue;
+    const vals = rows.slice(1, 1500).map((r) => String((r ?? [])[c - 1] ?? "").trim()).filter(Boolean);
+    if (vals.length >= 10 && vals.filter((v) => PRODUCT_VALUE.test(v)).length / vals.length >= 0.8) return c;
+  }
+  return 0;
+}
+
 /** Header row 1 → 1-based column numbers (0 = the tab has no such column). */
 export function findPrepColumns(header: unknown[]): PrepColumns {
   const head = header.slice(0, LAST_COLUMN).map(squeeze);

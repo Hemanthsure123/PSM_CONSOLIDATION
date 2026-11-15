@@ -1,4 +1,5 @@
 import "server-only";
+import { ensureAdminKeys } from "@/lib/admin/api-keys";
 import type { GenerationConfig, Schema, Part } from "@google/generative-ai";
 import { getGeminiForKey } from "@/lib/gemini";
 import { env } from "@/lib/env";
@@ -195,6 +196,7 @@ async function generateOnce(
  * JSON string, or `null` when no key is configured or every key/model failed.
  */
 export async function geminiGenerateJson(parts: Parts, opts: GeminiGenOptions = {}): Promise<string | null> {
+  await ensureAdminKeys();
   const pool = getPool();
   if (pool.keys.length === 0) return null;
 
@@ -280,6 +282,7 @@ function hintedDelayMs(err: unknown): number {
  * to another provider (rate / quota) or not.
  */
 export async function geminiJsonForModel(parts: Parts, model: string, opts: GeminiGenOptions = {}): Promise<GeminiModelResult> {
+  await ensureAdminKeys();
   const pool = getPool();
   const n = pool.keys.length;
   if (n === 0) return { ok: false, kind: "unavailable", detail: "no Gemini API key configured" };

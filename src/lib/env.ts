@@ -30,6 +30,15 @@ function optional(name: string, fallback: string): string {
  * MISTRAL_API_KEYS), the numbered vars (MISTRAL_API_KEY_1, MISTRAL_API_KEY_2, …)
  * and the single var (MISTRAL_API_KEY) — deduplicated, never throws, [] when unset.
  */
+/**
+ * Keys the admin added in the app (Me → API keys), held in memory by lib/admin/api-keys.ts. They
+ * join the end of each provider's pool; the server's own keys keep their order.
+ */
+function withAdminKeys(provider: "deepgram" | "elevenlabs" | "mistral" | "gemini" | "groq", keys: string[]): string[] {
+  const extra = (globalThis as unknown as { __psmAdminKeys?: { keys: Partial<Record<string, string[]>> } }).__psmAdminKeys?.keys[provider] ?? [];
+  return extra.length ? Array.from(new Set([...keys, ...extra])) : keys;
+}
+
 function keyPool(poolName: string, singleName: string): string[] {
   const pool = (process.env[poolName] ?? "").split(",");
   const numbered = Object.keys(process.env)
@@ -104,9 +113,9 @@ export const env = {
         .split(",")
         .map((k) => k.trim())
         .filter(Boolean);
-      if (pool.length > 0) return Array.from(new Set(pool));
+      if (pool.length > 0) return withAdminKeys("gemini", Array.from(new Set(pool)));
       const single = (process.env.GEMINI_API_KEY ?? "").trim();
-      return single ? [single] : [];
+      return withAdminKeys("gemini", single ? [single] : []);
     },
   },
   /** Optional fallback LLM providers (used when Gemini's daily quota is hit). */
@@ -147,7 +156,7 @@ export const env = {
     },
     /** Round-robin pool: GROQ_API_KEYS (comma-separated), GROQ_API_KEY_1…N, GROQ_API_KEY. */
     get apiKeys(): string[] {
-      return keyPool("GROQ_API_KEYS", "GROQ_API_KEY");
+      return withAdminKeys("groq", keyPool("GROQ_API_KEYS", "GROQ_API_KEY"));
     },
     get model() {
       return optional("GROQ_MODEL", "llama-3.3-70b-versatile");
@@ -159,7 +168,7 @@ export const env = {
     },
     /** Round-robin pool: MISTRAL_API_KEYS (comma-separated), MISTRAL_API_KEY_1…N, MISTRAL_API_KEY. */
     get apiKeys(): string[] {
-      return keyPool("MISTRAL_API_KEYS", "MISTRAL_API_KEY");
+      return withAdminKeys("mistral", keyPool("MISTRAL_API_KEYS", "MISTRAL_API_KEY"));
     },
     get model() {
       // ministral-8b is on Mistral's free tier; mistral-small allows 0 req/min there.
@@ -341,10 +350,10 @@ export const env = {
    */
   voice: {
     get elevenLabsKeys(): string[] {
-      return keyPool("ELEVENLABS_API_KEYS", "ELEVENLABS_API_KEY");
+      return withAdminKeys("elevenlabs", keyPool("ELEVENLABS_API_KEYS", "ELEVENLABS_API_KEY"));
     },
     get deepgramKeys(): string[] {
-      return keyPool("DEEPGRAM_API_KEYS", "DEEPGRAM_API_KEY");
+      return withAdminKeys("deepgram", keyPool("DEEPGRAM_API_KEYS", "DEEPGRAM_API_KEY"));
     },
     get sttProviders(): ("elevenlabs" | "deepgram")[] {
       const order = csv(optional("VOICE_STT_PROVIDERS", "elevenlabs,deepgram"));

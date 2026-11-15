@@ -28,6 +28,8 @@ export type PushKind =
   | "meeting_reminder"
   | "prep_doc_ready"
   | "rsa_ready"
+  | "admin_notice"
+  | "app_update"
   | "team_account";
 
 const g = globalThis as unknown as { __fcmAuth?: JWT };
@@ -93,6 +95,8 @@ export function inboxText(kind: PushKind, d: Record<string, string>): { title: s
     recording_ready: [`Call recording ready · ${who || company}`, "Its transcript and summary are in the sheet."],
     meeting_reminder: ["Meeting soon", d.company ? `With ${d.company}.` : "Your meeting starts in 10 minutes."],
     prep_doc_ready: [`Prep document ready · ${[d.company, d.round].filter(Boolean).join(" ") || "your prep"}`, "Open it to review."],
+    admin_notice: ["Message from your admin", ""],
+    app_update: ["Update available", "Tap to update the PSM app."],
     rsa_ready: [`RSA document ready · ${who || company}`, "Open it to review."],
     team_account: ["Team Google account needs attention", "An admin should reconnect it in Me → Team."],
   };

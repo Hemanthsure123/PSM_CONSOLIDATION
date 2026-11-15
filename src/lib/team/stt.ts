@@ -1,4 +1,5 @@
 import "server-only";
+import { ensureAdminKeys } from "@/lib/admin/api-keys";
 import { env } from "@/lib/env";
 
 /**
@@ -85,6 +86,7 @@ async function deepgram(audio: Buffer, mime: string, key: string): Promise<Trans
 }
 
 export async function transcribe(audio: Buffer, mime: string): Promise<Transcript> {
+  await ensureAdminKeys();
   const errors: string[] = [];
   for (const provider of env.voice.sttProviders) {
     const keys = rotate(provider === "elevenlabs" ? env.voice.elevenLabsKeys : env.voice.deepgramKeys);

@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.7.0
+  version: 1.8.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
     This file is the source of truth. Change it first, then the routes under
@@ -979,6 +979,108 @@ paths:
       responses:
         "200": { description: "OK" }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /admin/api-keys:
+    get:
+      tags: [admin]
+      x-phase: P8
+      summary: "Admins only. { providers: [{ id: deepgram|elevenlabs|mistral|gemini|groq, label, use, serverKeys }], keys: [ApiKey] }. ApiKey = { id, provider, label, masked: '…abcd', enabled, status: unchecked|ok|invalid|error, statusNote, checkedAt, addedBy, updatedAt } — never the key. Keys are added to the server's own keys (Deepgram / ElevenLabs: call transcripts and voice input; Gemini / Mistral / Groq: the AI features that already use them)."
+      responses:
+        "200": { description: "OK" }
+        "403": { description: "admin_only" }
+    post:
+      tags: [admin]
+      x-phase: P8
+      summary: "Admins only. { provider, label?, key } → 201 ApiKey, after a read-only check with the provider (a rejected key is kept but not used)."
+      responses:
+        "201": { description: "ApiKey" }
+        "409": { description: "duplicate_key" }
+        "422": { description: "invalid_key / invalid_provider / too_many_keys" }
+
+  /admin/api-keys/{keyId}:
+    patch:
+      tags: [admin]
+      x-phase: P8
+      summary: "Admins only. { label?, key?, enabled? } → ApiKey (a new key is checked again)."
+      parameters:
+        - { name: keyId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "ApiKey" }
+        "404": { description: "not_found" }
+        "409": { description: "duplicate_key" }
+    delete:
+      tags: [admin]
+      x-phase: P8
+      summary: "Admins only. Removes the key (204)."
+      parameters:
+        - { name: keyId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: "Deleted" }
+
+  /admin/api-keys/{keyId}/test:
+    post:
+      tags: [admin]
+      x-phase: P8
+      summary: "Admins only. Re-checks the saved key with its provider → ApiKey (409 key_unreadable: saved by another server, paste it again)."
+      parameters:
+        - { name: keyId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "ApiKey" }
+
+  /admin/notices:
+    get:
+      tags: [admin]
+      x-phase: P8
+      summary: "Admins only. { items: [Notice] } — sticky notifications sent lately. Notice = { id, toEmail, toName, title, body, sentBy, sentByName, createdAt, delivered, acknowledgedAt }."
+      responses:
+        "200": { description: "OK" }
+    post:
+      tags: [admin]
+      x-phase: P8
+      summary: "Admins only. { to: email, title (≤120), body (≤1000) } → 201 Notice. Push type admin_notice (noticeId, title, body, sticky, from): the phone shows it until the person taps Acknowledge."
+      responses:
+        "201": { description: "Notice" }
+        "422": { description: "invalid_recipient / no_title / no_body" }
+
+  /me/notices:
+    get:
+      tags: [me]
+      x-phase: P8
+      summary: "{ items: [Notice] } — the signed-in person's sticky notifications not acknowledged yet (the phone re-shows them)."
+      responses:
+        "200": { description: "OK" }
+
+  /me/notices/{noticeId}/ack:
+    post:
+      tags: [me]
+      x-phase: P8
+      summary: "Acknowledge a sticky notification → { id, acknowledgedAt } (a second call answers with the first time)."
+      parameters:
+        - { name: noticeId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "OK" }
+        "404": { description: "not_found" }
+
+  /app/releases/latest:
+    get:
+      tags: [app]
+      x-phase: P8
+      summary: "{ release: null | { versionCode, versionName, notes, sizeBytes, sha256, minSupported, publishedAt, downloadPath } } — the newest app version for in-app updates (no Play Store). Phones below minSupported must update first. Push type app_update (versionCode, versionName) when one is published."
+      responses:
+        "200": { description: "OK" }
+
+  /app/releases/{versionCode}/apk:
+    get:
+      tags: [app]
+      x-phase: P8
+      summary: "The APK in parts of at most 8 MB: send Range: bytes=start- (206 + Content-Range) until the total; 200 when the first part is the whole file. X-Content-SHA256 = the whole file's hash."
+      parameters:
+        - { name: versionCode, in: path, required: true, schema: { type: integer } }
+      responses:
+        "200": { description: "The whole APK" }
+        "206": { description: "A part" }
+        "404": { description: "not_found (only the newest 3 releases keep their file)" }
+        "416": { description: "range_not_satisfiable" }
 
   /meetings:
     get:

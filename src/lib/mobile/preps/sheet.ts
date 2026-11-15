@@ -3,7 +3,7 @@ import type { sheets_v4 } from "googleapis";
 import { withSheetsRetry } from "@/lib/automation/control-sheet";
 import { env } from "@/lib/env";
 import { UserError } from "@/lib/mobile/http";
-import { dayOf, findPrepColumns, identityOf, IST_OFFSET_MS, type PrepColumns, type PrepRow, rowsToPreps } from "@/lib/mobile/preps/parse";
+import { dayOf, findPrepColumns, identityOf, IST_OFFSET_MS, type PrepColumns, type PrepRow, productColumnByValues, rowsToPreps } from "@/lib/mobile/preps/parse";
 import { getSheetsWriter } from "@/lib/sheets";
 
 /**
@@ -103,6 +103,7 @@ export async function readPrepSnapshot(fresh = false): Promise<PrepSnapshot> {
     let columns: PrepColumns;
     try {
       columns = findPrepColumns(rows[0]);
+      columns = { ...columns, product: productColumnByValues(rows, columns) };
     } catch (err) {
       // The source moved or its header broke: look the source up again next time.
       g.__prepSource = undefined;

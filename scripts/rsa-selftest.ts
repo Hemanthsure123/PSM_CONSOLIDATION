@@ -10,6 +10,7 @@ import { candidateOnly, fitRsa, normaliseRsa, remarkBullets, rsaFileName, rsaPag
 import { renderRsaDocx, rsaText } from "@/lib/rsa/render";
 import { mapRsaColumns, parseRsaSheet, rsaRow } from "@/lib/rsa/sheet";
 import { roundIn } from "@/lib/rsa/list";
+import { findPrepColumns, productColumnByValues } from "@/lib/mobile/preps/parse";
 import { Evidence, fitToBudget, normalizePrepDoc, pagesOf, PAGE_CEILING, richness, type PrepDoc } from "@/lib/prepdocs/model";
 import { renderDocx } from "@/lib/prepdocs/render";
 import { researchPlan } from "@/lib/prepdocs/generate";
@@ -173,6 +174,21 @@ test("roundIn finds the round in an RSA document name", () => {
   assert.equal(roundIn("RSA_Asha_Rao_Acme_ai_TR1_15-Nov-2026").toUpperCase(), "TR1");
   assert.equal(roundIn("INTERVIEW SUMMARY ANALYSIS (RSA) - Acme TR3").toUpperCase(), "TR3");
   assert.equal(roundIn("Notes"), "");
+});
+
+// ── Drill-down Product column whose header was overwritten ───────────────────
+
+test("product column found by its values when the header no longer says Product", () => {
+  const header = ["w", "Date of entry", "PC", "Interview Date", "Interview Timings", "Job ID", "Company Name", "Candidate Name", "Candidate Mobile No", "Candidate Resume", "Round Category", "Interview Process", "Candidate's Status", "Prep Given", "Prep given by", "Prep Date", "Prep Time", "Prep Document", "Remarks", "HubSpot Link", "", "Company Interview Mode", "Meeting link", "Interview Recording Link", "Transcript Link", "Drilldown link"];
+  const cols = findPrepColumns(header);
+  assert.equal(cols.product, 0);
+  const products = ["Edge", "Academy", "Edge 2.0", "External", "NIAT", "Academy Assessed", ""];
+  const rows = [header, ...Array.from({ length: 30 }, (_, i) => [products[i % products.length], "14-Nov-2026", "x", "", "", "", "Acme", "Asha Rao", "9000000001"])];
+  assert.equal(productColumnByValues(rows, cols), 1);
+  const named = findPrepColumns(["Product", ...header.slice(1)]);
+  assert.equal(productColumnByValues(rows, named), 1, "a named Product column is kept");
+  const noise = [header, ...Array.from({ length: 30 }, () => ["hello", "14-Nov-2026", "x", "", "", "", "Acme", "Asha Rao", "9000000001"])];
+  assert.equal(productColumnByValues(noise, cols), 0, "no column of product names → none");
 });
 
 // ── Prep document format v2 ──────────────────────────────────────────────────

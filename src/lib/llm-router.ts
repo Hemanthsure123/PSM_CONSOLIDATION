@@ -1,4 +1,5 @@
 import "server-only";
+import { ensureAdminKeys } from "@/lib/admin/api-keys";
 import type { Part, Schema } from "@google/generative-ai";
 import { env } from "@/lib/env";
 import { geminiJsonForModel, geminiUsableKeyCount, type GeminiFailureKind } from "@/lib/gemini-keys";
@@ -141,6 +142,7 @@ function warn(req: ChainRequest, tier: LlmTier, msg: string) {
 }
 
 export async function runLlmChain(req: ChainRequest): Promise<ChainResult> {
+  await ensureAdminKeys();
   const tiers = llmChain(req.chain);
   if (tiers.length === 0) {
     return { ok: false, error: "No LLM keys configured (GEMINI_API_KEYS / MISTRAL_API_KEYS)." };

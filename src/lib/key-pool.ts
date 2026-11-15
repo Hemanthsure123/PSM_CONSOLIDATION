@@ -1,4 +1,5 @@
 import "server-only";
+import { ensureAdminKeys } from "@/lib/admin/api-keys";
 import type { Schema } from "@google/generative-ai";
 import { env } from "@/lib/env";
 
@@ -246,6 +247,7 @@ export async function pooledChatJson(
   model: string,
   req: ChatRequest,
 ): Promise<{ text: string; key: string }> {
+  await ensureAdminKeys();
   const pool = getPool(provider);
   const n = pool.keys.length;
   if (n === 0) throw new ChatPoolError(`${provider}: no API key configured`, "exhausted", true);
