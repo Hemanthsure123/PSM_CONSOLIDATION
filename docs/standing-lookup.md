@@ -48,7 +48,7 @@ Rows keep the pasted order, so a pasted result lines up with the source. The hea
 |---|---|---|
 | UUID | Always | As pasted. When only a phone number was pasted, the UUID is taken from the database. |
 | Phone | Only when phone numbers were pasted (Find always adds them) | As pasted, as 10 digits |
-| Internal Standing | Always | Their best standing across products, e.g. "Edge 2.0 · MERN TR-2 · Strong hire". Tier 4 people get "… (not eligible)". Assessed by the Academy but not in the pool: "Assessed · not in the eligible pool". Anyone else: "External". |
+| Internal Standing | Always | Their best standing across products on the first line, e.g. "Edge 2.0 · TR-2 cleared · MERN Strong hire", then every assessment result behind it, one "•" line each (scores with their maxima, TR-1, every TR-2 track, the combined interview, a closed journey), then each other product they're in, the same way ("Also Academy · …"). Tier 4 people get "… (not eligible)". Assessed by the Academy but not in the pool: "Assessed · not in the eligible pool". Anyone else: "External". The same cell Domain shortlisting exports. |
 | Internal Stage | People in the pool | TR-2 / top, TR-1, Assessment, Not eligible |
 | Internal Product | People in the pool | The product of that best standing: Edge 2.0, Edge 1.0 or Academy |
 | Job Eligibility | Always | *Eligible*: in the eligible pool with an eligible standing (tier 1–3). *Not eligible*: in the pool but not cleared, or assessed and not in the pool. Empty for someone unknown (External). |

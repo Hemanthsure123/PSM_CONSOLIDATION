@@ -32,12 +32,14 @@ import {
   picksMarks,
   productsNeeded,
   requirementLines,
+  standingText,
   summarise,
   textKeys,
   toHtmlTable,
   toTsv,
   type LookupData,
 } from "@/lib/pool/lookup";
+import { recordDetails } from "@/lib/pool/details";
 import { standingFor } from "@/lib/pool/match";
 import type { AssessmentScore } from "@/lib/pool/scores/catalogue";
 import type { AcademyRecord, CandidateStanding, Edge1Record, Edge2Record } from "@/lib/pool/types";
@@ -95,16 +97,24 @@ const edge2: Edge2Record = {
   ...ident("Mirat Parmar", "8849577323", U1),
   referenceResumeUrl: "https://example.com/mirat.pdf",
   candidateStage: "TR2 CLEARED",
+  sheetStage: "TR2 CLEARED",
+  driveStage: "resume_based_interview",
   offlineOverallScore: 112.5,
   dsaCodingScore: 86,
   csFundamentalsScore: 26.5,
   sqlMcqScore: 12,
   sqlCodingScore: null,
   tr1: { selfIntro: 7, dsaOverall: 8, problemSolving: 7.5, coding: 8, communication: null, debugging: 7, overallTechnical: 78 },
+  tr1Status: "pass",
+  dsaInterview: { status: "Shortlisted", attempt: "", dsaScore: 90, csScore: 30 },
+  interviewPath: "separate",
+  combined: { state: "", verdict: null },
   tr2: [
     { track: "mern_fullstack", verdict: "strong_hire" },
     { track: "genai", verdict: "rejected" },
   ],
+  tr2Pending: ["python_fullstack"],
+  journey: { status: "open", reason: "" },
 };
 const academy: AcademyRecord = {
   product: "academy",
@@ -135,10 +145,10 @@ const mirat: CandidateStanding = {
   bestProduct: "edge2",
   bestTier: 1,
   bestScore: 93,
-  bestLabel: "Edge 2.0 · MERN TR-2 · Strong hire",
+  bestLabel: "Edge 2.0 · TR-2 cleared · MERN Strong hire",
   eligible: true,
   standings: [
-    { product: "edge2", tier: 1, label: "Edge 2.0 · MERN TR-2 · Strong hire", score: 93, eligible: true },
+    { product: "edge2", tier: 1, label: "Edge 2.0 · TR-2 cleared · MERN Strong hire", score: 93, eligible: true },
     { product: "academy", tier: 2, label: "Academy · Bucket A TR-1 Strong hire", score: 74, eligible: true },
   ],
 };
@@ -194,7 +204,8 @@ check("text and mark keys split", textKeys(["edge2.assessment", "name", "marks.d
     "Academy active pool: Yes",
     "Academy preference: Frontend",
     "Edge 2.0 stage: TR2 CLEARED",
-    "Edge 2.0 TR-2: MERN Strong hire · GenAI Rejected",
+    "Edge 2.0 DSA interview: Shortlisted · DSA 90/120 · CS 30/40",
+    "Edge 2.0 TR-2: MERN Strong hire · GenAI Rejected · Python Full Stack pending",
   ];
   check("text items worded, marks never in the cell, missing ones skipped", JSON.stringify(lines) === JSON.stringify(want), lines);
   const picked = requirementLines({ standing: uday, records: { edge1 } }, ["edge2.tr2", "edge1.tr1", "edge1.tr2", "other-products"]);
@@ -206,9 +217,9 @@ check("text and mark keys split", textKeys(["edge2.assessment", "name", "marks.d
   const input = parseLookupInput(["UUID", U1, "9059309747", "", "7000000001", U3, "hello"].join("\n"));
   const rows = lookupRows(input, data, ["edge2.tr2", "edge1.tr1"]);
   const [byUuid, byPhone, blank, tier4, external, junk] = rows;
-  check("matched by UUID", byUuid.status === "internal" && byUuid.cells["Internal Standing"] === "Edge 2.0 · MERN TR-2 · Strong hire" && byUuid.cells["Internal Stage"] === "TR-2 / top" && byUuid.cells["Internal Product"] === "Edge 2.0", byUuid);
+  check("matched by UUID", byUuid.status === "internal" && byUuid.cells["Internal Standing"] === "Edge 2.0 · TR-2 cleared · MERN Strong hire\nAlso Academy · Bucket A TR-1 Strong hire" && byUuid.cells["Internal Stage"] === "TR-2 / top" && byUuid.cells["Internal Product"] === "Edge 2.0", byUuid);
   check("matched by phone, UUID filled from the pool", byPhone.status === "internal" && byPhone.uuid === U2 && byPhone.cells["Matched In Pool By"] === "Phone", byPhone);
-  check("requirements per person", byUuid.requirements.join("|") === "Edge 2.0 TR-2: MERN Strong hire · GenAI Rejected" && byPhone.requirements.join("|") === "Edge 1.0 TR-1: Medium Hire");
+  check("requirements per person", byUuid.requirements.join("|") === "Edge 2.0 TR-2: MERN Strong hire · GenAI Rejected · Python Full Stack pending" && byPhone.requirements.join("|") === "Edge 1.0 TR-1: Medium Hire");
   check("blank stays blank", blank.status === "blank" && Object.keys(blank.cells).length === 0);
   check("not eligible says so", tier4.status === "not-eligible" && tier4.cells["Internal Standing"] === "Edge 1.0 · Assessment not cleared (not eligible)" && tier4.cells["Internal Stage"] === "Not eligible");
   check("unknown id is external", external.status === "external" && external.cells["Internal Standing"] === "External" && !external.cells["Internal Stage"]);
@@ -221,7 +232,7 @@ check("text and mark keys split", textKeys(["edge2.assessment", "name", "marks.d
   check("one output row per pasted row", t.rows.length === rows.length);
   check("no phone column for a UUID-only paste", lookupTable(lookupRows(parseLookupInput(U1), data, []), { phoneColumn: false, keys: [] }).headers.join("|") === "UUID|Internal Standing|Internal Stage|Internal Product|Job Eligibility");
   const multi = lookupRows(parseLookupInput(U1), data, ["edge2.stage", "edge2.tr2"]);
-  check("Requirements is one column, one line per item", lookupTable(multi, { phoneColumn: false, keys: ["edge2.stage", "edge2.tr2"] }).rows[0].Requirements === "Edge 2.0 stage: TR2 CLEARED\nEdge 2.0 TR-2: MERN Strong hire · GenAI Rejected");
+  check("Requirements is one column, one line per item", lookupTable(multi, { phoneColumn: false, keys: ["edge2.stage", "edge2.tr2"] }).rows[0].Requirements === "Edge 2.0 stage: TR2 CLEARED\nEdge 2.0 TR-2: MERN Strong hire · GenAI Rejected · Python Full Stack pending");
   const each = lookupTable(multi, { phoneColumn: false, keys: ["name", "edge2.stage"], options: { ...DEFAULT_LOOKUP_OPTIONS, layout: "columns" } });
   check("…or a column each", each.headers.slice(5).join("|") === "Name|Edge 2.0 stage" && each.rows[0]["Edge 2.0 stage"] === "TR2 CLEARED", each.headers);
 
@@ -350,7 +361,29 @@ ${U2}`;
 // ── Same three columns as Domain shortlisting ────────────────────────────────
 {
   const st = standingFor(data.standings, "", U1);
-  check("assessed", JSON.stringify(internalColumns(st, true)) === JSON.stringify({ "Matched In Pool By": "User ID", "Internal Standing": "Edge 2.0 · MERN TR-2 · Strong hire", "Internal Stage": "TR-2 / top", "Internal Product": "Edge 2.0" }));
+  check("assessed", JSON.stringify(internalColumns(st, true)) === JSON.stringify({ "Matched In Pool By": "User ID", "Internal Standing": "Edge 2.0 · TR-2 cleared · MERN Strong hire\nAlso Academy · Bucket A TR-1 Strong hire", "Internal Stage": "TR-2 / top", "Internal Product": "Edge 2.0" }));
+  // With the records' details (what /api/pool/lookup sends): the headline, then every result, one "•" line each.
+  const withDetails = { ...st!, standings: st!.standings.map((s) => ({ ...s, details: recordDetails(s.product === "edge2" ? edge2 : academy) })) };
+  const lines = standingText(withDetails).split("\n");
+  check("details: the headline first", lines[0] === "Edge 2.0 · TR-2 cleared · MERN Strong hire", lines);
+  check(
+    "details: Edge 2.0 assessment with maxima",
+    lines[1] === "• Assessment: Cleared · 112.5/160 (DSA coding 86/120 · CS fundamentals 26.5/40 · SQL MCQ 12/15)",
+    lines[1],
+  );
+  check(
+    "details: TR-1 = the DSA interview, with the AI interview's scores",
+    lines[2] === "• TR-1 (DSA interview): Cleared · Shortlisted (DSA 90/120 · CS 30/40) · AI interview Pass, technical 78/100, ratings out of 10: DSA 8 · problem solving 7.5 · coding 8 · debugging 7 · self intro 7",
+    lines[2],
+  );
+  check(
+    "details: every TR-2 track, cleared or not, and the booked one",
+    lines[3] === "• TR-2: MERN Full Stack Strong hire (cleared) · GenAI Rejected (not cleared) · Python Full Stack booked, not taken yet",
+    lines[3],
+  );
+  check("details: the other product follows, with its own results", lines[4] === "Also Academy · Bucket A TR-1 Strong hire" && lines.includes("• Bucket A TR-1: Strong hire · 78/100 (cleared)") && lines.includes("• Frontend competency: L4 · Strong · Cleared · 82/100"), lines);
+  check("details: an empty round is left out", !lines.some((l) => l.startsWith("• Bucket A TR-2")), lines);
+  check("details: the CSV cell keeps the lines", internalColumns(withDetails, true)["Internal Standing"] === lines.join("\n"));
   check("not checked vs external", internalColumns(null, false)["Internal Standing"] === "Not checked" && internalColumns(undefined, true)["Internal Standing"] === "External");
 }
 

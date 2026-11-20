@@ -1,4 +1,4 @@
-import { isCleared, parseVerdict, standingOf } from "@/lib/pool/standing";
+import { EDGE2_STAGE_TEXT, edge2ResolvedStage, edge2Stage, isCleared, parseVerdict, standingOf } from "@/lib/pool/standing";
 import {
   type AcademyBucket,
   type AcademyCompetency,
@@ -146,27 +146,86 @@ export function parseResumeReference(table: Table): { byPhone: Map<string, strin
   return { byPhone, byUserId };
 }
 
+/** The stage column's own names. The drive's "currentStage" is not one: it says where the candidate is, not what they cleared. */
+const EDGE2_STAGE_HEADERS = ["Candidate Stage", "FINAL STAGE", "Stage", "Highest Stage", "Cleared Stage"];
+/** A stage cell: "TR2 CLEARED", "TR-1 Cleared", "Assessment Cleared". */
+const EDGE2_STAGE_VALUE = /^(assess?ment|tr\s*-?\s*[12])\s*clear(ed)?$/i;
+/** Columns only the Edge 2.0 drive export has — any one marks the header row. */
+const EDGE2_MARKERS = [
+  ...EDGE2_STAGE_HEADERS,
+  "offlineOverallScore",
+  "offlineDataStructuresScore",
+  "bqCandidateId",
+  "currentStage",
+  "dsaInterviewQualifyingStatus",
+  "combinedInterviewVerdict",
+  "tr1OverallTechnicalScore",
+];
+const EDGE2_IDENTITY = ["phone", "Phone Number", "mobile", "Mobile Number", "Contact Number", "bqCandidateId", "User ID", "userId", "Candidate ID"];
+const TR2_COLUMN = /^tr\s*-?\s*2\s+(.+?)\s+(verdict|state)$/i;
+
+/** The Edge 2.0 header row: an identity column plus a drive-export column (or a "TR2 <track> Verdict" column), within the top 15 rows. */
+function edge2Header(table: Table): number {
+  for (let r = 0; r < Math.min(15, table.length); r++) {
+    const row = table[r] ?? [];
+    const hasId = col(row, ...EDGE2_IDENTITY) >= 0;
+    const hasMarker = col(row, ...EDGE2_MARKERS) >= 0 || row.some((c) => TR2_COLUMN.test(String(c ?? "").replace(/\s+/g, " ").trim()));
+    if (hasId && hasMarker) return r;
+  }
+  return -1;
+}
+
+/**
+ * The stage column: by name, else the column (often left without a header) whose cells read
+ * "TR2 CLEARED" / "TR1 CLEARED" / "ASSESSMENT CLEARED". -1 when the sheet has none — the stage then
+ * comes from the interview results alone.
+ */
+function edge2StageColumn(head: string[], body: Table): number {
+  const named = col(head, ...EDGE2_STAGE_HEADERS);
+  if (named >= 0) return named;
+  const width = Math.max(head.length, ...body.slice(0, 500).map((r) => r.length));
+  let best = -1;
+  let bestHits = 0;
+  for (let j = 0; j < width; j++) {
+    let filled = 0;
+    let hits = 0;
+    for (const r of body) {
+      const v = cell(r, j);
+      if (!v) continue;
+      filled++;
+      if (EDGE2_STAGE_VALUE.test(v)) hits++;
+    }
+    // Nearly every filled cell must read as a stage, so a column that merely mentions one never counts.
+    if (hits > bestHits && hits >= 0.9 * filled) {
+      best = j;
+      bestHits = hits;
+    }
+  }
+  return best;
+}
+
 export function parseEdge2(table: Table, reference?: ReturnType<typeof parseResumeReference>): ParsedPool<Edge2Record> {
-  const stageCandidates = ["Candidate Stage", "FINAL STAGE", "currentStage", "Stage"];
-  const idOrPhoneCandidates = ["phone", "Phone Number", "mobile", "Mobile Number", "Contact Number", "bqCandidateId", "User ID", "userId", "Candidate ID", "email", "Email", "name", "Candidate Name"];
-  const h = findHeader(table, [stageCandidates]);
+  const h = edge2Header(table);
   if (h < 0) {
     return {
       product: "edge2",
       records: [],
       rowsRead: 0,
-      missingColumns: ["Candidate Stage"],
+      missingColumns: ["phone / bqCandidateId, with Candidate Stage or the drive export's interview columns"],
       issues: [],
     };
   }
-  const head = table[h];
+  const head = table[h].map((x) => String(x ?? ""));
+  const body = table.slice(h + 1);
   const i = {
-    stage: col(head, "Candidate Stage", "FINAL STAGE", "currentStage", "Stage"),
-    currentStage: col(head, "currentStage", "Stage"),
+    stage: edge2StageColumn(head, body),
+    driveStage: col(head, "currentStage"),
     phone: col(head, "phone", "Phone Number", "mobile", "Mobile Number", "Contact Number"),
     userId: col(head, "bqCandidateId", "User ID", "userId", "id", "Candidate ID"),
     name: col(head, "name", "Candidate Name", "studentName", "Name"),
-    offline: col(head, "offlineOverallScore", "overallScore", "offlineScore"),
+    // offlineOverallScore first; "overallScore" (to its left in the export) only stands in for it.
+    offline: col(head, "offlineOverallScore"),
+    overall: col(head, "overallScore", "offlineScore"),
     dsa: col(head, "dsaCodingScore", "offlineDataStructuresScore"),
     cs: col(head, "csFundamentalsScore"),
     sqlMcq: col(head, "sqlMcqScore"),
@@ -178,19 +237,32 @@ export function parseEdge2(table: Table, reference?: ReturnType<typeof parseResu
     communication: col(head, "tr1CommunicationAndCollaboration"),
     debugging: col(head, "tr1DebuggingAndIteration"),
     overallTechnical: col(head, "tr1OverallTechnicalScore"),
+    tr1Status: col(head, "tr1Status"),
+    dsaStatus: col(head, "dsaInterviewQualifyingStatus"),
+    dsaAttempt: col(head, "dsaInterviewAttemptStatus"),
+    dsaScore: col(head, "dsaInterviewDsaScore"),
+    csScore: col(head, "dsaInterviewCsScore"),
+    path: col(head, "interviewPath"),
+    combinedState: col(head, "combinedInterviewState"),
+    combinedVerdict: col(head, "combinedInterviewVerdict"),
+    journeyStatus: col(head, "journeyStatus"),
+    journeyReason: col(head, "journeyReason"),
   };
-  const verdictCols = head
-    .map((raw, idx) => {
-      const m = String(raw ?? "").replace(/\s+/g, " ").trim().match(/^tr\s*-?\s*2\s+(.+?)\s+verdict$/i);
-      const track = m ? TRACK_OF[squeeze(m[1])] : undefined;
-      return track ? { track, idx } : null;
-    })
-    .filter((x): x is { track: Tr2Track; idx: number } => Boolean(x));
+  const trackCols = (kind: "verdict" | "state") =>
+    head
+      .map((raw, idx) => {
+        const m = raw.replace(/\s+/g, " ").trim().match(TR2_COLUMN);
+        const track = m && m[2].toLowerCase() === kind ? TRACK_OF[squeeze(m[1])] : undefined;
+        return track ? { track, idx } : null;
+      })
+      .filter((x): x is { track: Tr2Track; idx: number } => Boolean(x));
+  const verdictCols = trackCols("verdict");
+  const stateCols = trackCols("state");
 
   const rows: { row: number; record: Edge2Record }[] = [];
   const issues: ParseIssue[] = [];
   let rowsRead = 0;
-  table.slice(h + 1).forEach((r, k) => {
+  body.forEach((r, k) => {
     if (!r.some((c) => String(c ?? "").trim())) return;
     rowsRead++;
     const row = h + 2 + k;
@@ -198,42 +270,51 @@ export function parseEdge2(table: Table, reference?: ReturnType<typeof parseResu
     const phone = normalisePhone(phoneRaw);
     const userId = normaliseUserId(cell(r, i.userId));
     issues.push(...identityIssues(row, phoneRaw, phone));
-    const stage = cell(r, i.stage) || (i.currentStage >= 0 ? cell(r, i.currentStage) : "");
-    if (!stage) {
-      issues.push({ row, problem: "No Candidate Stage — skipped" });
-      return;
-    }
+    const sheetStage = cell(r, i.stage);
     const tr2 = verdictCols.flatMap(({ track, idx }) => {
       const v = parseVerdict(cell(r, idx));
       return v ? [{ track, verdict: v }] : [];
     });
+    // Booked but not interviewed: "assigned", and no verdict for that track yet.
+    const tr2Pending = stateCols.filter(({ track, idx }) => /^assigned$/i.test(cell(r, idx)) && !tr2.some((v) => v.track === track)).map((x) => x.track);
     const ref = (phone && reference?.byPhone.get(phone)) || (userId && reference?.byUserId.get(userId)) || null;
-    rows.push({
-      row,
-      record: {
-        product: "edge2",
-        phone,
-        userId,
-        name: cell(r, i.name),
-        referenceResumeUrl: ref,
-        candidateStage: stage,
-        offlineOverallScore: num(cell(r, i.offline)),
-        dsaCodingScore: num(cell(r, i.dsa)),
-        csFundamentalsScore: num(cell(r, i.cs)),
-        sqlMcqScore: num(cell(r, i.sqlMcq)),
-        sqlCodingScore: num(cell(r, i.sqlCoding)),
-        tr1: {
-          selfIntro: num(cell(r, i.selfIntro)),
-          dsaOverall: num(cell(r, i.dsaOverall)),
-          problemSolving: num(cell(r, i.problemSolving)),
-          coding: num(cell(r, i.coding)),
-          communication: num(cell(r, i.communication)),
-          debugging: num(cell(r, i.debugging)),
-          overallTechnical: num(cell(r, i.overallTechnical)),
-        },
-        tr2,
+    const record: Edge2Record = {
+      product: "edge2",
+      phone,
+      userId,
+      name: cell(r, i.name),
+      referenceResumeUrl: ref,
+      candidateStage: "",
+      sheetStage,
+      driveStage: cell(r, i.driveStage),
+      offlineOverallScore: num(cell(r, i.offline)) ?? num(cell(r, i.overall)),
+      dsaCodingScore: num(cell(r, i.dsa)),
+      csFundamentalsScore: num(cell(r, i.cs)),
+      sqlMcqScore: num(cell(r, i.sqlMcq)),
+      sqlCodingScore: num(cell(r, i.sqlCoding)),
+      tr1: {
+        selfIntro: num(cell(r, i.selfIntro)),
+        dsaOverall: num(cell(r, i.dsaOverall)),
+        problemSolving: num(cell(r, i.problemSolving)),
+        coding: num(cell(r, i.coding)),
+        communication: num(cell(r, i.communication)),
+        debugging: num(cell(r, i.debugging)),
+        overallTechnical: num(cell(r, i.overallTechnical)),
       },
-    });
+      tr1Status: cell(r, i.tr1Status).toLowerCase(),
+      dsaInterview: { status: cell(r, i.dsaStatus), attempt: cell(r, i.dsaAttempt).toLowerCase(), dsaScore: num(cell(r, i.dsaScore)), csScore: num(cell(r, i.csScore)) },
+      interviewPath: cell(r, i.path).toLowerCase(),
+      combined: { state: cell(r, i.combinedState).toLowerCase(), verdict: parseVerdict(cell(r, i.combinedVerdict)) },
+      tr2,
+      tr2Pending,
+      journey: { status: cell(r, i.journeyStatus).toLowerCase(), reason: cell(r, i.journeyReason) },
+    };
+    // What the candidate cleared: the sheet's stage, raised by the interview results.
+    const resolved = edge2ResolvedStage(record);
+    record.candidateStage = EDGE2_STAGE_TEXT[resolved];
+    const fromSheet = edge2Stage(sheetStage);
+    if (fromSheet && fromSheet !== resolved) issues.push({ row, problem: `Stage "${sheetStage}" raised to ${record.candidateStage} by the interview results` });
+    rows.push({ row, record });
   });
   const c = collect(rows);
   return { product: "edge2", records: c.records, rowsRead, missingColumns: [], issues: [...issues, ...c.issues] };
@@ -419,6 +500,7 @@ export function parseAcademy(table: Table): ParsedPool<AcademyRecord> {
 /** Which product a CSV belongs to, from its headers (null = not a pool sheet). */
 export function detectProduct(table: Table): Product | null {
   if (
+    edge2Header(table) >= 0 ||
     findHeader(table, [
       ["Candidate Stage", "FINAL STAGE", "currentStage", "Stage"],
     ]) >= 0 ||

@@ -69,6 +69,7 @@ import {
   type GithubScope,
 } from "@/lib/domain-scoring";
 import { lookupPoolStandings } from "@/lib/pool/client";
+import { standingText } from "@/lib/pool/lookup";
 import { isAssessed, standingFor } from "@/lib/pool/match";
 import { PRODUCT_LABEL, STAGE_SHORT, type InternalStanding } from "@/lib/pool/types";
 import { NO_DSA_GATES, bestRating, dsaGatesActive, ratingsLine, type DsaGates } from "@/lib/dsa-scoring";
@@ -1903,7 +1904,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
                         </TableCell>
                         <TableCell>
                           {isAssessed(c.internal) ? (
-                            <div className="whitespace-nowrap" title={c.internal.label}>
+                            <div className="whitespace-nowrap" title={standingText(c.internal)}>
                               <Badge variant={c.internal.tier === 1 ? "success" : "default"}>{STAGE_SHORT[c.internal.tier]}</Badge>
                               <span className="ml-1.5 text-xs text-muted-foreground">{PRODUCT_LABEL[c.internal.product]}</span>
                               {c.priority ? <span className="block text-[11px] text-muted-foreground">Priority {c.priority}</span> : null}

@@ -137,7 +137,7 @@ erDiagram
 | Table | One row per | Holds |
 |---|---|---|
 | `candidates` | person | Identity: phone (10 digits, unique), user id (unique), name |
-| `edge2_records` | person in the Edge 2.0 pool | Candidate stage, the five assessment scores, the seven TR-1 ratings, the best TR-2 verdict, derived standing, reference resume link |
+| `edge2_records` | person in the Edge 2.0 pool | Candidate stage (resolved) and the sheet's own stage cell, the drive's currentStage, the five assessment scores, the DSA interview (status, attempt, scores), the TR-1 AI interview (result, seven ratings), the interview path, the combined interview (state, verdict), TR-2 tracks booked but not taken, the journey (status, reason), the best TR-2 verdict, derived standing, reference resume link |
 | `edge2_tr2_verdicts` | person × TR-2 track | Strong / medium / low hire / rejected per track (data analytics, DS/ML, GenAI, Java FS, MERN FS, product, Python FS) |
 | `edge1_records` | person in Edge 1.0 | Assessment, TR-1 and TR-2 status, derived standing, reference resume link |
 | `academy_records` | person in the Academy pool | UID, YOG, old DSA offline bucket, DSA competency offline result, previous placement, preference, active pool, derived standing |
@@ -285,10 +285,26 @@ sequenceDiagram
 
 | Stage (tier) | Edge 2.0 | Edge 1.0 | Academy (everyone eligible) |
 |---|---|---|---|
-| 1 · TR-2 cleared / top level | TR-2 Strong or Medium hire (Low hire = not cleared) | TR-2 shortlisted | Bucket A TR-2 cleared, or L3–L5 in any competency interview |
-| 2 · TR-1 cleared | TR-1 cleared | TR-1 Strong / Medium hire | TR-1 cleared in Bucket A, B or C (or Bucket B TR-2) |
-| 3 · Assessment cleared | DSA offline assessment cleared | Assessment selected | Old DSA offline bucket, or a competency exam |
+| 1 · TR-2 cleared / top level | TR-2 Strong or Medium hire in any track, or in the combined interview (Low hire = not cleared) | TR-2 shortlisted | Bucket A TR-2 cleared, or L3–L5 in any competency interview |
+| 2 · TR-1 cleared | DSA interview "Shortlisted", or a TR-2 taken / booked while TR-1 isn't on record as not cleared | TR-1 Strong / Medium hire | TR-1 cleared in Bucket A, B or C (or Bucket B TR-2) |
+| 3 · Assessment cleared | DSA offline assessment cleared (everyone in the pool) | Assessment selected | Old DSA offline bucket, or a competency exam |
 | 4 · not eligible | — | Assessment not selected | — |
+
+**Edge 2.0 stage (rules v2, 2026-11-20).** The stage is the higher of the sheet's stage column and what
+the interview results prove. The stage column is found by name ("Candidate Stage", "FINAL STAGE",
+"Stage") or, when its header is blank, by its values ("TR2 CLEARED" / "TR1 CLEARED" / "ASSESSMENT
+CLEARED"). A tab without one (the newer exports) is staged from the results alone. The drive's
+`currentStage` (dsa_interview, resume_based_interview, combined_interview) says where the candidate
+is, not what they cleared, so it is kept apart (`drive_stage`) and never read as the stage. The DSA
+interview's "Not Shortlisted" counts as *not cleared* only once the candidate interviewed (an attempt,
+scores, or a TR-1 AI interview result); before that it reads *TR-1 not taken yet*. On the 2027 pool
+this reproduces the sheet's own stage column on every row (251 TR-2, 225 TR-1, 1,951 assessment).
+
+**Internal Standing** (Domain shortlisting CSVs, Standing lookup): the best standing on the first
+line, then every assessment result behind it, one `•` line each — assessment scores with their
+maxima, TR-1 (DSA interview + AI interview scores), every TR-2 track (cleared, not cleared, booked),
+the combined interview, a closed journey — then the person's other products the same way
+(`src/lib/pool/details.ts`, built from the stored records by `/api/pool/lookup`).
 
 Domain shortlisting looks up every row of the sheet first: by the phone column, then the user id column.
 It then:
@@ -425,8 +441,8 @@ npx tsx scripts/resume-sections-selftest.ts  # Skills / Summary removal, mandato
 
 - **Rows aren't deleted.** A person dropped from a sheet stays in the pool. `last_seen_at` shows it, and
   deletions are a manual SQL step.
-- **Combined-interview clears.** The 46 Edge 2.0 TR-2 clears from a combined interview have no track
-  verdict in the agreed columns. They rank as "TR-2 cleared" without a track.
+- **Combined-interview clears.** Edge 2.0 TR-2 clears from a combined interview (101 on 2026-11-20)
+  have no track. They rank as TR-2 cleared, labelled "Combined interview Strong / Medium hire".
 - **Untrusted section layouts.** When a resume's headings can't be trusted (side-by-side columns read row
   by row), only labelled "Skills:" lines are removed. The model's rule still applies.
 - **Project review cost.** It needs one model call per reviewed repository, and the free model tiers

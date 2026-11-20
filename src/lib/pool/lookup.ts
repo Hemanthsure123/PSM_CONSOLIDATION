@@ -57,16 +57,40 @@ export const JOB_ELIGIBILITY_HEADER = "Job Eligibility";
 export const ASSESSED_ONLY = "Assessed · not in the eligible pool";
 
 /**
+ * The Internal Standing cell: the best standing on the first line, then every assessment result
+ * behind it ("• " one per line), then each other product the person is in, the same way:
+ *
+ *   Edge 2.0 · TR-2 cleared · MERN Strong hire
+ *   • Assessment: Cleared · 110.5/160 (DSA coding 80.5/120 · CS fundamentals 30/40)
+ *   • TR-1 (DSA interview): Cleared · Shortlisted
+ *   • TR-2: MERN Full Stack Strong hire (cleared)
+ *   Also Academy · Bucket A TR-1 Medium hire
+ *   • Bucket A TR-1: Medium hire · 64/100 (cleared)
+ *
+ * A standing whose details weren't loaded (an older payload) is its headline alone.
+ */
+export function standingText(st: InternalStanding): string {
+  const notEligible = (s: { eligible: boolean; tier: Tier }) => !(s.eligible && s.tier <= 3);
+  const best = st.standings.find((s) => s.product === st.product);
+  const others = st.standings.filter((s) => s.product !== st.product);
+  const block = (head: string, details: string[] | undefined) => [head, ...(details ?? []).map((d) => `• ${d}`)].join("\n");
+  const label = st.label;
+  return [
+    block(isAssessed(st) ? label : `${label} (not eligible)`, best?.details),
+    ...others.map((s) => block(`Also ${s.label}${notEligible(s) ? " (not eligible)" : ""}`, s.details)),
+  ].join("\n");
+}
+
+/**
  * Internal Standing / Stage / Product (and how the person was matched) for one standing.
  * Not in the pool = "External" — or "Not checked" when the pool wasn't looked up at all.
  */
 export function internalColumns(st: InternalStanding | null | undefined, poolChecked: boolean): Record<string, string> {
   if (st) {
     const s = st as InternalStanding;
-    const label = s.label;
     return {
       "Matched In Pool By": s.matchedBy === "phone" ? "Phone" : "User ID",
-      "Internal Standing": isAssessed(s) ? label : `${label} (not eligible)`,
+      "Internal Standing": standingText(s),
       "Internal Stage": STAGE_SHORT[s.tier],
       "Internal Product": PRODUCT_LABEL[s.product],
     };
@@ -462,12 +486,40 @@ export const REQUIREMENTS: Requirement[] = [
   // Edge 2.0
   { key: "edge2.stage", group: "edge2", label: "Candidate stage", cellLabel: "Edge 2.0 stage", needs: ["edge2"], value: ({ records }) => records.edge2?.candidateStage ?? "" },
   {
+    key: "edge2.dsa-interview",
+    group: "edge2",
+    label: "DSA interview (TR-1)",
+    cellLabel: "Edge 2.0 DSA interview",
+    needs: ["edge2"],
+    value: ({ records }) => {
+      const d = records.edge2?.dsaInterview;
+      if (!d || (!d.status && d.dsaScore === null && d.csScore === null)) return "";
+      const scores = [d.dsaScore !== null ? `DSA ${d.dsaScore}/120` : "", d.csScore !== null ? `CS ${d.csScore}/40` : ""].filter(Boolean).join(" · ");
+      return [d.status, scores].filter(Boolean).join(" · ");
+    },
+  },
+  {
+    key: "edge2.combined",
+    group: "edge2",
+    label: "Combined interview",
+    cellLabel: "Edge 2.0 combined interview",
+    needs: ["edge2"],
+    value: ({ records }) => {
+      const c = records.edge2?.combined;
+      return c?.verdict ? VERDICT_LABEL[c.verdict] : /pending/i.test(c?.state ?? "") ? "Pending" : "";
+    },
+  },
+  {
     key: "edge2.tr2",
     group: "edge2",
     label: "TR-2 verdicts",
     cellLabel: "Edge 2.0 TR-2",
     needs: ["edge2"],
-    value: ({ records }) => (records.edge2?.tr2 ?? []).map((v) => `${TR2_TRACK_LABEL[v.track] ?? v.track} ${VERDICT_LABEL[v.verdict] ?? v.verdict}`).join(" · "),
+    value: ({ records }) =>
+      [
+        ...(records.edge2?.tr2 ?? []).map((v) => `${TR2_TRACK_LABEL[v.track] ?? v.track} ${VERDICT_LABEL[v.verdict] ?? v.verdict}`),
+        ...(records.edge2?.tr2Pending ?? []).map((t) => `${TR2_TRACK_LABEL[t] ?? t} pending`),
+      ].join(" · "),
   },
   // Edge 1.0
   { key: "edge1.assessment", group: "edge1", label: "Assessment", cellLabel: "Edge 1.0 assessment", needs: ["edge1"], value: ({ records }) => records.edge1?.assessmentStatus ?? "" },
@@ -493,7 +545,7 @@ const ORDER = [
   ...["name", "college", "yog", "degree", "resume", "other-products", "internal-score"],
   ...MARK_ITEMS.filter((m) => m.group !== "edge2").map((m) => m.key),
   ...["academy.active-pool", "academy.placement", "academy.preference"],
-  ...["edge2.stage", "edge2.assessment", "edge2.tr1", "edge2.tr2"],
+  ...["edge2.stage", "edge2.assessment", "edge2.dsa-interview", "edge2.tr1", "edge2.combined", "edge2.tr2"],
   ...["edge1.assessment", "edge1.tr1", "edge1.tr2"],
 ];
 

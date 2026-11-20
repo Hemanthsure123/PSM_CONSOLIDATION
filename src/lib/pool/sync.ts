@@ -149,13 +149,15 @@ interface Column {
   type: string;
   /** Cast applied in the SELECT (enums). */
   cast?: string;
+  /** A whole SELECT expression over the unnested value (wins over cast). */
+  expr?: (ref: string) => string;
   values: unknown[];
 }
 
 /** Bulk upsert keyed by candidate_id; only rows whose row_hash changed are written. */
 async function upsert(tx: PoolClient, table: string, cols: Column[], keepIfNull: string[] = []): Promise<{ id: number; inserted: boolean }[]> {
   const names = cols.map((c) => c.name);
-  const select = cols.map((c, i) => `${c.cast ? `t.c${i}::${c.cast}` : `t.c${i}`}`).join(", ");
+  const select = cols.map((c, i) => (c.expr ? c.expr(`t.c${i}`) : c.cast ? `t.c${i}::${c.cast}` : `t.c${i}`)).join(", ");
   const sets = names
     .filter((n) => n !== "candidate_id")
     .map((n) => (keepIfNull.includes(n) ? `${n} = coalesce(excluded.${n}, ${table}.${n})` : `${n} = excluded.${n}`))
@@ -210,6 +212,25 @@ async function writeEdge2(tx: PoolClient, prepared: Prepared[], mode: "sheet" | 
     [
       ...commonColumns(prepared, mode),
       { name: "candidate_stage", type: "text[]", values: prepared.map((p) => r(p).candidateStage) },
+      { name: "sheet_stage", type: "text[]", values: prepared.map((p) => r(p).sheetStage || null) },
+      { name: "drive_stage", type: "text[]", values: prepared.map((p) => r(p).driveStage || null) },
+      { name: "tr1_status", type: "text[]", values: prepared.map((p) => r(p).tr1Status || null) },
+      { name: "dsa_interview_status", type: "text[]", values: prepared.map((p) => r(p).dsaInterview.status || null) },
+      { name: "dsa_interview_attempt", type: "text[]", values: prepared.map((p) => r(p).dsaInterview.attempt || null) },
+      { name: "dsa_interview_dsa_score", type: "numeric[]", values: n((x) => x.dsaInterview.dsaScore) },
+      { name: "dsa_interview_cs_score", type: "numeric[]", values: n((x) => x.dsaInterview.csScore) },
+      { name: "interview_path", type: "text[]", values: prepared.map((p) => r(p).interviewPath || null) },
+      { name: "combined_state", type: "text[]", values: prepared.map((p) => r(p).combined.state || null) },
+      { name: "combined_verdict", type: "text[]", cast: "placement.verdict", values: prepared.map((p) => r(p).combined.verdict) },
+      // A text[] per row can't go through unnest (it flattens), so the tracks travel comma-joined.
+      {
+        name: "tr2_pending",
+        type: "text[]",
+        expr: (ref) => `string_to_array(${ref}, ',')::placement.tr2_track[]`,
+        values: prepared.map((p) => (r(p).tr2Pending.length ? r(p).tr2Pending.join(",") : null)),
+      },
+      { name: "journey_status", type: "text[]", values: prepared.map((p) => r(p).journey.status || null) },
+      { name: "journey_reason", type: "text[]", values: prepared.map((p) => r(p).journey.reason || null) },
       { name: "offline_overall_score", type: "numeric[]", values: n((x) => x.offlineOverallScore) },
       { name: "dsa_coding_score", type: "numeric[]", values: n((x) => x.dsaCodingScore) },
       { name: "cs_fundamentals_score", type: "numeric[]", values: n((x) => x.csFundamentalsScore) },

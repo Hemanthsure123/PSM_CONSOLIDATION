@@ -10,6 +10,7 @@
 import "./server-only-shim";
 import { detectProduct, normalisePhone, parseAcademy, parseEdge1, parseEdge2, parseLevel } from "@/lib/pool/parse";
 import { academyStanding, edge1Standing, edge2Standing, parseVerdict } from "@/lib/pool/standing";
+import { edge2Details } from "@/lib/pool/details";
 import { isAssessed, standingFor } from "@/lib/pool/match";
 import { comparePriority, gateFailure, githubEvidenceScore, priorityGroup, shortlistBar } from "@/lib/domain-scoring";
 import { groundPath, normalizeReview } from "@/lib/domain-project-review";
@@ -45,14 +46,97 @@ check("edge2 rows read (blank row skipped)", e2.rowsRead === 5, e2.rowsRead);
 check("edge2 duplicate kept once", e2.records.length === 4, e2.records.length);
 const a = e2.records.find((r) => r.userId === "u-1")!;
 check("edge2 duplicate keeps the stronger row (TR-2)", edge2Standing(a).tier === 1);
-check("edge2 TR-2 strong label", edge2Standing(a).label === "Edge 2.0 · MERN TR-2 · Strong hire", edge2Standing(a).label);
+check("edge2 TR-2 strong label", edge2Standing(a).label === "Edge 2.0 · TR-2 cleared · MERN Strong hire", edge2Standing(a).label);
 const b = e2.records.find((r) => r.userId === "u-2")!;
-check("edge2 TR-1 cleared, low hire at TR-2 = not cleared → tier 2", edge2Standing(b).tier === 2 && /TR-2 not cleared/.test(edge2Standing(b).label));
+check(
+  "edge2 TR-1 cleared, low hire at TR-2 = not cleared → tier 2",
+  edge2Standing(b).tier === 2 && edge2Standing(b).label === "Edge 2.0 · TR-1 cleared · TR-2 not cleared (MERN Low hire)",
+  edge2Standing(b).label,
+);
 check("edge2 assessment → tier 3", edge2Standing(e2.records.find((r) => r.userId === "u-3")!).tier === 3);
 const d = e2.records.find((r) => r.userId === "u-4")!;
 check("edge2 #N/A phone → matched by user id", d.phone === null);
-check("edge2 combined-interview TR-2 (no track verdict) → tier 1", edge2Standing(d).tier === 1 && edge2Standing(d).label === "Edge 2.0 · TR-2 cleared");
-check("edge2 missing columns reported", parseEdge2([["name", "phone"]]).missingColumns.includes("Candidate Stage"));
+check("edge2 TR-2 by the sheet's stage alone (no verdict) → tier 1", edge2Standing(d).tier === 1 && edge2Standing(d).label === "Edge 2.0 · TR-2 cleared");
+check("edge2 missing columns reported", parseEdge2([["name", "phone"]]).missingColumns.length === 1);
+
+// The pool sheet as it is (Nov 2026): the drive's export, with the stage in a column that has NO
+// header — and the drive's currentStage ("dsa_interview" …) beside it, which is not the stage.
+const exportHead = [
+  "id", "name", "phone", "currentStage", "journeyStatus (read-only)", "journeyReason (read-only)", "offlineOverallScore", "dsaCodingScore",
+  "csFundamentalsScore", "dsaInterviewQualifyingStatus", "dsaInterviewAttemptStatus", "bqCandidateId", "tr1Status", "tr1OverallTechnicalScore", "interviewPath (read-only)",
+  "combinedInterviewState (read-only)", "combinedInterviewVerdict (read-only)", "TR2 mern fullstack State", "TR2 mern fullstack Verdict",
+  "TR2 gen ai State", "TR2 gen ai Verdict",
+];
+const exportRows = [
+  // The reported case: MERN TR-2 strong hire, shown as "Assessment cleared" before the fix.
+  ["TR2 CLEARED", "10", "A", "9000000010", "resume_based_interview", "open", "", "110.5", "80.5", "30", "Shortlisted", "", "x-1", "", "", "separate", "", "", "completed", "strong_hire", "", ""],
+  // DSA interview shortlisted (the TR-1 AI interview said fail): TR-1 cleared; GenAI TR-2 booked.
+  ["TR1 CLEARED", "1", "B", "9000000011", "resume_based_interview", "open", "", "120", "90", "30", "Shortlisted", "", "x-2", "fail", "40", "separate", "", "", "", "", "assigned", ""],
+  // The AI interview said pass but the DSA interview did not shortlist: not a TR-1 clear (the sheet agrees).
+  ["ASSESSMENT CLEARED", "2", "C", "9000000012", "dsa_interview", "open", "", "95", "70", "25", "Not Shortlisted", "", "x-3", "pass", "9", "separate", "", "", "", "", "", ""],
+  // The combined interview: a medium hire is TR-2 cleared (no track).
+  ["TR2 CLEARED", "3", "D", "9000000013", "combined_interview", "open", "", "130", "100", "30", "", "", "x-4", "", "", "combined", "completed", "medium_hire", "", "", "", ""],
+  // A low hire in the combined interview leaves them at the assessment.
+  ["ASSESSMENT CLEARED", "4", "E", "9000000014", "combined_interview", "open", "", "100", "80", "20", "", "", "x-5", "", "", "combined", "completed", "low_hire", "", "", "", ""],
+  // "Not Shortlisted" before interviewing (no attempt, no scores, no AI interview): TR-1 not taken yet.
+  ["ASSESSMENT CLEARED", "6", "G", "9000000016", "dsa_interview", "open", "", "100", "75", "25", "Not Shortlisted", "not_attempted", "x-7", "", "", "separate", "", "", "", "", "", ""],
+  // A TR-2 booked after a TR-1 that is on record as not cleared does not lift them to TR-1 (the sheet agrees).
+  ["ASSESSMENT CLEARED", "7", "H", "9000000017", "dsa_interview", "open", "", "100", "75", "25", "Not Shortlisted", "", "x-8", "fail", "30", "separate", "", "", "assigned", "", "", ""],
+  // Journey closed: still in the pool, the details say so.
+  ["ASSESSMENT CLEARED", "5", "F", "9000000015", "dsa_interview", "closed", "not_responding", "90", "70", "20", "", "", "x-6", "", "", "separate", "", "", "", "", "", ""],
+];
+for (const [label, table] of [
+  ["stage column without a header", [["", ...exportHead], ...exportRows]],
+  ["no stage column at all (the 18 Nov tab)", [exportHead, ...exportRows.map((r) => r.slice(1))]],
+] as const) {
+  const p = parseEdge2(table as unknown as string[][]);
+  const by = (ph: string) => p.records.find((r) => r.phone === ph)!;
+  const st = (ph: string) => edge2Standing(by(ph));
+  check(`edge2 export (${label}): all rows read`, p.records.length === 8 && !p.missingColumns.length, p);
+  check(`edge2 export (${label}): MERN strong hire → tier 1`, st("9000000010").tier === 1 && st("9000000010").label === "Edge 2.0 · TR-2 cleared · MERN Strong hire", st("9000000010"));
+  check(`edge2 export (${label}): the stage is resolved, currentStage kept apart`, by("9000000010").candidateStage === "TR2 CLEARED" && by("9000000010").driveStage === "resume_based_interview");
+  check(
+    `edge2 export (${label}): DSA interview shortlisted → TR-1, booked TR-2 pending`,
+    st("9000000011").tier === 2 && st("9000000011").label === "Edge 2.0 · TR-1 cleared · TR-2 pending (GenAI)",
+    st("9000000011").label,
+  );
+  check(
+    `edge2 export (${label}): AI interview pass but DSA interview not shortlisted → assessment`,
+    st("9000000012").tier === 3 && st("9000000012").label === "Edge 2.0 · Assessment cleared · TR-1 not cleared",
+    st("9000000012").label,
+  );
+  check(`edge2 export (${label}): combined medium hire → tier 1`, st("9000000013").tier === 1 && st("9000000013").label === "Edge 2.0 · TR-2 cleared · Combined interview Medium hire", st("9000000013").label);
+  check(
+    `edge2 export (${label}): combined low hire → assessment`,
+    st("9000000014").tier === 3 && st("9000000014").label === "Edge 2.0 · Assessment cleared · Combined interview not cleared (Low hire)",
+    st("9000000014").label,
+  );
+  check(`edge2 export (${label}): not interviewed yet → TR-1 not taken yet`, st("9000000016").tier === 3 && st("9000000016").label === "Edge 2.0 · Assessment cleared · TR-1 not taken yet" && edge2Details(by("9000000016")).includes("TR-1 (DSA interview): Not taken yet"), st("9000000016").label);
+  check(`edge2 export (${label}): a booked TR-2 never overrides a failed TR-1`, st("9000000017").tier === 3 && st("9000000017").label === "Edge 2.0 · Assessment cleared · TR-1 not cleared", st("9000000017").label);
+  check(`edge2 export (${label}): no sheet-vs-results disagreement logged`, !p.issues.some((x) => /raised/.test(x.problem)), p.issues);
+  check(`edge2 export (${label}): detected as Edge 2.0`, detectProduct(table as unknown as string[][]) === "edge2");
+  const details = edge2Details(by("9000000010"));
+  check(
+    `edge2 export (${label}): details carry every result`,
+    details[0] === "Assessment: Cleared · 110.5/160 (DSA coding 80.5/120 · CS fundamentals 30/40)" &&
+      details.includes("TR-1 (DSA interview): Cleared · Shortlisted") &&
+      details.includes("TR-2: MERN Full Stack Strong hire (cleared)"),
+    details,
+  );
+  check(`edge2 export (${label}): closed journey in the details`, edge2Details(by("9000000015")).includes("Drive journey: Closed (not responding)"), edge2Details(by("9000000015")));
+  check(`edge2 export (${label}): combined interview in the details`, edge2Details(by("9000000013")).includes("Combined interview (TR-1 + TR-2): Medium hire (cleared)"), edge2Details(by("9000000013")));
+}
+{
+  // A sheet stage below what the results prove is raised, and the row says so.
+  const raised = parseEdge2([["", ...exportHead], ["ASSESSMENT CLEARED", ...exportRows[0].slice(1)]]);
+  check("edge2 stage raised by the results", raised.records[0].candidateStage === "TR2 CLEARED" && raised.issues.some((x) => /raised to TR2 CLEARED/.test(x.problem)), raised.issues);
+  // A column that merely mentions a stage now and then is not taken for the stage column.
+  const noisy = parseEdge2([["notes", ...exportHead.slice(1)], ...exportRows.map((r, k) => [k === 0 ? "TR2 CLEARED" : "call back", ...r.slice(2)])]);
+  // The export has "overallScore" left of "offlineOverallScore"; the offline score wins, the other only fills a gap.
+  const both = parseEdge2([["phone", "bqCandidateId", "overallScore", "offlineOverallScore"], ["9000000021", "o-1", "", "91.86"], ["9000000022", "o-2", "88", ""]]);
+  check("edge2 offlineOverallScore preferred over overallScore", both.records[0].offlineOverallScore === 91.86 && both.records[1].offlineOverallScore === 88, both.records.map((r) => r.offlineOverallScore));
+  check("edge2 notes column is not the stage column", noisy.records.every((r) => r.sheetStage === ""), noisy.records.map((r) => r.sheetStage));
+}
 
 // ── Edge 1.0 ────────────────────────────────────────────────────────────────
 const edge1Table = [

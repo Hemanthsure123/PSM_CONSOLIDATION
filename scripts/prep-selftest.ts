@@ -208,7 +208,7 @@ test("writes use the sheet's own dropdown spellings", () => {
 
 const who = { phone: "9000000001", userId: null, name: "Test", referenceResumeUrl: null };
 const tr1 = { selfIntro: null, dsaOverall: null, problemSolving: null, coding: null, communication: null, debugging: null, overallTechnical: null };
-const edge2 = (o: Partial<Edge2Record>): Edge2Record => ({ product: "edge2", ...who, candidateStage: "Assessment Cleared", offlineOverallScore: null, dsaCodingScore: null, csFundamentalsScore: null, sqlMcqScore: null, sqlCodingScore: null, tr1, tr2: [], ...o });
+const edge2 = (o: Partial<Edge2Record>): Edge2Record => ({ product: "edge2", ...who, candidateStage: "Assessment Cleared", sheetStage: "", driveStage: "", offlineOverallScore: null, dsaCodingScore: null, csFundamentalsScore: null, sqlMcqScore: null, sqlCodingScore: null, tr1, tr1Status: "", dsaInterview: { status: "", attempt: "", dsaScore: null, csScore: null }, interviewPath: "", combined: { state: "", verdict: null }, tr2: [], tr2Pending: [], journey: { status: "", reason: "" }, ...o });
 const tag = (tags: { label: string; tone: string }[], start: string) => tags.find((t) => t.label.startsWith(start));
 
 test("tags: Edge 2.0 scores carry their maximum; a TR-1 taken but not cleared is red", () => {

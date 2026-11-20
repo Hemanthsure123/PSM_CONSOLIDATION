@@ -24,11 +24,11 @@ A column is included only when the run measured what it reports. A blank cell me
 | | Has Domain Experience, Domain Experience | Always |
 | Presentation | Resume Presentation Score, Resume Presentation Notes | Presentation was graded |
 | From the sheet | Placed Company, Package (LPA), Assessment Report, TR-1 / TR-2 Panelist, Panelist LinkedIn, Recording | That column was mapped **and** has values |
-| Internal | Resume, Matched In Pool By, Internal Standing, Internal Stage, Internal Product | Always. Internal Standing reads "External" when the eligible pool was looked up and the candidate isn't in it. It reads "Not checked" when no phone or user ID column was mapped. |
+| Internal | Resume, Matched In Pool By, Internal Standing, Internal Stage, Internal Product | Always. For someone in the eligible pool, Internal Standing is their best standing on the first line ("Edge 2.0 · TR-2 cleared · MERN Strong hire"), then every internal assessment result, one "•" line each, then their other products ("Also Academy · …") — see [Standing lookup](./standing-lookup.md#columns). It reads "External" when the eligible pool was looked up and the candidate isn't in it, and "Not checked" when no phone or user ID column was mapped. |
 | Signals | Signals | Always |
 | Audit | Scored By, Phone, User ID | Complete CSV only |
 
-**Multi-value cells** are one item per line: Signals, GitHub Evidence, Top Repos and the review cells. Excel and Google Sheets keep these lines inside one cell.
+**Multi-value cells** are one item per line: Internal Standing, Signals, GitHub Evidence, Top Repos and the review cells. Excel and Google Sheets keep these lines inside one cell.
 
 ## Signals
 

@@ -20,14 +20,24 @@ import {
  * Edge 1.0 / Edge 2.0 (TR-2 cleared > TR-1 cleared > assessment cleared):
  *  - Edge 1.0: assessment "SELECTED" → eligible; TR-1 cleared = Strong / Medium Hire
  *    (Low Hire never went on to TR-2, so it's not a clear); TR-2 cleared = "Shortlisted".
- *  - Edge 2.0: the stage is the sheet's "Candidate Stage". TR-2 verdicts per track rank
- *    strong > medium; low hire counts as rejected for TR-2.
+ *  - Edge 2.0: the higher of the sheet's stage column and what the interview results prove:
+ *      TR-2 cleared = a strong / medium hire in any TR-2 track, or in the combined interview;
+ *      TR-1 cleared = the DSA interview "Shortlisted" (the TR-1 AI interview's own pass/fail
+ *      only counts when the DSA interview has no status), or a TR-2 taken or booked while TR-1
+ *      isn't on record as not cleared ("Not Shortlisted" counts only once they interviewed);
+ *      assessment cleared = everyone in the pool (it is the "Assessment Cleared" pool).
+ *    A low hire or rejection at TR-2 is not a TR-2 clear (the person stays TR-1 cleared); a
+ *    low hire or rejection in the combined interview leaves them at the assessment.
  * Academy (everyone in the > 8 LPA assessed pool is eligible):
  *  - top: Bucket A TR-2 cleared, or a competency interview at L3 / L4 / L5;
  *  - then TR-1 cleared in Bucket A (Strong / Medium Hire), B or C — or Bucket B's TR-2;
  *  - then assessment cleared (old DSA offline bucket A > B > C > D, or a competency exam).
+ *
+ * Version 2 (2026-11-20): Edge 2.0 stages come from the interview results too. The pool sheet's
+ * stage column lost its header, so v1 read the drive's currentStage instead and put every Edge 2.0
+ * candidate at "Assessment cleared".
  */
-export const RULES_VERSION = 1;
+export const RULES_VERSION = 2;
 
 const clamp = (n: number) => Math.max(0, Math.min(100, Math.round(n)));
 
@@ -84,8 +94,13 @@ export function edge1Standing(r: Edge1Record): Standing {
 
 // ── Edge 2.0 ─────────────────────────────────────────────────────────────────
 
-/** "TR2 CLEARED", "tr1 cleared", "Assessment Cleared" → stage. */
-export function edge2Stage(raw: string): "tr2" | "tr1" | "assessment" | null {
+export type Edge2StageKey = "tr2" | "tr1" | "assessment";
+const STAGE_RANK: Record<Edge2StageKey, number> = { assessment: 0, tr1: 1, tr2: 2 };
+/** The pool sheet's own words for each stage (what candidate_stage stores). */
+export const EDGE2_STAGE_TEXT: Record<Edge2StageKey, string> = { tr2: "TR2 CLEARED", tr1: "TR1 CLEARED", assessment: "ASSESSMENT CLEARED" };
+
+/** "TR2 CLEARED", "tr1 cleared", "Assessment Cleared" → stage. The drive's currentStage ("dsa_interview" …) is not a stage here → null. */
+export function edge2Stage(raw: string): Edge2StageKey | null {
   const s = (raw ?? "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   if (/\btr ?2\b/.test(s)) return "tr2";
   if (/\btr ?1\b/.test(s)) return "tr1";
@@ -93,53 +108,115 @@ export function edge2Stage(raw: string): "tr2" | "tr1" | "assessment" | null {
   return null;
 }
 
+const isHire = (v: Verdict | null | undefined): v is "strong_hire" | "medium_hire" => v === "strong_hire" || v === "medium_hire";
+
 /** Best TR-2 verdict over the tracks (best first), and whether it clears TR-2 (low hire doesn't). */
 export function bestTr2(tr2: Edge2Record["tr2"]): Edge2Record["tr2"][number] | null {
   return [...tr2].sort((a, b) => verdictRank(a.verdict) - verdictRank(b.verdict))[0] ?? null;
 }
 
-/** 0-100 from the Edge 2.0 scores: TR-2 verdict 50% (strong 100, medium 85), TR-1 30%, assessment 20%, over the parts present. */
+/**
+ * The TR-1 round's outcome. The DSA interview's status decides: "Shortlisted" = cleared; "Not
+ * Shortlisted" = not cleared — but only once the candidate interviewed (an attempt, DSA-interview
+ * scores, or a TR-1 AI interview result), since the drive shows "Not Shortlisted" before anyone
+ * interviews. The TR-1 AI interview's own pass / fail decides only when the DSA interview has no
+ * status. "not_taken" = still to interview; null = nothing on record.
+ */
+export function edge2Tr1Outcome(r: Pick<Edge2Record, "dsaInterview" | "tr1Status">): "cleared" | "not_cleared" | "not_taken" | null {
+  const d = r.dsaInterview;
+  const dsa = (d?.status ?? "").trim();
+  const ai = (r.tr1Status ?? "").trim().toLowerCase();
+  const interviewed = /^attempted$/i.test(d?.attempt ?? "") || d?.dsaScore != null || d?.csScore != null || /^(pass|fail)/.test(ai);
+  if (dsa) {
+    if (isCleared(dsa)) return "cleared";
+    if (/\bnot\b|reject|fail/i.test(dsa)) return interviewed ? "not_cleared" : "not_taken";
+  }
+  if (/^pass/.test(ai)) return "cleared";
+  if (/^fail/.test(ai)) return "not_cleared";
+  return null;
+}
+
+/** The stage the interview results prove on their own (see the rules above). */
+export function edge2EvidenceStage(r: Edge2Record): Edge2StageKey {
+  if (r.tr2.some((t) => isHire(t.verdict)) || isHire(r.combined?.verdict)) return "tr2";
+  const tr1 = edge2Tr1Outcome(r);
+  if (tr1 === "cleared") return "tr1";
+  // A TR-2 is only taken or booked after TR-1 is cleared — unless TR-1 is on record as not
+  // cleared (a booking left over from before the result does not override it).
+  if (tr1 !== "not_cleared" && (r.tr2.length > 0 || (r.tr2Pending?.length ?? 0) > 0)) return "tr1";
+  return "assessment";
+}
+
+/** The candidate's stage: the higher of the sheet's stage column and the evidence. Everyone in the pool cleared the assessment. */
+export function edge2ResolvedStage(r: Edge2Record): Edge2StageKey {
+  const sheet = edge2Stage(r.sheetStage ?? "") ?? edge2Stage(r.candidateStage) ?? "assessment";
+  const evidence = edge2EvidenceStage(r);
+  return STAGE_RANK[evidence] > STAGE_RANK[sheet] ? evidence : sheet;
+}
+
+/** "MERN Strong hire". */
+const trackVerdict = (t: Edge2Record["tr2"][number]) => `${TR2_TRACK_LABEL[t.track]} ${VERDICT_LABEL[t.verdict]}`;
+
+/**
+ * 0-100 from the Edge 2.0 scores, over the parts present: TR-2 verdict 50% (strong 100, medium 85;
+ * the best track or the combined interview), TR-1 30% (the AI interview's technical score, else its
+ * ratings, else the DSA interview's scores), assessment 20%.
+ */
 export function edge2InternalScore(r: Edge2Record): number {
   const parts: [number, number][] = [];
   const best = bestTr2(r.tr2);
-  if (best && (best.verdict === "strong_hire" || best.verdict === "medium_hire")) parts.push([best.verdict === "strong_hire" ? 100 : 85, 0.5]);
+  const tr2 = [best?.verdict, r.combined?.verdict].filter(isHire).sort((a, b) => verdictRank(a) - verdictRank(b))[0];
+  if (tr2) parts.push([tr2 === "strong_hire" ? 100 : 85, 0.5]);
   const t = r.tr1;
+  const ratings = [t.dsaOverall, t.problemSolving, t.coding, t.debugging].filter((v): v is number => v !== null);
+  const d = r.dsaInterview;
   if (t.overallTechnical !== null) parts.push([t.overallTechnical, 0.3]);
-  else {
-    const ratings = [t.dsaOverall, t.problemSolving, t.coding, t.debugging].filter((v): v is number => v !== null);
-    if (ratings.length) parts.push([(ratings.reduce((a, b) => a + b, 0) / ratings.length) * 10, 0.3]);
+  else if (ratings.length) parts.push([(ratings.reduce((a, b) => a + b, 0) / ratings.length) * 10, 0.3]);
+  else if (d && (d.dsaScore !== null || d.csScore !== null)) {
+    parts.push([100 * (0.75 * Math.min(1, (d.dsaScore ?? 0) / 120) + 0.25 * Math.min(1, (d.csScore ?? 0) / 40)), 0.3]);
   }
   if (r.offlineOverallScore !== null) parts.push([(r.offlineOverallScore / 160) * 100, 0.2]);
   const w = parts.reduce((s, [, x]) => s + x, 0);
   return w ? clamp(parts.reduce((s, [v, x]) => s + v * x, 0) / w) : 0;
 }
 
+/**
+ * "Edge 2.0 · TR-2 cleared · MERN Strong hire", "Edge 2.0 · TR-1 cleared · TR-2 not cleared (GenAI
+ * Low hire)", "Edge 2.0 · Assessment cleared · TR-1 not cleared". The full results (scores, every
+ * round) are in recordDetails (src/lib/pool/details.ts).
+ */
 export function edge2Standing(r: Edge2Record): Standing {
   const p = PRODUCT_LABEL.edge2;
-  const stage = edge2Stage(r.candidateStage);
-  const best = bestTr2(r.tr2);
+  const stage = edge2ResolvedStage(r);
   const score = edge2InternalScore(r);
-  const hired = best && (best.verdict === "strong_hire" || best.verdict === "medium_hire") ? best : null;
+  const byVerdict = [...r.tr2].sort((a, b) => verdictRank(a.verdict) - verdictRank(b.verdict));
+  const pending = (r.tr2Pending ?? []).filter((t) => !r.tr2.some((v) => v.track === t));
+  const combined = r.combined?.verdict ?? null;
+  const pendingText = pending.length ? `TR-2 pending (${pending.map((t) => TR2_TRACK_LABEL[t]).join(", ")})` : "";
+  const join = (...parts: string[]) => [p, ...parts.filter(Boolean)].join(" · ");
+
   if (stage === "tr2") {
-    return {
-      tier: 1,
-      // A combined-interview clear has no track verdict in the pool's columns.
-      label: hired ? `${p} · ${TR2_TRACK_LABEL[hired.track]} TR-2 · ${VERDICT_LABEL[hired.verdict]}` : `${p} · TR-2 cleared`,
-      internalScore: score,
-      eligible: true,
-    };
+    const hires = [...byVerdict.filter((t) => isHire(t.verdict)).map(trackVerdict), ...(isHire(combined) ? [`Combined interview ${VERDICT_LABEL[combined]}`] : [])];
+    // Cleared by the sheet's stage alone: no verdict on record to name.
+    return { tier: 1, label: join("TR-2 cleared", hires.join(", ")), internalScore: score, eligible: true };
   }
   if (stage === "tr1") {
-    const notCleared = r.tr2.filter((v) => v.verdict === "low_hire" || v.verdict === "rejected");
+    const notCleared = byVerdict.filter((t) => !isHire(t.verdict));
     return {
       tier: 2,
-      label: `${p} · TR-1 cleared${notCleared.length ? ` · TR-2 not cleared (${notCleared.map((v) => TR2_TRACK_LABEL[v.track]).join(", ")})` : ""}`,
+      label: join("TR-1 cleared", notCleared.length ? `TR-2 not cleared (${notCleared.map(trackVerdict).join(", ")})` : "", pendingText),
       internalScore: score,
       eligible: true,
     };
   }
-  // Everyone in the 2027 pool cleared the DSA offline assessment.
-  return { tier: 3, label: `${p} · Assessment cleared`, internalScore: score, eligible: true };
+  const combinedText = combined ? `Combined interview not cleared (${VERDICT_LABEL[combined]})` : /pending/i.test(r.combined?.state ?? "") ? "Combined interview pending" : "";
+  const tr1 = edge2Tr1Outcome(r);
+  return {
+    tier: 3,
+    label: join("Assessment cleared", tr1 === "not_cleared" ? "TR-1 not cleared" : tr1 === "not_taken" ? "TR-1 not taken yet" : "", combinedText),
+    internalScore: score,
+    eligible: true,
+  };
 }
 
 // ── Academy ──────────────────────────────────────────────────────────────────

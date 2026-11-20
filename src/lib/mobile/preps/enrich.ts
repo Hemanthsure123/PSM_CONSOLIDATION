@@ -52,7 +52,8 @@ async function poolView(phones: string[]): Promise<Map<string, { standing: Candi
   if (missing.length) {
     try {
       const people = missing.map((phone) => ({ phone }));
-      const [standings, outside] = await Promise.all([lookupStandings(people), assessedOutsidePool(people).catch(() => ({}) as Record<string, { candidateId: number }>)]);
+      // Only the classification is needed here; the prep page builds its own tags from the records.
+      const [standings, outside] = await Promise.all([lookupStandings(people, { details: false }), assessedOutsidePool(people).catch(() => ({}) as Record<string, { candidateId: number }>)]);
       for (const p of missing) {
         const key = `p:${normalisePhone(p) ?? p}`;
         const v = { standing: standings[key] ?? null, assessed: outside[key]?.candidateId ?? null };

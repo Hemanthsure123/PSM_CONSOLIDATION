@@ -28,6 +28,16 @@ export const TR2_TRACK_LABEL: Record<Tr2Track, string> = {
   data_analytics: "Data Analytics",
   product: "Product",
 };
+/** The track's full name, as the drive names its TR-2 interview (assessment details). */
+export const TR2_TRACK_NAME: Record<Tr2Track, string> = {
+  mern_fullstack: "MERN Full Stack",
+  python_fullstack: "Python Full Stack",
+  java_fullstack: "Java Full Stack",
+  genai: "GenAI",
+  dsml: "DS & ML",
+  data_analytics: "Data Analytics",
+  product: "Product",
+};
 
 export type AcademyBucket = "A" | "B" | "C" | "D";
 export const COMPETENCY_SUBJECTS = ["dsa", "frontend", "backend", "software"] as const;
@@ -84,9 +94,23 @@ export interface Edge1Record extends Identity {
   tr2Status: string;
 }
 
+/**
+ * One Edge 2.0 candidate, from the drive's export as the pool sheet holds it. The drive's funnel:
+ * offline assessment → DSA interview (TR-1; "Shortlisted" = cleared) → one TR-2 per track, or a
+ * single combined interview (TR-1 + TR-2 in one, no track).
+ */
 export interface Edge2Record extends Identity {
   product: "edge2";
+  /**
+   * The stage the candidate cleared, in the pool sheet's words: "TR2 CLEARED", "TR1 CLEARED" or
+   * "ASSESSMENT CLEARED". The sheet's stage column, raised to what the interview results prove
+   * (edge2ResolvedStage) — so a sheet without that column still gets the right stage.
+   */
   candidateStage: string;
+  /** The sheet's own stage cell as written ("" when the sheet has no stage column). */
+  sheetStage: string;
+  /** Where the candidate is in the drive (the export's currentStage): dsa_interview, resume_based_interview, combined_interview … */
+  driveStage: string;
   offlineOverallScore: number | null;
   dsaCodingScore: number | null;
   csFundamentalsScore: number | null;
@@ -101,7 +125,24 @@ export interface Edge2Record extends Identity {
     debugging: number | null;
     overallTechnical: number | null;
   };
+  /** The TR-1 AI interview's own result (tr1Status): "pass" / "fail" / "" — the DSA interview's status decides TR-1. */
+  tr1Status: string;
+  /**
+   * The DSA interview — the TR-1 round. status "Shortlisted" = TR-1 cleared ("Not Shortlisted" is
+   * also what the drive shows before anyone interviews); attempt = dsaInterviewAttemptStatus
+   * ("attempted" / "not_attempted" / ""); scores out of 120 (DSA) and 40 (CS).
+   */
+  dsaInterview: { status: string; attempt: string; dsaScore: number | null; csScore: number | null };
+  /** "separate" (DSA interview + TR-2 per track) or "combined" (one combined interview). */
+  interviewPath: string;
+  /** The combined interview: state ("pending" / "completed") and verdict (a strong / medium hire counts as TR-2 cleared). */
+  combined: { state: string; verdict: Verdict | null };
+  /** Every TR-2 taken, per track (rejected included). */
   tr2: { track: Tr2Track; verdict: Verdict }[];
+  /** TR-2 tracks booked ("assigned") but not interviewed yet. */
+  tr2Pending: Tr2Track[];
+  /** The drive's journey: "open" / "closed", and why it closed (not_responding, placed …). */
+  journey: { status: string; reason: string };
 }
 
 export interface AcademyRound {
@@ -161,6 +202,12 @@ export interface ProductStanding {
   label: string;
   score: number;
   eligible: boolean;
+  /**
+   * Every assessment result behind the standing, one line each ("Assessment: 109/160 — …",
+   * "TR-1: Cleared — …", "TR-2: MERN Full Stack Strong hire"). Added by the lookup from the
+   * stored records; absent when the records weren't loaded.
+   */
+  details?: string[];
 }
 
 /** A person's standing across products, best first (from the candidate_standing view). */

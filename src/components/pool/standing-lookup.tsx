@@ -110,7 +110,17 @@ function ResultCell({ col, value, row }: { col: OutputColumn; value: string; row
       if (col.header === "Internal Stage") {
         return <TableCell>{value ? <Badge variant={row.tier === 1 ? "success" : row.status === "internal" ? "default" : "secondary"}>{value}</Badge> : null}</TableCell>;
       }
-      return <TableCell className={cn(col.header === "Internal Standing" ? "min-w-[220px]" : "whitespace-nowrap", row.status !== "internal" && "text-muted-foreground")}>{row.status === "blank" ? "" : value}</TableCell>;
+      if (col.header === "Internal Standing") {
+        // The headline, then one "•" line per assessment result (see standingText).
+        const [head, ...lines] = (row.status === "blank" ? "" : value).split("\n");
+        return (
+          <TableCell className={cn("min-w-[320px] max-w-[520px] text-[13px] leading-relaxed", row.status !== "internal" && "text-muted-foreground")}>
+            <span className="font-medium">{head}</span>
+            {lines.length ? <span className="mt-0.5 block whitespace-pre-line text-muted-foreground">{lines.join("\n")}</span> : null}
+          </TableCell>
+        );
+      }
+      return <TableCell className={cn("whitespace-nowrap", row.status !== "internal" && "text-muted-foreground")}>{row.status === "blank" ? "" : value}</TableCell>;
     case "text":
       return (
         <TableCell className={cn("text-[13px] leading-relaxed", col.header === "Requirements" ? "min-w-[280px] whitespace-pre-line" : "min-w-[160px] max-w-[320px]")}>

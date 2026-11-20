@@ -17,7 +17,10 @@ import {
   type ProductStanding,
   type SyncRun,
   type Tier,
+  type Tr2Track,
+  type Verdict,
 } from "@/lib/pool/types";
+import { recordDetails } from "@/lib/pool/details";
 
 /** Read side of the eligible pool: dashboard counts and standings by phone / user id. */
 
@@ -216,11 +219,21 @@ export async function poolRecords(candidateIds: number[], include: Product[]): P
         })
       : null,
     include.includes("edge2")
-      ? query<Ident & Record<string, unknown> & { candidate_stage: string; tr2: { track: string; verdict: string }[] }>(
-          `select r.candidate_id, r.user_id, r.phone, r.name, r.reference_resume_url, r.candidate_stage,
+      ? query<
+          Ident &
+            Record<string, unknown> & {
+              candidate_stage: string;
+              tr2: { track: string; verdict: string }[];
+              tr2_pending: string[] | null;
+              combined_verdict: Verdict | null;
+            }
+        >(
+          `select r.candidate_id, r.user_id, r.phone, r.name, r.reference_resume_url, r.candidate_stage, r.sheet_stage, r.drive_stage,
                   r.offline_overall_score, r.dsa_coding_score, r.cs_fundamentals_score, r.sql_mcq_score, r.sql_coding_score,
                   r.tr1_self_intro, r.tr1_dsa_overall, r.tr1_problem_solving, r.tr1_coding, r.tr1_communication, r.tr1_debugging,
-                  r.tr1_overall_technical,
+                  r.tr1_overall_technical, r.tr1_status, r.dsa_interview_status, r.dsa_interview_attempt, r.dsa_interview_dsa_score, r.dsa_interview_cs_score,
+                  r.interview_path, r.combined_state, r.combined_verdict::text combined_verdict, r.tr2_pending::text[] tr2_pending,
+                  r.journey_status, r.journey_reason,
                   coalesce((select jsonb_agg(jsonb_build_object('track', v.track, 'verdict', v.verdict) order by v.verdict, v.track)
                               from placement.edge2_tr2_verdicts v where v.candidate_id = r.candidate_id), '[]'::jsonb) tr2
              from placement.edge2_records r where r.candidate_id = any($1::bigint[])`,
@@ -231,6 +244,8 @@ export async function poolRecords(candidateIds: number[], include: Product[]): P
               product: "edge2",
               ...identity(r),
               candidateStage: str(r.candidate_stage),
+              sheetStage: str(r.sheet_stage),
+              driveStage: str(r.drive_stage),
               offlineOverallScore: num(r.offline_overall_score),
               dsaCodingScore: num(r.dsa_coding_score),
               csFundamentalsScore: num(r.cs_fundamentals_score),
@@ -245,7 +260,18 @@ export async function poolRecords(candidateIds: number[], include: Product[]): P
                 debugging: num(r.tr1_debugging),
                 overallTechnical: num(r.tr1_overall_technical),
               },
+              tr1Status: str(r.tr1_status),
+              dsaInterview: {
+                status: str(r.dsa_interview_status),
+                attempt: str(r.dsa_interview_attempt),
+                dsaScore: num(r.dsa_interview_dsa_score),
+                csScore: num(r.dsa_interview_cs_score),
+              },
+              interviewPath: str(r.interview_path),
+              combined: { state: str(r.combined_state), verdict: r.combined_verdict ?? null },
               tr2: (r.tr2 ?? []) as Edge2Record["tr2"],
+              tr2Pending: (r.tr2_pending ?? []).filter((t): t is Tr2Track => (TR2_TRACKS as readonly string[]).includes(t)),
+              journey: { status: str(r.journey_status), reason: str(r.journey_reason) },
             };
           }
         })
@@ -318,8 +344,13 @@ export async function poolRecords(candidateIds: number[], include: Product[]): P
 /**
  * Standings for a batch of people, looked up by phone first and user id second.
  * Returns one entry per input key that matched, keyed "p:<phone>" / "u:<userId>".
+ * Each product's standing carries its assessment details (every result behind it, see
+ * src/lib/pool/details.ts) unless `details: false`.
  */
-export async function lookupStandings(people: { phone?: string; userId?: string }[]): Promise<Record<string, CandidateStanding>> {
+export async function lookupStandings(
+  people: { phone?: string; userId?: string }[],
+  opts: { details?: boolean } = {},
+): Promise<Record<string, CandidateStanding>> {
   const phones = [...new Set(people.map((p) => normalisePhone(p.phone ?? "")).filter((v): v is string => Boolean(v)))];
   const users = [...new Set(people.map((p) => normaliseUserId(p.userId ?? "")).filter((v): v is string => Boolean(v)))];
   if (!phones.length && !users.length) return {};
@@ -340,8 +371,11 @@ export async function lookupStandings(people: { phone?: string; userId?: string 
       where phone = any($1::text[]) or user_id = any($2::text[])`,
     [phones, users],
   );
+  // The records behind the standings, for their details (one query per product).
+  const records = opts.details === false || !rows.length ? {} : await poolRecords(rows.map((r) => Number(r.candidate_id)), [...PRODUCTS]);
   const out: Record<string, CandidateStanding> = {};
   for (const r of rows) {
+    const mine = records[Number(r.candidate_id)] ?? {};
     const s: CandidateStanding = {
       candidateId: Number(r.candidate_id),
       phone: r.phone,
@@ -352,7 +386,10 @@ export async function lookupStandings(people: { phone?: string; userId?: string 
       bestScore: r.best_score,
       bestLabel: r.best_label,
       eligible: r.eligible,
-      standings: r.standings.map((x) => ({ ...x, tier: x.tier as Tier })),
+      standings: r.standings.map((x) => {
+        const rec = mine[x.product];
+        return { ...x, tier: x.tier as Tier, ...(rec ? { details: recordDetails(rec) } : {}) };
+      }),
     };
     if (r.phone) out[`p:${r.phone}`] = s;
     if (r.user_id) out[`u:${r.user_id}`] = s;
