@@ -61,9 +61,11 @@ function getPool(): KeyPool {
   const existing = globalForKeys.__geminiKeyPool;
   // Rebuild if the configured keys changed (e.g. env reloaded in dev).
   if (!existing || existing.signature !== signature) {
+    // Keys that stay keep their cooldowns (an admin adding a key must not wake parked ones).
+    const kept = new Map((existing?.keys ?? []).map((k) => [k.key, k]));
     globalForKeys.__geminiKeyPool = {
-      keys: keys.map((key) => ({ key, cooldownUntil: 0, modelCooldown: {} })),
-      cursor: 0,
+      keys: keys.map((key) => kept.get(key) ?? { key, cooldownUntil: 0, modelCooldown: {} }),
+      cursor: keys.length ? (existing?.cursor ?? 0) % keys.length : 0,
       signature,
     };
   }

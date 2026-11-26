@@ -14,5 +14,7 @@ export async function register() {
     startMobileTicker();
     const { startKeepAwake } = await import("./lib/keep-awake");
     startKeepAwake();
+    const { ensureAdminKeys } = await import("./lib/admin/api-keys");
+    void ensureAdminKeys().catch(() => undefined);
   }
 }

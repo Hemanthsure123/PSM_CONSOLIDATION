@@ -1,8 +1,13 @@
 import "server-only";
+import { controlLayout } from "@/lib/automation/control-sheet";
 import type { JobRow } from "@/lib/automation/store";
+import { query } from "@/lib/db/client";
 import { type ControlTask, readControlSnapshot } from "@/lib/mobile/control-rows";
 import { UserError } from "@/lib/mobile/http";
 import { latestJobsFor } from "@/lib/mobile/jobs";
+import { dayOf, type PrepRow } from "@/lib/mobile/preps/parse";
+import { readPrepSnapshot } from "@/lib/mobile/preps/sheet";
+import { mentorsOf } from "@/lib/mobile/preps/track";
 import { listRoster, matchMentor, type RosterUser } from "@/lib/mobile/roster";
 import { loadAssignments } from "@/lib/mobile/tasks";
 
@@ -152,11 +157,13 @@ export async function analyticsFor(user: RosterUser, scope: "mine" | "team", ran
     .filter(inRange)
     .map((task) => ({ task, assignee: task.mentor ? matchMentor(task.mentor, roster) : null }))
     .filter(({ assignee }) => scope === "team" || assignee?.email === user.email);
-  const [assignments, jobs] = await Promise.all([
+  const [assignments, jobs, layout] = await Promise.all([
     loadAssignments(picked.map((p) => p.task.taskId)),
     latestJobsFor(snapshot.spreadsheetId, snapshot.tab, picked.map((p) => p.task)),
+    controlLayout(snapshot.spreadsheetId, snapshot.tab).catch(() => null),
   ]);
-  const sheetUrl = `https://docs.google.com/spreadsheets/d/${snapshot.spreadsheetId}/edit`;
+  // "#gid=…" so "&range=A<row>" lands in the fragment (as GET /tasks/{id} builds it).
+  const sheetUrl = `https://docs.google.com/spreadsheets/d/${snapshot.spreadsheetId}/edit#gid=${layout?.sheetId ?? 0}`;
   const now = new Date();
   const rows = picked
     .map(({ task, assignee }) => {
@@ -165,5 +172,164 @@ export async function analyticsFor(user: RosterUser, scope: "mine" | "team", ran
       return rowStats(task, assignee, jobs.get(task.taskId), ack, sheetUrl, now);
     })
     .sort((a, b) => String(b.assignedAt ?? b.deadline).localeCompare(String(a.assignedAt ?? a.deadline)));
-  return { from: range.from.toISOString(), to: range.to.toISOString(), scope, ...summarize(rows, now), rows, syncedAt: snapshot.readAt.toISOString() };
+  const members = scope === "team" ? roster.filter((u) => u.active) : [roster.find((u) => u.email === user.email) ?? user];
+  const activity = await activityFor(members, snapshot.tasks, roster, range, now, (tasks) => latestJobsFor(snapshot.spreadsheetId, snapshot.tab, tasks));
+  return {
+    from: range.from.toISOString(),
+    to: range.to.toISOString(),
+    scope,
+    ...summarize(rows, now),
+    rows,
+    activity,
+    syncedAt: snapshot.readAt.toISOString(),
+  };
+}
+
+// ── What each member did (GET /analytics → activity) ─────────────────────────
+
+export interface MemberActivity {
+  email: string;
+  name: string;
+  shortlistings: number;
+  prepsGiven: number;
+  prepCalls: number;
+  rsas: number;
+  guidanceMeets: number;
+  mockInterviews: number;
+}
+
+export type ActivityKey = Exclude<keyof MemberActivity, "email" | "name">;
+export type ActivityCounts = Partial<Record<ActivityKey, Map<string, number>>>;
+type Range = { from: Date; to: Date };
+
+/** A shortlisting delivered before the range can still be one from a task assigned this long before it. */
+const SHORTLIST_LOOKBACK_MS = 60 * 86_400_000;
+
+const bump = (m: Map<string, number>, key: string, n = 1) => m.set(key, (m.get(key) ?? 0) + n);
+
+/**
+ * Shortlistings: control-tab tasks assigned to the member whose shortlist was delivered in the
+ * range (delivered = the early shortlist or the job's end, as byMember.delivered counts it).
+ */
+export function countShortlistings(items: { assigneeEmail: string | null; deliveredAt: Date | null }[], range: Range): Map<string, number> {
+  const out = new Map<string, number>();
+  for (const it of items) {
+    if (it.assigneeEmail && it.deliveredAt && it.deliveredAt >= range.from && it.deliveredAt < range.to) bump(out, it.assigneeEmail);
+  }
+  return out;
+}
+
+/** The IST days a range touches, first and last (inclusive). */
+export function istDays(range: Range): { first: string; last: string } {
+  return { first: dayOf(range.from), last: dayOf(range.to.getTime() - 1) };
+}
+
+/**
+ * Preps given: drill-down rows whose "Prep Given" status is done (the column says Yes, not just a
+ * name in "Prep Given By"), whose "Prep Given By" names the member, with the interview on a day in
+ * the range. A prep given by two mentors counts for both.
+ */
+export function countPrepsGiven(preps: Pick<PrepRow, "prepStatus" | "prepBy" | "interviewDay">[], roster: RosterUser[], range: Range): Map<string, number> {
+  const { first, last } = istDays(range);
+  const out = new Map<string, number>();
+  for (const p of preps) {
+    if (p.prepStatus !== "done" || !p.interviewDay || p.interviewDay < first || p.interviewDay > last) continue;
+    for (const m of mentorsOf(p, roster)) bump(out, m.email);
+  }
+  return out;
+}
+
+/** One row per member (every count a non-negative integer), most active first, then by name. */
+export function buildActivity(members: Pick<RosterUser, "email" | "name">[], counts: ActivityCounts): MemberActivity[] {
+  const keys: ActivityKey[] = ["shortlistings", "prepsGiven", "prepCalls", "rsas", "guidanceMeets", "mockInterviews"];
+  const seen = new Set<string>();
+  const rows: MemberActivity[] = [];
+  for (const m of members) {
+    if (seen.has(m.email)) continue;
+    seen.add(m.email);
+    const row = { email: m.email, name: m.name } as MemberActivity;
+    for (const k of keys) {
+      const n = Number(counts[k]?.get(m.email) ?? 0);
+      row[k] = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+    }
+    rows.push(row);
+  }
+  const total = (r: MemberActivity) => keys.reduce((s, k) => s + r[k], 0);
+  return rows.sort((a, b) => total(b) - total(a) || a.name.localeCompare(b.name));
+}
+
+const missingTable = (err: unknown) => /relation "app\.\w+" does not exist/.test(err instanceof Error ? err.message : String(err));
+
+/** Calls, meetings and RSA documents per member, from the database (meetings only once they've started). */
+async function dbCounts(emails: string[], range: Range, now: Date): Promise<ActivityCounts> {
+  const safe = <T>(p: Promise<T[]>) => p.catch((err) => (missingTable(err) ? [] : Promise.reject(err)));
+  const [calls, meetings, rsas] = await Promise.all([
+    safe(
+      query<{ email: string; n: number }>(
+        `select mentor_email as email, count(*)::int as n from app.call_recordings
+          where mentor_email = any($1::text[]) and call_at >= $2 and call_at < $3 group by mentor_email`,
+        [emails, range.from, range.to],
+      ),
+    ),
+    safe(
+      query<{ email: string; kind: string; n: number }>(
+        `select created_by as email, kind, count(*)::int as n from app.meetings
+          where created_by = any($1::text[]) and status = 'scheduled' and kind in ('prep', 'guidance', 'mock')
+            and starts_at >= $2 and starts_at < $3 and starts_at <= $4
+          group by created_by, kind`,
+        [emails, range.from, range.to, now],
+      ),
+    ),
+    safe(
+      query<{ email: string; n: number }>(
+        `select created_by as email, count(*)::int as n from app.rsa_documents
+          where created_by = any($1::text[]) and created_at >= $2 and created_at < $3 group by created_by`,
+        [emails, range.from, range.to],
+      ),
+    ),
+  ]);
+  const prepCalls = new Map<string, number>();
+  const guidanceMeets = new Map<string, number>();
+  const mockInterviews = new Map<string, number>();
+  for (const c of calls) bump(prepCalls, c.email, Number(c.n));
+  for (const m of meetings) bump(m.kind === "prep" ? prepCalls : m.kind === "guidance" ? guidanceMeets : mockInterviews, m.email, Number(m.n));
+  return { prepCalls, guidanceMeets, mockInterviews, rsas: new Map(rsas.map((r) => [r.email, Number(r.n)])) };
+}
+
+/**
+ * GET /analytics → activity: per member, over the same range, shortlistings, preps given, prep calls
+ * (phone recordings + prep meetings), RSA documents, guidance meets and mock interviews.
+ */
+async function activityFor(
+  members: RosterUser[],
+  tasks: ControlTask[],
+  roster: RosterUser[],
+  range: Range,
+  now: Date,
+  jobsFor: (tasks: ControlTask[]) => Promise<Map<string, JobRow>>,
+): Promise<MemberActivity[]> {
+  const emails = new Set(members.map((m) => m.email));
+  const lookback = range.from.getTime() - SHORTLIST_LOOKBACK_MS;
+  const owned = tasks
+    .map((task) => ({ task, assignee: task.mentor ? matchMentor(task.mentor, roster) : null }))
+    .filter(({ task, assignee }) => {
+      if (!assignee || !emails.has(assignee.email)) return false;
+      const at = task.assignedAt ?? task.deadline;
+      return !at || at.getTime() >= lookback;
+    });
+  const [jobs, preps, db] = await Promise.all([
+    jobsFor(owned.map((o) => o.task)),
+    readPrepSnapshot()
+      .then((s) => s.preps)
+      .catch((err) => {
+        console.warn("[mobile] analytics: the drill-down couldn't be read, preps given count as 0:", err instanceof Error ? err.message.slice(0, 200) : err);
+        return [] as PrepRow[];
+      }),
+    dbCounts([...emails], range, now),
+  ]);
+  const shortlistings = countShortlistings(
+    owned.map(({ task, assignee }) => ({ assigneeEmail: assignee?.email ?? null, deliveredAt: deliveredAt(jobs.get(task.taskId)) })),
+    range,
+  );
+  return buildActivity(members, { ...db, shortlistings, prepsGiven: countPrepsGiven(preps, roster, range) });
 }

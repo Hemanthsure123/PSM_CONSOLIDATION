@@ -1,4 +1,5 @@
 import "server-only";
+import { ensureAdminKeys } from "@/lib/admin/api-keys";
 import { env } from "@/lib/env";
 import { runLlmChain } from "@/lib/llm-router";
 import { Evidence, fitToBudget, normalizePrepDoc, PAGE_BUDGET, PREP_DOC_SCHEMA, PREP_DOC_SHAPE_HINT, richness, type PrepDoc } from "@/lib/prepdocs/model";
@@ -59,6 +60,7 @@ async function resolve(uri: string): Promise<string | null> {
 
 /** Public research with the confirmed plan. Null when no key can search. */
 export async function research(plan: ResearchPlan): Promise<ResearchNotes | null> {
+  await ensureAdminKeys();
   const keys = env.gemini.apiKeys;
   if (!keys.length) return null;
   const prompt =

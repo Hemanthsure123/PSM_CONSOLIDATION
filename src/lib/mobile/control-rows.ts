@@ -248,3 +248,40 @@ export async function readControlSnapshot(fresh = false): Promise<ControlSnapsho
 export function forgetControlSnapshot(): void {
   g.__mobileControl = undefined;
 }
+
+/**
+ * The task as the sheet has it right now: the tab is read again (no cache) and the row is found
+ * by its task id, exactly as rowsToTasks builds it. So a row that moved (rows inserted, sorted)
+ * is found where it is now, and a row that's gone answers null.
+ */
+export async function readTaskFresh(taskId: string): Promise<{ snapshot: ControlSnapshot; task: ControlTask } | null> {
+  const snapshot = await readControlSnapshot(true);
+  const task = snapshot.tasks.find((t) => t.taskId === taskId);
+  return task ? { snapshot, task } : null;
+}
+
+/**
+ * Writes [name] into the Mentor cell of [task]'s row (one cell, RAW). [snapshot] and [task] must
+ * come from readTaskFresh just before, so the row is where the task is now. The control tab is the
+ * only place this writes (never the drill-down mirror). Forgets the cached snapshot.
+ */
+export async function writeMentorCell(snapshot: ControlSnapshot, task: ControlTask, name: string): Promise<void> {
+  const col = snapshot.columns.mentor;
+  if (!col) throw new Error('The control tab has no "Mentor" column.');
+  await withSheetsRetry(() =>
+    getSheetsWriter().spreadsheets.values.update({
+      spreadsheetId: snapshot.spreadsheetId,
+      range: `${q(snapshot.tab)}!${columnLetter(col)}${task.row}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[name]] },
+    }),
+  );
+  forgetControlSnapshot();
+}
+
+/** "AK" for 37 (1-based). */
+function columnLetter(n: number): string {
+  let s = "";
+  for (let x = n; x > 0; x = Math.floor((x - 1) / 26)) s = String.fromCharCode(65 + ((x - 1) % 26)) + s;
+  return s;
+}

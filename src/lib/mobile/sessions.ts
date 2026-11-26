@@ -89,7 +89,8 @@ export async function startSession(googleEmail: string, googleName: string, devi
 export async function refreshSession(refreshToken: string): Promise<IssuedSession> {
   return transaction(async (tx) => {
     const found = await tx.query(
-      `select s.id, s.family, s.expires_at, s.rotated_at, s.revoked_at, s.login_email,
+      `select s.id, s.family, s.expires_at, s.rotated_at, s.revoked_at, s.login_email, s.replaced_by,
+              (s.rotated_at > now() - interval '2 minutes') as "recentlyRotated",
               (s.login_email is null or exists (select 1 from app.user_logins l
                  where l.login_email = s.login_email and l.user_email = s.user_email)) as "loginLinked",
               u.email, u.name, u.aliases, u.role, u.active, u.lead_email as "leadEmail"
@@ -99,7 +100,16 @@ export async function refreshSession(refreshToken: string): Promise<IssuedSessio
     );
     const s = found.rows[0];
     if (!s) throw new UserError(401, "Your session ended. Sign in again.", "invalid_refresh");
-    if (s.rotated_at || s.revoked_at) {
+    // The answer to the last refresh was lost (a timeout on a slow server, a network switch, the
+    // phone killing the app): the phone retries with the same token. Within 2 minutes, and only
+    // if the token it was given has never been used, it gets a fresh one instead of being signed
+    // out. Any other reuse still ends the whole family.
+    let retire: string | null = null;
+    if (s.rotated_at && !s.revoked_at && s.recentlyRotated && s.replaced_by) {
+      const r = (await tx.query("select id, rotated_at, revoked_at from app.sessions where id = $1 for update", [s.replaced_by])).rows[0];
+      if (r && !r.rotated_at && !r.revoked_at) retire = r.id as string;
+    }
+    if (!retire && (s.rotated_at || s.revoked_at)) {
       await tx.query("update app.sessions set revoked_at = coalesce(revoked_at, now()) where family = $1", [s.family]);
       throw new UserError(401, "Your session ended. Sign in again.", "refresh_reused");
     }
@@ -117,8 +127,15 @@ export async function refreshSession(refreshToken: string): Promise<IssuedSessio
        values ($1, $2, $3, now() + make_interval(days => $4), $5, $6)`,
       [id, s.email, sha256(next), REFRESH_TTL_DAYS, s.family, s.login_email],
     );
-    await tx.query("update app.sessions set rotated_at = now(), replaced_by = $2, last_used_at = now() where id = $1", [s.id, id]);
-    await tx.query("update app.devices set session_id = $2 where session_id = $1", [s.id, id]);
+    if (retire) {
+      // The undelivered token is retired; the old one now points at the new session.
+      await tx.query("update app.sessions set revoked_at = now() where id = $1", [retire]);
+      await tx.query("update app.sessions set replaced_by = $2, last_used_at = now() where id = $1", [s.id, id]);
+      await tx.query("update app.devices set session_id = $2 where session_id = any($1::uuid[])", [[s.id, retire], id]);
+    } else {
+      await tx.query("update app.sessions set rotated_at = now(), replaced_by = $2, last_used_at = now() where id = $1", [s.id, id]);
+      await tx.query("update app.devices set session_id = $2 where session_id = $1", [s.id, id]);
+    }
     const user: RosterUser = { email: s.email, name: s.name, aliases: s.aliases, role: s.role, active: s.active, leadEmail: s.leadEmail };
     return issue(user, id, next);
   });

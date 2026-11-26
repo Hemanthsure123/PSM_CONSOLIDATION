@@ -30,7 +30,9 @@ export type PushKind =
   | "rsa_ready"
   | "admin_notice"
   | "app_update"
-  | "team_account";
+  | "team_account"
+  | "task_unassigned"
+  | "feedback";
 
 const g = globalThis as unknown as { __fcmAuth?: JWT };
 
@@ -99,6 +101,8 @@ export function inboxText(kind: PushKind, d: Record<string, string>): { title: s
     app_update: ["Update available", "Tap to update the PSM app."],
     rsa_ready: [`RSA document ready · ${who || company}`, "Open it to review."],
     team_account: ["Team Google account needs attention", "An admin should reconnect it in Me → Team."],
+    task_unassigned: [`New task · ${company}`, "No mentor yet. Tap to take it."],
+    feedback: [`Feedback from ${d.from || "the team"}`, "Open Me → Feedback."],
   };
   const [title, body] = t[kind] ?? ["Notification", ""];
   return { title: clip(title, 200), body: clip(body, 1000) };

@@ -46,22 +46,25 @@ export function cachedAdminKeys(provider: KeyProvider): string[] {
   return g.__psmAdminKeys?.keys[provider] ?? [];
 }
 
-/** Loads the admin's keys when the in-memory copy is older than a minute. Never throws. */
-export async function ensureAdminKeys(force = false): Promise<void> {
-  if (!databaseConfigured()) return;
-  if (!force && g.__psmAdminKeys && Date.now() - g.__psmAdminKeys.at < TTL_MS) return;
+/** How long an AI or transcription call may wait for the very first load (then it uses the server's keys). */
+const FIRST_LOAD_WAIT_MS = 2_000;
+
+function startLoad(): Promise<void> {
   if (g.__psmAdminKeysLoading) return g.__psmAdminKeysLoading;
   g.__psmAdminKeysLoading = (async () => {
     try {
       const rows = await query<{ provider: KeyProvider; key_enc: string }>("select provider, key_enc from app.api_keys where enabled and status <> 'invalid' order by created_at");
       const keys: Cache["keys"] = {};
+      let unreadable = 0;
       for (const r of rows) {
         try {
           (keys[r.provider] ??= []).push(decryptSecret(r.key_enc));
         } catch {
-          // Encrypted with another server's secret (a local copy): skipped, never sent anywhere.
+          // Encrypted with another server's secret (a local copy, or the secret changed): skipped.
+          unreadable++;
         }
       }
+      if (unreadable) console.warn(`[api-keys] ${unreadable} saved key(s) can't be read with this server's secret; paste them again in the app.`);
       g.__psmAdminKeys = { at: Date.now(), keys };
     } catch (err) {
       // The table may not exist yet (before the migration) or the database is busy: keep the last copy.
@@ -72,6 +75,22 @@ export async function ensureAdminKeys(force = false): Promise<void> {
     }
   })();
   return g.__psmAdminKeysLoading;
+}
+
+/**
+ * Keeps the admin's keys fresh (re-read when the copy is older than a minute). Never throws and
+ * never holds up an AI or transcription call on a slow database: with a copy in memory (even an
+ * old one) the reload runs in the background; only the first load waits, at most 2 s. force =
+ * after an admin change: waits for the reload.
+ */
+export async function ensureAdminKeys(force = false): Promise<void> {
+  if (!databaseConfigured()) return;
+  const copy = g.__psmAdminKeys;
+  if (!force && copy && Date.now() - copy.at < TTL_MS) return;
+  const load = startLoad();
+  if (force) return load;
+  if (copy) return;
+  await Promise.race([load, new Promise<void>((resolve) => setTimeout(resolve, FIRST_LOAD_WAIT_MS).unref?.())]);
 }
 
 // ── Admin: list / add / edit / delete / test ─────────────────────────────────
@@ -251,8 +270,9 @@ export async function retestApiKey(actor: string, id: string): Promise<ApiKeyDto
 
 /**
  * A cheap, read-only call that proves the key works (no usage is spent): the provider's
- * account / model list. 401 / 403 = invalid; anything else unexpected = "error" (the key is
- * still saved — the provider may just be down).
+ * account / model list. 401 / 403 = invalid, except a key limited to some permissions (it can
+ * transcribe or chat but not list models/projects): that one is accepted. Anything else
+ * unexpected = "error" (the key is still saved — the provider may just be down).
  */
 export async function testKey(provider: KeyProvider, key: string): Promise<{ status: "ok" | "invalid" | "error"; note: string | null }> {
   const req: Record<KeyProvider, () => Promise<Response>> = {
@@ -265,6 +285,12 @@ export async function testKey(provider: KeyProvider, key: string): Promise<{ sta
   try {
     const res = await req[provider]();
     if (res.ok) return { status: "ok", note: null };
+    if (res.status === 401 || res.status === 403) {
+      const text = (await res.text().catch(() => "")).slice(0, 2000);
+      if (/missing_permissions|insufficient_permissions|INSUFFICIENT_PERMISSIONS|FORBIDDEN_SCOPE|scope/i.test(text) && !/invalid_api_key|INVALID_AUTH|invalid credentials|API_KEY_INVALID/i.test(text)) {
+        return { status: "ok", note: `${PROVIDER_LABEL[provider]} accepted the key (limited permissions: it can't list models, which is fine).` };
+      }
+    }
     if (res.status === 401 || res.status === 403 || (provider === "gemini" && res.status === 400)) {
       return { status: "invalid", note: `${PROVIDER_LABEL[provider]} rejected the key (${res.status}).` };
     }

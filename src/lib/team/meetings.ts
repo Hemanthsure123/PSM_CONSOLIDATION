@@ -446,6 +446,7 @@ export async function cancelMeeting(user: RosterUser, id: string): Promise<Meeti
 export async function resendMeetingEmail(user: RosterUser, id: string): Promise<MeetingDto> {
   const r = (await query<MeetingRow>("select * from app.meetings where id = $1", [id]))[0];
   if (!r) throw new UserError(404, "This meeting doesn't exist.", "not_found");
+  if (r.created_by !== user.email && user.role !== "admin") throw new UserError(403, "Only the person who scheduled it (or an admin) can resend its email.", "forbidden");
   if (r.status !== "scheduled") throw new UserError(409, "This meeting was cancelled.", "meeting_cancelled");
   if (!r.email_subject || !r.email_body) throw new UserError(422, "This meeting has no email to send.", "invalid_meeting");
   const sent = await sendMeetingEmails(r, user.email);

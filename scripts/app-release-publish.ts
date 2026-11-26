@@ -21,18 +21,39 @@ try {
 
 const PACKAGE = "com.nxtwave.psm.debug";
 
-function aapt2(): string {
+/**
+ * SHA-256 of the certificate every team build is signed with (the internal build type, signed with
+ * the release laptop's debug keystore; 1.7.0 and 1.8.0 carry it). Phones only install an update
+ * signed with the same certificate, so anything else is refused here. Override with
+ * PSM_APK_CERT_SHA256 only if the team deliberately moves to a new key (every phone then reinstalls).
+ */
+const TEAM_CERT_SHA256 = (process.env.PSM_APK_CERT_SHA256 || "8e4e4075453ff64a7c39ade0f19fcbed797bdb1df73d82174b028acf52909b03").toLowerCase();
+
+function buildTool(names: string[]): string {
   const sdk = process.env.ANDROID_HOME || process.env.ANDROID_SDK_ROOT || join(process.env.LOCALAPPDATA ?? "", "Android", "Sdk");
   const tools = join(sdk, "build-tools");
   if (!existsSync(tools)) throw new Error(`Android build-tools not found under ${sdk}.`);
   const versions = readdirSync(tools).sort().reverse();
   for (const v of versions) {
-    for (const name of ["aapt2.exe", "aapt2"]) {
+    for (const name of names) {
       const p = join(tools, v, name);
       if (existsSync(p)) return p;
     }
   }
-  throw new Error("aapt2 not found in the Android build-tools.");
+  throw new Error(`${names[0]} not found in the Android build-tools.`);
+}
+
+const aapt2 = () => buildTool(["aapt2.exe", "aapt2"]);
+
+/** The APK's signer certificate digests (apksigner verify also proves the signature is intact). */
+function signerDigests(apkPath: string): string[] {
+  const tool = buildTool(["apksigner.bat", "apksigner"]);
+  const q = (s: string) => `"${s.replace(/"/g, "")}"`;
+  // A .bat can only run through the shell on Windows.
+  const out = tool.endsWith(".bat")
+    ? execFileSync(`${q(tool)} verify --print-certs ${q(apkPath)}`, { encoding: "utf8", shell: true })
+    : execFileSync(tool, ["verify", "--print-certs", apkPath], { encoding: "utf8" });
+  return [...out.matchAll(/certificate SHA-256 digest: ([0-9a-f]{64})/gi)].map((m) => m[1].toLowerCase());
 }
 
 async function main() {
@@ -48,13 +69,27 @@ async function main() {
   if (!m) throw new Error("The APK's package line couldn't be read.");
   const [, pkg, code, name] = m;
   if (pkg !== PACKAGE) throw new Error(`This APK is ${pkg}, not ${PACKAGE} (the team's app).`);
+  if (/^application-debuggable/m.test(badging) || / versionName='[^']*-debug'/.test(badging)) {
+    throw new Error("This is a debug build (slow, debuggable). Publish the internal build: ./gradlew :app:assembleInternal.");
+  }
+  const digests = signerDigests(apkPath);
+  if (!digests.includes(TEAM_CERT_SHA256)) {
+    throw new Error(`This APK is signed with another key (${digests.join(", ") || "none"}); phones would refuse it as an update. Build it on the release laptop.`);
+  }
   const apk = readFileSync(apkPath);
   const sha256 = createHash("sha256").update(apk).digest("hex");
   const notes = readFileSync(notesPath, "utf8").trim();
   const versionCode = Number(code);
 
   const { query } = await import("@/lib/db/client");
-  const latest = await query<{ version_code: number }>("select max(version_code) as version_code from app.app_releases");
+  const dryRun = args.includes("--dry-run");
+  const latest = await query<{ version_code: number }>("select max(version_code) as version_code from app.app_releases").catch((err: Error) => {
+    if (dryRun && /does not exist/.test(err.message)) {
+      console.log("(app.app_releases doesn't exist yet: apply migration 017 before publishing)");
+      return [];
+    }
+    throw err;
+  });
   if (latest[0]?.version_code && versionCode < latest[0].version_code) throw new Error(`Version ${versionCode} is older than the latest release (${latest[0].version_code}).`);
   console.log(`${pkg} ${name} (${versionCode}) · ${(apk.length / 1048576).toFixed(2)} MB · sha256 ${sha256.slice(0, 12)}… · min ${minSupported}`);
   if (args.includes("--dry-run")) {

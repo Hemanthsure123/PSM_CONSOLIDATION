@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.8.0
+  version: 1.9.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
     This file is the source of truth. Change it first, then the routes under
@@ -141,11 +141,20 @@ paths:
     get:
       tags: [tasks]
       x-phase: P1
-      summary: Rows assigned to me (or my team, for leads)
+      summary: Rows assigned to me, my team's (leads and admins), or the rows nobody has taken yet
+      description: |
+        - `mine`: rows whose Mentor cell names me. `team`: every row with a roster mentor (leads and
+          admins only; 403 otherwise).
+        - `unassigned` (1.9.0, anyone signed in): rows whose Mentor cell is **blank** (a name not on
+          the roster still counts as assigned), with a company, assigned in the last 7 days (Assigned
+          Date & Time) or with no assigned date, and a deadline not more than 24 h ago (or none).
+          Sorted by deadline, soonest first, no deadline last. They have `assignee: null` and state
+          `overdue` once the deadline has passed, `new` otherwise.
+        The ETag is per scope, as before.
       parameters:
         - name: scope
           in: query
-          schema: { type: string, enum: [mine, team], default: mine }
+          schema: { type: string, enum: [mine, team, unassigned], default: mine }
         - name: state
           in: query
           schema: { type: string, enum: [open, all], default: open }
@@ -175,9 +184,58 @@ paths:
       tags: [tasks]
       x-phase: P1
       summary: One task with everything the task screen shows
+      description: "Since 1.9.0 a task nobody has taken (blank Mentor cell) is visible to everyone signed in; it used to be 404 for members."
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
+
+  /tasks/{taskId}/take:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      tags: [tasks]
+      x-phase: P9
+      summary: "Anyone signed in. Takes a task nobody has taken: writes the caller's roster name into the row's Mentor cell."
+      description: |
+        1. The control tab is read again and the row found by its task id (a moved row is never
+           overwritten). A Mentor cell that's no longer blank → 409 `already_assigned`
+           ("<Name> already took this task."). A cell that already names the caller answers 200
+           (a double tap or a retried request).
+        2. The caller's "assignment" push is claimed first (dedupe key `assign:<taskId>:<email>`):
+           no "New task" push for a task they took themselves. It's released if the write fails.
+        3. The caller's roster name is written into the Mentor cell (one cell, RAW).
+        4. The task is acknowledged for the caller (the row `/tasks/{taskId}/ack` writes): no sticky
+           "new task" alarm. The cached control snapshot is dropped. Audit log: `task_taken`.
+      responses:
+        "200": { description: "The task, now the caller's", content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "already_assigned", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+
+  /tasks/{taskId}/assign:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      tags: [tasks]
+      x-phase: P9
+      summary: "Admins and leads. Writes a member's roster name into the Mentor cell (it overwrites, so this also reassigns)."
+      description: |
+        The row is read again and found by its task id first, as for take. The member then gets the
+        usual "assignment" push from the next sync, which starts at once in the background.
+        Audit log: `task_assigned`.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email: { type: string, format: email, description: "An active roster email" }
+      responses:
+        "200": { description: "The task, now the member's", content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } }
+        "403": { description: "admin_only (members)" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "422": { description: "invalid_member: the email isn't an active roster member" }
 
   /tasks/{taskId}/ack:
     parameters:
@@ -467,6 +525,7 @@ paths:
       tags: [analytics]
       x-phase: P1
       summary: Tasks → screenings → shortlists delivered, on time, per person and per row, with sheet links
+      description: "Since 1.9.0 the response also has `activity`: what each member did in the range (shortlistings, preps given, prep calls, RSAs, guidance meets, mock interviews). See Analytics.activity."
       parameters:
         - { name: days, in: query, schema: { type: integer, default: 7, maximum: 365 } }
         - { name: from, in: query, schema: { type: string, format: date, description: "IST day; overrides days" } }
@@ -984,16 +1043,28 @@ paths:
     get:
       tags: [admin]
       x-phase: P8
-      summary: "Admins only. { providers: [{ id: deepgram|elevenlabs|mistral|gemini|groq, label, use, serverKeys }], keys: [ApiKey] }. ApiKey = { id, provider, label, masked: '…abcd', enabled, status: unchecked|ok|invalid|error, statusNote, checkedAt, addedBy, updatedAt } — never the key. Keys are added to the server's own keys (Deepgram / ElevenLabs: call transcripts and voice input; Gemini / Mistral / Groq: the AI features that already use them)."
+      summary: "Admins only. The providers (with how many keys the server has in its own settings) and the keys added in the app: { providers: [ApiKeyProvider], keys: [ApiKey] }. Never the key itself."
       responses:
-        "200": { description: "OK" }
-        "403": { description: "admin_only" }
+        "200": { description: "OK", content: { application/json: { schema: { $ref: "#/components/schemas/ApiKeyList" } } } }
+        "403": { description: "admin_only", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     post:
       tags: [admin]
       x-phase: P8
-      summary: "Admins only. { provider, label?, key } → 201 ApiKey, after a read-only check with the provider (a rejected key is kept but not used)."
+      summary: "Admins only. Adds a key after a read-only check with the provider (a rejected key is kept but not used). The key travels once, in this body."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [provider, key]
+              properties:
+                provider: { type: string, enum: [deepgram, elevenlabs, mistral, gemini, groq] }
+                label: { type: string, maxLength: 60, description: "Optional; default '<Provider> key'" }
+                key: { type: string, minLength: 16, maxLength: 300, description: "One line, no spaces" }
       responses:
-        "201": { description: "ApiKey" }
+        "201": { description: "The key", content: { application/json: { schema: { $ref: "#/components/schemas/ApiKey" } } } }
+        "403": { description: "admin_only" }
         "409": { description: "duplicate_key" }
         "422": { description: "invalid_key / invalid_provider / too_many_keys" }
 
@@ -1001,83 +1072,200 @@ paths:
     patch:
       tags: [admin]
       x-phase: P8
-      summary: "Admins only. { label?, key?, enabled? } → ApiKey (a new key is checked again)."
+      summary: "Admins only. Only the fields present change: { label?, key?, enabled? }. A new key is checked again."
       parameters:
         - { name: keyId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                label: { type: string, maxLength: 60 }
+                key: { type: string, description: "Replaces the key (checked again)" }
+                enabled: { type: boolean }
       responses:
-        "200": { description: "ApiKey" }
+        "200": { description: "The key", content: { application/json: { schema: { $ref: "#/components/schemas/ApiKey" } } } }
+        "403": { description: "admin_only" }
         "404": { description: "not_found" }
         "409": { description: "duplicate_key" }
+        "422": { description: "invalid_key" }
     delete:
       tags: [admin]
       x-phase: P8
-      summary: "Admins only. Removes the key (204)."
+      summary: "Admins only. Removes the key; the server stops using it at once."
       parameters:
         - { name: keyId, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         "204": { description: "Deleted" }
+        "403": { description: "admin_only" }
+        "404": { description: "not_found" }
 
   /admin/api-keys/{keyId}/test:
     post:
       tags: [admin]
       x-phase: P8
-      summary: "Admins only. Re-checks the saved key with its provider → ApiKey (409 key_unreadable: saved by another server, paste it again)."
+      summary: "Admins only. Checks the saved key with its provider again (read-only, no usage spent)."
       parameters:
         - { name: keyId, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
-        "200": { description: "ApiKey" }
+        "200": { description: "The key with its new status", content: { application/json: { schema: { $ref: "#/components/schemas/ApiKey" } } } }
+        "403": { description: "admin_only" }
+        "404": { description: "not_found" }
+        "409": { description: "key_unreadable (saved by another server: paste it again)" }
 
   /admin/notices:
     get:
       tags: [admin]
       x-phase: P8
-      summary: "Admins only. { items: [Notice] } — sticky notifications sent lately. Notice = { id, toEmail, toName, title, body, sentBy, sentByName, createdAt, delivered, acknowledgedAt }."
+      summary: "Admins only. Sticky notices sent lately (newest first, at most 100), with who acknowledged."
       responses:
-        "200": { description: "OK" }
+        "200": { description: "OK", content: { application/json: { schema: { $ref: "#/components/schemas/NoticeList" } } } }
+        "403": { description: "admin_only" }
     post:
       tags: [admin]
       x-phase: P8
-      summary: "Admins only. { to: email, title (≤120), body (≤1000) } → 201 Notice. Push type admin_notice (noticeId, title, body, sticky, from): the phone shows it until the person taps Acknowledge."
+      summary: "Admins only. Sends a sticky notice to one active team member: push type admin_notice; it stays on their phone until they tap Acknowledge."
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [to, title, body]
+              properties:
+                to: { type: string, format: email, description: "An active roster email" }
+                title: { type: string, maxLength: 120 }
+                body: { type: string, maxLength: 1000 }
       responses:
-        "201": { description: "Notice" }
+        "201": { description: "The notice (delivered = phones the push reached; 0 = they see it when they open the app)", content: { application/json: { schema: { $ref: "#/components/schemas/Notice" } } } }
+        "403": { description: "admin_only" }
         "422": { description: "invalid_recipient / no_title / no_body" }
+
+  /feedback:
+    post:
+      tags: [me]
+      x-phase: P9
+      summary: "Anyone signed in. Report feedback (Me → Report feedback). Every active admin gets a `feedback` push (a heads-up notification)."
+      description: |
+        Stored in app.feedback (migration 019, kept 365 days). The push to each admin carries
+        `feedbackId`, `from` (the sender's name), `category`, `title` = "Feedback from <Name> ·
+        <Problem|Idea|Other>" and `body` = the first 300 characters of the message; dedupe key
+        `feedback:<id>:<admin email>`. Rate limit: 10 per person per hour.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [category, message]
+              properties:
+                category: { type: string, enum: [problem, idea, other] }
+                message: { type: string, minLength: 1, maxLength: 2000, description: "Trimmed; line breaks kept" }
+                screen: { type: string, maxLength: 100, description: "Where the person was (e.g. Tasks, Prep detail)" }
+                appVersion: { type: string, maxLength: 40 }
+                device: { type: string, maxLength: 120 }
+      responses:
+        "201":
+          description: Stored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id]
+                properties:
+                  id: { type: string, format: uuid }
+        "400": { description: "invalid_body" }
+        "422": { description: "invalid_category / no_message (empty after trimming) / too_long (over 2000 characters)" }
+        "429": { description: "too_many: more than 10 in the last hour" }
+        "503": { description: "not_ready: migration 019 isn't applied yet" }
+
+  /admin/feedback:
+    get:
+      tags: [admin]
+      x-phase: P9
+      summary: "Admins only. The team's feedback, newest first (up to 200), and how many are unread (of all)."
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/FeedbackList" } } } }
+        "403": { description: "admin_only" }
+
+  /admin/feedback/{id}/read:
+    post:
+      tags: [admin]
+      x-phase: P9
+      summary: "Admins only. Marks one feedback item read. Idempotent: a second call answers with the first time."
+      parameters:
+        - { name: id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [id, readAt]
+                properties:
+                  id: { type: string, format: uuid }
+                  readAt: { type: string, format: date-time }
+        "403": { description: "admin_only" }
+        "404": { description: "not_found" }
 
   /me/notices:
     get:
       tags: [me]
       x-phase: P8
-      summary: "{ items: [Notice] } — the signed-in person's sticky notifications not acknowledged yet (the phone re-shows them)."
+      summary: "The signed-in person's notices not acknowledged yet (at most 20). The phone re-shows each one (app start, resume, after sign-in) and removes those closed elsewhere."
       responses:
-        "200": { description: "OK" }
+        "200": { description: "OK", content: { application/json: { schema: { $ref: "#/components/schemas/NoticeList" } } } }
 
   /me/notices/{noticeId}/ack:
     post:
       tags: [me]
       x-phase: P8
-      summary: "Acknowledge a sticky notification → { id, acknowledgedAt } (a second call answers with the first time)."
+      summary: "Acknowledges a notice. Idempotent: a second call answers with the first time."
       parameters:
         - { name: noticeId, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
-        "200": { description: "OK" }
-        "404": { description: "not_found" }
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id: { type: string, format: uuid }
+                  acknowledgedAt: { type: string, format: date-time }
+        "404": { description: "not_found (not this person's, or deleted: the app treats it as acknowledged)" }
 
   /app/releases/latest:
     get:
       tags: [app]
       x-phase: P8
-      summary: "{ release: null | { versionCode, versionName, notes, sizeBytes, sha256, minSupported, publishedAt, downloadPath } } — the newest app version for in-app updates (no Play Store). Phones below minSupported must update first. Push type app_update (versionCode, versionName) when one is published."
+      summary: "The newest app version for in-app updates (no Play Store), or null. Phones below minSupported must update before using the app. Push type app_update (versionCode, versionName, title, body) when one is published."
       responses:
-        "200": { description: "OK" }
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  release:
+                    oneOf:
+                      - { $ref: "#/components/schemas/AppRelease" }
+                      - { type: "null" }
 
   /app/releases/{versionCode}/apk:
     get:
       tags: [app]
       x-phase: P8
-      summary: "The APK in parts of at most 8 MB: send Range: bytes=start- (206 + Content-Range) until the total; 200 when the first part is the whole file. X-Content-SHA256 = the whole file's hash."
+      summary: "The APK in parts of at most 8 MB. Send Range: bytes=<start>- and keep asking from the next byte until the total: 206 with Content-Range: bytes start-end/total, or 200 when the first part is the whole file. X-Content-SHA256 = the whole file's hash (the app checks it before installing)."
       parameters:
         - { name: versionCode, in: path, required: true, schema: { type: integer } }
+        - { name: Range, in: header, required: false, schema: { type: string, example: "bytes=8388608-" } }
       responses:
-        "200": { description: "The whole APK" }
+        "200": { description: "The whole APK (application/vnd.android.package-archive)" }
         "206": { description: "A part" }
         "404": { description: "not_found (only the newest 3 releases keep their file)" }
         "416": { description: "range_not_satisfiable" }
@@ -1424,15 +1612,29 @@ components:
         deadline: { type: string, format: date-time }
         deadlineInferred: { type: boolean, description: "True when the time was ambiguous in the sheet (e.g. 3:00 read as 15:00). The app shows it for confirmation." }
         state: { $ref: "#/components/schemas/TaskState" }
-        assignee: { type: string, format: email }
+        assignee: { type: [string, "null"], format: email, description: "The mentor's roster email; null when unassigned (blank Mentor cell)" }
         jobId: { type: string, format: uuid }
         ackAt: { type: string, format: date-time }
+        assigneeName: { type: [string, "null"], description: "1.9.0. The mentor's roster name; null when unassigned. Always present." }
+        ise: { type: string, description: '1.9.0. The PC column as written ("Sneha Padi"); "" when blank. Always present.' }
+        product: { type: string, description: '1.9.0. The Product column ("Edge", "Academy", "Edge , Academy"). Always present.' }
+        iseOwner:
+          description: "1.9.0. The mentor the ISE maps to (first name of the PC cell, MOBILE_ISE_OWNERS); null when there's no mapping. Always present."
+          oneOf:
+            - type: "null"
+            - type: object
+              required: [email, name]
+              properties:
+                email: { type: string, format: email }
+                name: { type: string }
 
     TaskDetail:
       allOf:
         - $ref: "#/components/schemas/TaskSummary"
         - type: object
           properties:
+            canTake: { type: boolean, description: "1.9.0. True when the Mentor cell is blank (POST /tasks/{taskId}/take)" }
+            canAssign: { type: boolean, description: "1.9.0. True for admins and leads (POST /tasks/{taskId}/assign)" }
             product: { type: string }
             pc: { type: string, description: Placement coordinator (sheet column PC) }
             crm: { type: string }
@@ -1544,7 +1746,7 @@ components:
         Assigned Date & Time (else its deadline). A delivered shortlist is the early delivery or the
         job's end, whichever came first. Rows nobody was assigned in the app are only judged on time
         when a screening delivered.
-      required: [scope, totals, byMember, rows]
+      required: [scope, totals, byMember, rows, activity]
       properties:
         from: { type: string, format: date-time }
         to: { type: string, format: date-time }
@@ -1599,6 +1801,34 @@ components:
               onTime: { type: boolean, nullable: true }
               shortlistUrl: { type: string, format: uri, nullable: true }
               sheetRowUrl: { type: string, format: uri }
+        activity:
+          type: array
+          description: |
+            1.9.0. What each member did in the range. scope=team: every active roster member, admins
+            included, most active first; scope=mine: just the caller. Every count is a non-negative
+            integer:
+            - shortlistings: control-tab tasks assigned to the member whose shortlist was delivered
+              in the range (delivered = the early shortlist or the job's end, as byMember.delivered
+              counts it; by the delivery time, so a task assigned before the range can count);
+            - prepsGiven: drill-down rows whose "Prep Given" says done (Yes), whose "Prep Given By"
+              names the member, with the interview on an IST day the range touches;
+            - prepCalls: call recordings by the member (call_at in the range) plus prep meetings they
+              scheduled (not cancelled) that have started (starts_at in the range, ≤ now);
+            - rsas: RSA documents the member created in the range;
+            - guidanceMeets / mockInterviews: guidance / mock meetings they scheduled (not cancelled)
+              that have started, starts_at in the range.
+          items:
+            type: object
+            required: [email, name, shortlistings, prepsGiven, prepCalls, rsas, guidanceMeets, mockInterviews]
+            properties:
+              email: { type: string, format: email }
+              name: { type: string }
+              shortlistings: { type: integer, minimum: 0 }
+              prepsGiven: { type: integer, minimum: 0 }
+              prepCalls: { type: integer, minimum: 0 }
+              rsas: { type: integer, minimum: 0 }
+              guidanceMeets: { type: integer, minimum: 0 }
+              mockInterviews: { type: integer, minimum: 0 }
 
     PrepStatus:
       type: string
@@ -1792,25 +2022,127 @@ components:
     PoolDetail:
       type: object
       description: "PoolItem's profile fields plus course, specialization, assessments (every attempt), latestAssessments, interviews (null = drill-down unavailable), resumes, meetings [{ id, kind, title, startsAt, endsAt, status, meetUrl, createdByName }], history [{ at, action, value, by, byName }], updatedBy, updatedAt."
+    ApiKeyProvider:
+      type: object
+      required: [id, label]
+      properties:
+        id: { type: string, enum: [deepgram, elevenlabs, mistral, gemini, groq] }
+        label: { type: string }
+        use: { type: string, description: "What the server uses this provider's keys for" }
+        serverKeys: { type: integer, description: "Keys in the server's own settings (counted, never shown)" }
+    ApiKey:
+      type: object
+      required: [id, provider]
+      properties:
+        id: { type: string, format: uuid }
+        provider: { type: string }
+        label: { type: string }
+        masked: { type: string, description: "The last four characters ('…abcd'), never the key" }
+        enabled: { type: boolean }
+        status: { type: string, enum: [unchecked, ok, invalid, error], description: "ok = Working, invalid = Rejected, error = the provider couldn't be reached (not checked)" }
+        statusNote: { type: [string, "null"] }
+        checkedAt: { type: [string, "null"], format: date-time }
+        addedBy: { type: string, format: email }
+        updatedAt: { type: string, format: date-time }
+    ApiKeyList:
+      type: object
+      properties:
+        providers: { type: array, items: { $ref: "#/components/schemas/ApiKeyProvider" } }
+        keys: { type: array, items: { $ref: "#/components/schemas/ApiKey" } }
+    Notice:
+      type: object
+      required: [id]
+      properties:
+        id: { type: string, format: uuid }
+        toEmail: { type: string, format: email }
+        toName: { type: string }
+        title: { type: string }
+        body: { type: string }
+        sentBy: { type: string, format: email }
+        sentByName: { type: string }
+        createdAt: { type: string, format: date-time }
+        delivered: { type: integer, description: "Phones the push reached when it was sent" }
+        acknowledgedAt: { type: [string, "null"], format: date-time }
+    NoticeList:
+      type: object
+      properties:
+        items: { type: array, items: { $ref: "#/components/schemas/Notice" } }
+    Feedback:
+      type: object
+      required: [id, fromEmail, fromName, category, message, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        fromEmail: { type: string, format: email }
+        fromName: { type: string, description: "The sender's roster name (their email if they left the roster)" }
+        category: { type: string, enum: [problem, idea, other] }
+        message: { type: string }
+        screen: { type: [string, "null"] }
+        appVersion: { type: [string, "null"] }
+        device: { type: [string, "null"] }
+        createdAt: { type: string, format: date-time }
+        readAt: { type: [string, "null"], format: date-time }
+    FeedbackList:
+      type: object
+      required: [items, unread]
+      properties:
+        items: { type: array, maxItems: 200, items: { $ref: "#/components/schemas/Feedback" } }
+        unread: { type: integer, description: "Unread items of all, not only the 200 listed" }
+    AppRelease:
+      type: object
+      required: [versionCode, sha256, downloadPath]
+      properties:
+        versionCode: { type: integer }
+        versionName: { type: string }
+        notes: { type: string, description: "What's new (markdown-ish plain text)" }
+        sizeBytes: { type: integer }
+        sha256: { type: string, pattern: "^[0-9a-f]{64}$" }
+        minSupported: { type: integer, description: "Phones below this version code must update first (0 = never forced)" }
+        publishedAt: { type: string, format: date-time }
+        downloadPath: { type: string, description: "Relative to /api/mobile/v1, e.g. /app/releases/15/apk" }
     PushMessage:
       description: |
         FCM **data** message (not a notification message), so the app always builds the notification
         itself: sticky assignment with countdown, re-post on swipe. High priority for assignment,
         reminder and overdue; normal for job updates.
+
+        1.9.0:
+        - `task_unassigned`: a task nobody has taken (blank Mentor cell). Channel "New tasks" (high
+          importance, not sticky); tapping opens the task. Data: taskId, company, profilesRequired,
+          deadline (omitted when none), ise, iseOwner (name or ""), product, stage, title, body.
+          - stage `new` → every active roster member (admins, leads, mentors), once, for a row
+            assigned in the last 6 h whose deadline hasn't passed (the first sync after a deploy
+            replays nothing older). "New task · Acme (ISE <name>)" / "10 profiles by 6:00 PM · no
+            mentor yet. Tap to take it."
+          - stage `reminder` → the ISE's own mentor and the admins, at half the time between
+            assigned and deadline and 30 min before the deadline (each once). "Still no mentor ·
+            Acme" / "<ISE>'s task · due 6:00 PM. Take it or assign someone."
+          - stage `due` → the same people, once, at the deadline (up to a day after it). "Deadline
+            passed · Acme" / "Nobody took <ISE>'s task."
+          Dedupe keys `unassigned:<new|half|soon|due>:<taskId>:<email>`. Nothing is sent once the
+          row has a mentor. The app cancels a task's task_unassigned notification on an
+          `assignment` push for the same taskId, after a successful take or assign, and when
+          GET /tasks?scope=unassigned no longer lists it.
+        - `feedback`: to every active admin when someone reports feedback (POST /feedback). Channel
+          "Feedback from the team" (high importance, heads-up), admins only; tapping opens
+          Me → Feedback. Data: feedbackId, from, category, title, body.
+        - `prep_reminder` now comes 3 h, 1 h and 15 min before a prep is due (each only if the prep
+          was assigned before that moment; dedupe `prep:soon3h|soon1h|soon:<prepId>:<email>`), and
+          `prep_overdue` at the deadline, then every 2 h until the interview starts, at most 4
+          (dedupe `prep:overdue:<0-3>:<prepId>:<email>`), while "Prep Given" isn't Yes.
       type: object
       required: [type]
       properties:
         type:
           type: string
-          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest, prep_doc_ready, recording_ready, meeting_reminder, team_account]
-        taskId: { type: string, description: "Task pushes" }
+          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest, prep_doc_ready, recording_ready, rsa_ready, meeting_reminder, team_account, admin_notice, app_update, task_unassigned, feedback]
+        taskId: { type: string, description: "Task pushes (incl. task_unassigned)" }
         prepId: { type: string, description: "Prep pushes (prep_*, interview_checkin) prep_doc_ready, recording_ready (the call was added to the sheet), meeting_reminder (when the meeting is a prep's)" }
         meetingId: { type: string, description: "meeting_reminder, recording_ready (Meet)" }
         meetUrl: { type: string, format: uri, description: "meeting_reminder: the Join action" }
-        url: { type: string, format: uri, description: "prep_doc_ready: the document" }
+        url: { type: string, format: uri, description: "prep_doc_ready, rsa_ready: the document" }
         candidate: { type: string }
         round: { type: string }
-        category: { type: string, enum: [academy, edge, external] }
+        category: { type: string, enum: [academy, edge, external, problem, idea, other], description: "Prep pushes: academy / edge / external. feedback: problem / idea / other." }
         edgeVersion: { type: string }
         interviewDay: { type: string, format: date }
         interviewStart: { type: string, format: date-time }
@@ -1824,3 +2156,13 @@ components:
         earlyShortlist: { type: string, enum: ["true", "false"] }
         title: { type: string }
         body: { type: string }
+        noticeId: { type: string, format: uuid, description: "admin_notice" }
+        sticky: { type: string, enum: ["true", "false"], description: "admin_notice: stays until Acknowledge" }
+        from: { type: string, description: "admin_notice: the sending admin's name. feedback: the sender's name." }
+        feedbackId: { type: string, format: uuid, description: "feedback" }
+        stage: { type: string, enum: [new, reminder, due], description: "task_unassigned" }
+        ise: { type: string, description: "task_unassigned: the PC column as written (empty when blank)" }
+        iseOwner: { type: string, description: "task_unassigned: the name of the mentor the ISE maps to (empty when none)" }
+        product: { type: string, description: "task_unassigned: the Product column" }
+        versionCode: { type: string, description: "app_update" }
+        versionName: { type: string, description: "app_update" }

@@ -72,7 +72,7 @@ export async function sendNotice(from: { email: string }, body: { to?: unknown; 
     data: { noticeId: notice.id, title, body: text, sticky: "true", from: roster.find((u) => u.email === from.email)?.name ?? "Admin" },
     dedupeKey: `admin_notice:${notice.id}`,
   }).catch(() => ({ delivered: 0, skipped: true }));
-  await query("update app.admin_notices set delivered = $2 where id = $1", [notice.id, push.delivered]);
+  await query("update app.admin_notices set delivered = $2 where id = $1", [notice.id, push.delivered]).catch(() => undefined);
   await query("insert into app.audit_log (actor_email, action, target, detail) values ($1, 'admin_notice_sent', $2, $3)", [
     from.email,
     member.email,
@@ -95,7 +95,7 @@ export async function listNotices(limit = 100): Promise<NoticeDto[]> {
 /** The signed-in person's notices not acknowledged yet (the phone shows each as a sticky notification). */
 export async function openNotices(email: string): Promise<NoticeDto[]> {
   const [rows, roster] = await Promise.all([
-    query<Row>("select * from app.admin_notices where to_email = $1 and acknowledged_at is null order by created_at desc limit 20", [email]),
+    query<Row>("select * from app.admin_notices where to_email = $1 and acknowledged_at is null order by created_at desc limit 200", [email]),
     listRoster(),
   ]);
   const names = new Map(roster.map((u) => [u.email, u.name]));

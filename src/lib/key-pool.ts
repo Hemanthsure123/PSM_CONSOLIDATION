@@ -65,7 +65,13 @@ function getPool(provider: ChatProvider): Pool {
   const pools = (globalForPools.__chatKeyPools ??= {});
   const existing = pools[provider];
   if (!existing || existing.signature !== signature) {
-    pools[provider] = { keys: keys.map((key) => ({ key, deadUntil: 0, modelCooldown: {} })), cursor: 0, signature };
+    // Keys that stay keep their cooldowns (an admin adding a key must not wake parked ones).
+    const kept = new Map((existing?.keys ?? []).map((k) => [k.key, k]));
+    pools[provider] = {
+      keys: keys.map((key) => kept.get(key) ?? { key, deadUntil: 0, modelCooldown: {} }),
+      cursor: keys.length ? (existing?.cursor ?? 0) % keys.length : 0,
+      signature,
+    };
   }
   return pools[provider]!;
 }
