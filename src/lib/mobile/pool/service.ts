@@ -294,7 +294,8 @@ export interface PoolItemDto {
   scorePercent: number | null;
   assessments: number;
   topScores: PoolScoreDto[];
-  interviews: { count: number; upcoming: number; last: PoolInterviewDto | null } | null;
+  /** last = the newest interview; next = the nearest one still to come (scheduled, today or later). */
+  interviews: { count: number; upcoming: number; last: PoolInterviewDto | null; next: PoolInterviewDto | null } | null;
   resumes: number;
   bestResumes: number;
   lastContact: { at: string; channel: string; by: string } | null;
@@ -378,7 +379,10 @@ export async function listPool(user: RosterUser): Promise<{ body: PoolListDto; e
       assessments: latest.length,
       topScores: highlights(latest),
       interviews: ivs
-        ? { count: ivs.length, upcoming: ivs.filter((i) => i.day && i.day >= today && i.state === "scheduled").length, last: ivs[0] ?? null }
+        ? (() => {
+            const coming = ivs.filter((i) => i.day && i.day >= today && i.state === "scheduled").sort((x, y) => (x.day ?? "").localeCompare(y.day ?? ""));
+            return { count: ivs.length, upcoming: coming.length, last: ivs[0] ?? null, next: coming[0] ?? null };
+          })()
         : null,
       resumes: r.resumes,
       bestResumes: r.best_resumes,
