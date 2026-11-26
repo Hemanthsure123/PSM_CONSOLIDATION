@@ -94,11 +94,12 @@ The result goes to the candidates' spreadsheet, in a tab named **`psm_final_shor
   - **Review Flags**;
   - **Source Tab**.
 - The rest are Domain shortlisting's columns: domain score, resume core skills, internal standing / stage / product, GitHub and DSA (when screened), Signals, and more.
+- **Mentor** comes right after Internal Standing: the candidate's mentor in the Academy assessed pool, e.g. "Asha Rao · Mentor assigned · MERN Stack" ("Asha Rao · Mentor assigned" when the pool has no tech stack), matched by phone, then UID, then email. It is blank when the candidate has no mentor or isn't in the pool, and it is read fresh at each delivery.
 
 **Safe to re-run and to share a tab.**
 - Jobs on the same day add their rows below the rows already there. Existing rows are never changed or removed.
 - A candidate already written for a job, matched by mobile number, is never written again. Neither a retried delivery nor the shortlist-then-rest delivery can duplicate a row.
-- When a tab from an earlier version lacks one of the leading columns, that column is inserted in place, and the old rows simply leave it blank.
+- When a tab from an earlier version lacks one of the leading columns, or the Mentor column, that column is inserted in place (Mentor right after Internal Standing), and the old rows simply leave it blank.
 
 The tab's name in Automation Details is a link to it.
 

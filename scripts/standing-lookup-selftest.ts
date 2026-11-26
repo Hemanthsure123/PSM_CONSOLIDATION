@@ -227,14 +227,14 @@ check("text and mark keys split", textKeys(["edge2.assessment", "name", "marks.d
   check("job eligibility: the pool's eligible / not cleared / unknown", byUuid.eligibility === "eligible" && byPhone.eligibility === "eligible" && tier4.eligibility === "not-eligible" && external.eligibility === null && junk.eligibility === null);
 
   const t = lookupTable(rows, { phoneColumn: input.counts.phones > 0, keys: ["edge2.tr2", "edge1.tr1"] });
-  check("columns", t.headers.join("|") === "UUID|Phone|Internal Standing|Internal Stage|Internal Product|Job Eligibility|Requirements", t.headers);
+  check("columns", t.headers.join("|") === "UUID|Phone|Internal Standing|Mentor|Internal Stage|Internal Product|Job Eligibility|Requirements", t.headers);
   check("Job Eligibility column", t.rows.map((r) => r["Job Eligibility"]).join("|") === "Eligible|Eligible||Not eligible||", t.rows.map((r) => r["Job Eligibility"]));
   check("one output row per pasted row", t.rows.length === rows.length);
-  check("no phone column for a UUID-only paste", lookupTable(lookupRows(parseLookupInput(U1), data, []), { phoneColumn: false, keys: [] }).headers.join("|") === "UUID|Internal Standing|Internal Stage|Internal Product|Job Eligibility");
+  check("no phone column for a UUID-only paste", lookupTable(lookupRows(parseLookupInput(U1), data, []), { phoneColumn: false, keys: [] }).headers.join("|") === "UUID|Internal Standing|Mentor|Internal Stage|Internal Product|Job Eligibility");
   const multi = lookupRows(parseLookupInput(U1), data, ["edge2.stage", "edge2.tr2"]);
   check("Requirements is one column, one line per item", lookupTable(multi, { phoneColumn: false, keys: ["edge2.stage", "edge2.tr2"] }).rows[0].Requirements === "Edge 2.0 stage: TR2 CLEARED\nEdge 2.0 TR-2: MERN Strong hire · GenAI Rejected · Python Full Stack pending");
   const each = lookupTable(multi, { phoneColumn: false, keys: ["name", "edge2.stage"], options: { ...DEFAULT_LOOKUP_OPTIONS, layout: "columns" } });
-  check("…or a column each", each.headers.slice(5).join("|") === "Name|Edge 2.0 stage" && each.rows[0]["Edge 2.0 stage"] === "TR2 CLEARED", each.headers);
+  check("…or a column each", each.headers.slice(6).join("|") === "Name|Edge 2.0 stage" && each.rows[0]["Edge 2.0 stage"] === "TR2 CLEARED", each.headers);
 
   const s = summarise(rows);
   check("summary", JSON.stringify(s) === JSON.stringify({ looked: 4, internal: 2, byTier: { 1: 1, 2: 1, 3: 0 }, notEligible: 1, assessedOnly: 0, external: 1, unrecognised: 1, byProduct: { edge2: 1, edge1: 1, academy: 0 } }), s);
@@ -267,7 +267,7 @@ check("text and mark keys split", textKeys(["edge2.assessment", "name", "marks.d
   const keys = ["marks.old_offline", "marks.dsa_offline", "marks.frontend_interview", "marks.bucket_a_tr1", "marks.bucket_b_tr1", "marks.bucket_c_tr1", "edge2.assessment"];
   const rows = rowsFor(keys);
   const best = lookupTable(rows, { phoneColumn: false, keys });
-  const base = "UUID|Internal Standing|Internal Stage|Internal Product|Job Eligibility";
+  const base = "UUID|Internal Standing|Mentor|Internal Stage|Internal Product|Job Eligibility";
   check(
     "marks: header = name (max), verdict and recording beside it",
     best.headers.join("|") ===
@@ -308,15 +308,15 @@ check("text and mark keys split", textKeys(["edge2.assessment", "name", "marks.d
   const latest = lookupTable(rows, { phoneColumn: false, keys: ["marks.dsa_offline"], options: { ...DEFAULT_LOOKUP_OPTIONS, attempts: "latest", date: true } });
   check("latest attempt, with its date", latest.rows[0]["DSA offline exam (130)"] === "57" && latest.rows[0]["DSA offline exam – date"] === "25 Oct 2026", latest.rows[0]);
   const plain = lookupTable(rows, { phoneColumn: false, keys: ["marks.dsa_offline", "marks.old_offline"], options: { ...DEFAULT_LOOKUP_OPTIONS, verdict: false, date: true } });
-  check("marks alone (verdict off); the old offline assessment's date is its cycle", plain.headers.slice(5).join("|") === "Old offline assessment (230)|Old offline assessment – date|DSA offline exam (130)|DSA offline exam – date" && plain.rows[0]["Old offline assessment – date"] === "Cycle 4", plain.headers);
+  check("marks alone (verdict off); the old offline assessment's date is its cycle", plain.headers.slice(6).join("|") === "Old offline assessment (230)|Old offline assessment – date|DSA offline exam (130)|DSA offline exam – date" && plain.rows[0]["Old offline assessment – date"] === "Cycle 4", plain.headers);
 
   const all = lookupTable(rowsFor(["marks.dsa_offline", "marks.bucket_b_tr1"]), { phoneColumn: false, keys: ["marks.dsa_offline", "marks.bucket_b_tr1"], options: { ...DEFAULT_LOOKUP_OPTIONS, attempts: "all", verdict: false, recording: false } });
   check(
     "all attempts: an exam per date, an interview per attempt (oldest first)",
-    all.headers.slice(5).join("|") === "DSA offline exam 27 Sep 2026 (130)|DSA offline exam 11 Oct 2026 (130)|DSA offline exam 25 Oct 2026 (130)|Bucket B TR-1 #1 (15)|Bucket B TR-1 #2 (15)",
+    all.headers.slice(6).join("|") === "DSA offline exam 27 Sep 2026 (130)|DSA offline exam 11 Oct 2026 (130)|DSA offline exam 25 Oct 2026 (130)|Bucket B TR-1 #1 (15)|Bucket B TR-1 #2 (15)",
     all.headers,
   );
-  check("…with the marks of each", ["30", "92", "57", "8.5", "12.33"].every((x, i) => all.rows[0][all.headers[5 + i]] === x), all.rows[0]);
+  check("…with the marks of each", ["30", "92", "57", "8.5", "12.33"].every((x, i) => all.rows[0][all.headers[6 + i]] === x), all.rows[0]);
   check("chooseAttempts: a tie goes to the latest", chooseAttempts(markAttempts({ standing: mirat, records: {}, scores: [sc("dsa_offline", 50, 130, "2026-09-27", "", "a"), sc("dsa_offline", 50, 130, "2026-10-25", "", "b")] }, ["marks.dsa_offline"])["marks.dsa_offline"], "best")[0].takenOn === "2026-10-25");
   const other = lookupTable(lookupRows(parseLookupInput(U1), { ...data, scores: { "11": [sc("dsa_offline", 60, 140, "2026-11-01", "", "x")] } }, ["marks.dsa_offline"]), { phoneColumn: false, keys: ["marks.dsa_offline"] });
   check("an exam set out of another maximum: that maximum in the header, the cell still only the marks", other.headers.includes("DSA offline exam (140)") && other.rows[0]["DSA offline exam (140)"] === "60", other);
@@ -330,7 +330,7 @@ ${U2}`;
   const tag = lookupTable(lookupRows(parseLookupInput(U1), data, ["marks.dsa_offline"]), { phoneColumn: false, keys: ["marks.dsa_offline"] });
   check("no marks stored: the pool sheet's tag as the verdict, no marks", tag.rows[0]["DSA offline exam (130)"] === "" && tag.rows[0]["DSA offline exam – verdict"] === "27th Sep - Cleared", tag.rows[0]);
   const mixed = lookupTable(rowsFor(["name", "marks.dsa_offline"]), { phoneColumn: false, keys: ["name", "marks.dsa_offline"] });
-  check("text in Requirements, marks still in columns", mixed.headers.slice(5).join("|") === "Requirements|DSA offline exam (130)|DSA offline exam – verdict" && mixed.rows[0].Requirements === "Name: Mirat Parmar");
+  check("text in Requirements, marks still in columns", mixed.headers.slice(6).join("|") === "Requirements|DSA offline exam (130)|DSA offline exam – verdict" && mixed.rows[0].Requirements === "Name: Mirat Parmar");
 }
 
 // ── Assessed, not in the eligible pool ──────────────────────────────────────

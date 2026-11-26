@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { databaseConfigured, describeDbError } from "@/lib/db/client";
+import { mentorLabelsFor } from "@/lib/pool/mentors";
 import { lookupStandings, poolRecords } from "@/lib/pool/queries";
 import { assessedOutsidePool, marksTablesMissing, profilesFor, scoresFor } from "@/lib/pool/scores/queries";
 import { PRODUCTS, type PersonRecords, type Product } from "@/lib/pool/types";
@@ -11,6 +12,9 @@ import { PRODUCTS, type PersonRecords, type Product } from "@/lib/pool/types";
  * Returns { configured, standings: { "p:<phone>" | "u:<userId>": CandidateStanding }, assessed }:
  *  - assessed: { "p:…" | "u:…": PersonRef } — people with assessment marks who aren't in the
  *    eligible pool (no standing, so not eligible for job opportunities);
+ *  - mentors: { "p:…" | "u:…" | "e:…": label } — the Academy mentor of everyone found in the
+ *    assessed pool, by the pasted ids and the matched records' ids ("" = in the pool, no mentor;
+ *    src/lib/pool/mentor-label.ts). Never fails the lookup: {} when it can't be read;
  * and, when `include` asks for them, per candidate id of all of these people:
  *  - records: { edge2?, edge1?, academy? } — the products' assessment details;
  *  - scores: AssessmentScore[] — every final mark (with verdict, date, recording), oldest first;
@@ -35,7 +39,7 @@ async function withoutMarksTables<T, F>(work: Promise<T>, fallback: F): Promise<
 }
 
 export async function POST(req: Request) {
-  if (!databaseConfigured()) return NextResponse.json({ configured: false, standings: {} });
+  if (!databaseConfigured()) return NextResponse.json({ configured: false, standings: {}, mentors: {} });
   const body = (await req.json().catch(() => null)) as { people?: { phone?: unknown; userId?: unknown }[]; include?: unknown } | null;
   if (!Array.isArray(body?.people)) return NextResponse.json({ error: "Send { people: [{ phone, userId }] }." }, { status: 400 });
   if (body.people.length > MAX_PEOPLE) return NextResponse.json({ error: `At most ${MAX_PEOPLE} people per lookup.` }, { status: 413 });
@@ -48,14 +52,20 @@ export async function POST(req: Request) {
     // Marks and profiles live in migrations 004 / 005's tables: until they are applied, the
     // lookup carries on with standings and records only.
     const [standings, assessed] = await Promise.all([lookupStandings(people), withoutMarksTables(assessedOutsidePool(people), {})]);
-    if (!include.length && !wantScores && !wantProfile) return NextResponse.json({ configured: true, standings, assessed });
+    // The Academy mentor (Mentor / Assigned Mentor columns): by the pasted ids, then the matched records' ids.
+    const mentors = await mentorLabelsFor([
+      ...people,
+      ...Object.values(standings).map((s) => ({ phone: s.phone, userId: s.userId })),
+      ...Object.values(assessed).map((p) => ({ phone: p.phone, userId: p.userId })),
+    ]);
+    if (!include.length && !wantScores && !wantProfile) return NextResponse.json({ configured: true, standings, assessed, mentors });
     const ids = [...new Set([...Object.values(standings).map((s) => s.candidateId), ...Object.values(assessed).map((p) => p.candidateId)])];
     const [records, scores, profiles] = await Promise.all([
       include.length ? poolRecords(ids, include) : Promise.resolve({} as Record<number, PersonRecords>),
       wantScores ? withoutMarksTables(scoresFor(ids), undefined) : Promise.resolve(undefined),
       wantProfile ? withoutMarksTables(profilesFor(ids), undefined) : Promise.resolve(undefined),
     ]);
-    return NextResponse.json({ configured: true, standings, assessed, records, ...(scores ? { scores } : {}), ...(profiles ? { profiles } : {}) });
+    return NextResponse.json({ configured: true, standings, assessed, mentors, records, ...(scores ? { scores } : {}), ...(profiles ? { profiles } : {}) });
   } catch (err) {
     console.error("[pool] lookup failed:", err instanceof Error ? err.message : err);
     return NextResponse.json({ error: describeDbError(err) }, { status: 503 });

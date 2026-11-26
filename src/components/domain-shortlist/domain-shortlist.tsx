@@ -69,9 +69,10 @@ import {
   type GithubScope,
 } from "@/lib/domain-scoring";
 import { lookupPoolStandings } from "@/lib/pool/client";
+import { mentorForRow, type MentorLabels } from "@/lib/pool/mentor-label";
 import { standingText } from "@/lib/pool/lookup";
 import { isAssessed, standingFor } from "@/lib/pool/match";
-import { PRODUCT_LABEL, STAGE_SHORT, type InternalStanding } from "@/lib/pool/types";
+import { PRODUCT_LABEL, STAGE_SHORT, type CandidateStanding, type InternalStanding } from "@/lib/pool/types";
 import { NO_DSA_GATES, bestRating, dsaGatesActive, ratingsLine, type DsaGates } from "@/lib/dsa-scoring";
 import { DSA_PLATFORMS, type DsaPlatform } from "@/lib/dsa-types";
 import {
@@ -556,6 +557,8 @@ export function DomainShortlist(_props: DomainShortlistProps) {
   const standingsRef = React.useRef(new Map<DomainCandidateRow, InternalStanding | null>());
   /** The eligible pool was really looked up this run (so "not in it" means external). */
   const poolCheckedRef = React.useRef(false);
+  /** The run's Academy mentor labels and the pool records matched (the CSVs' Assigned Mentor column). */
+  const mentorsRef = React.useRef<{ labels: MentorLabels; records: Record<string, CandidateStanding> }>({ labels: {}, records: {} });
   const abortRef = React.useRef(false);
 
   const update = (name: string, partial: Partial<SubConfig>) =>
@@ -854,6 +857,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
     setPoolInfo(null);
     standingsRef.current = new Map();
     poolCheckedRef.current = false;
+    mentorsRef.current = { labels: {}, records: {} };
     abortRef.current = false;
     collectedRef.current = [];
     processedRef.current = new Set();
@@ -924,6 +928,7 @@ export function DomainShortlist(_props: DomainShortlistProps) {
       const pool = mapped ? await lookupPoolStandings(rows.map((r) => ({ phone: r.phone, userId: r.userId }))) : null;
       standingsRef.current = new Map(rows.map((r) => [r, standingFor(pool?.ok ? pool.data.standings : {}, r.phone ?? "", r.userId ?? "")]));
       poolCheckedRef.current = Boolean(pool?.ok && pool.data.configured);
+      mentorsRef.current = pool?.ok ? { labels: pool.data.mentors, records: pool.data.standings } : { labels: {}, records: {} };
       setPoolInfo(
         describePool(
           rows,
@@ -1011,6 +1016,8 @@ export function DomainShortlist(_props: DomainShortlistProps) {
       trackDomainCommit,
       presentation: checkPresentation,
       poolChecked: poolInfo?.state === "matched",
+      // Assigned Mentor, right after Internal Standing: the Academy assessed pool's mentor.
+      mentorOf: (row) => mentorForRow(mentorsRef.current.labels, row, mentorsRef.current.records),
       unscored: [
         ...failedRows.map(({ row, error, kind: k }) => ({
           row,

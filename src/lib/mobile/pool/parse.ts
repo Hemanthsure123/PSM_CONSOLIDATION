@@ -2,6 +2,9 @@
  * Academy priority pool — reading the Academy sheet's "> 8LPA Assessed Pool" tab. Pure (no I/O), so
  * the rules are unit-tested (scripts/pool-academy-selftest.ts).
  *
+ * Since 1.10.0 every assessed row is kept (a row with a UID or a StudentNumber); a blank MENTOR is
+ * an unassigned candidate (mentor ""). Rows are still keyed by UID.
+ *
  * Only these columns are ever read (the user's rule); every other cell is ignored:
  *   UID, YOG, Name, Email Address, StudentNumber, Location/State, Bachelor's College Name,
  *   Bachelor's Course Name, Bachelor's Specialization, TechStack, MENTOR.
@@ -109,6 +112,7 @@ export interface PoolSheetRow {
   specialization: string | null;
   techStack: string | null;
   track: PoolTrack | null;
+  /** The MENTOR cell as typed; "" = unassigned. */
   mentor: string;
   /** 1-based sheet row, for messages. */
   sheetRow: number;
@@ -120,10 +124,12 @@ export interface PoolParseIssue {
 }
 
 /**
- * The mentored rows of the tab. A row without a MENTOR value is not in the pool (the user's rule).
- * A mentored row without a usable UID is reported, not guessed; a repeated UID keeps its first row.
+ * The assessed rows of the tab: every row with a UID or a StudentNumber, assigned (MENTOR filled) or
+ * not (mentor ""). [opts.assignedOnly] keeps the pre-1.10.0 rule (only rows with a MENTOR), for a
+ * database without migration 020. A row without a usable UID is reported, not guessed; a repeated
+ * UID keeps its first row.
  */
-export function parsePoolRows(rows: unknown[][]): { rows: PoolSheetRow[]; issues: PoolParseIssue[]; read: number } {
+export function parsePoolRows(rows: unknown[][], opts: { assignedOnly?: boolean } = {}): { rows: PoolSheetRow[]; issues: PoolParseIssue[]; read: number } {
   const cols = findPoolColumns(rows);
   const at = (r: unknown[], f: PoolField) => {
     const i = cols.index[f];
@@ -136,13 +142,18 @@ export function parsePoolRows(rows: unknown[][]): { rows: PoolSheetRow[]; issues
   for (let r = cols.headerRow + 1; r < rows.length; r++) {
     const row = rows[r] ?? [];
     const sheetRow = r + 1;
-    const mentor = clip(at(row, "mentor"), 80);
+    const mentor = clip(at(row, "mentor"), 80) ?? "";
     const uid = at(row, "uid");
-    if (!uid && !mentor) continue;
+    const rawPhone = at(row, "phone");
+    if (!uid && !rawPhone && !mentor) continue;
     read++;
-    if (!mentor) continue;
+    if (opts.assignedOnly && !mentor) continue;
+    if (!uid && !rawPhone) {
+      issues.push({ row: sheetRow, message: "Mentored row without a UID." });
+      continue;
+    }
     if (!UID.test(uid)) {
-      issues.push({ row: sheetRow, message: uid ? `UID "${uid.slice(0, 40)}" isn't valid.` : "Mentored row without a UID." });
+      issues.push({ row: sheetRow, message: uid ? `UID "${uid.slice(0, 40)}" isn't valid.` : "Row without a UID (StudentNumber only)." });
       continue;
     }
     const first = seen.get(uid);
@@ -151,7 +162,6 @@ export function parsePoolRows(rows: unknown[][]): { rows: PoolSheetRow[]; issues
       continue;
     }
     seen.set(uid, sheetRow);
-    const rawPhone = at(row, "phone");
     const phone = phone10(rawPhone);
     if (rawPhone && !phone) issues.push({ row: sheetRow, message: `StudentNumber "${rawPhone.slice(0, 20)}" isn't a 10-digit mobile number.` });
     const email = at(row, "email").toLowerCase();

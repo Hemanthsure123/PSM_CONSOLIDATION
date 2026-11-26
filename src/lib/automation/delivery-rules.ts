@@ -1,4 +1,5 @@
 import { domainCsv, type UnscoredRow } from "@/lib/domain-csv";
+import { MENTOR_HEADER } from "@/lib/pool/mentor-label";
 import { normalisePhone } from "@/lib/pool/parse";
 import type { AutomationPlan } from "@/lib/automation/types";
 import type { DomainCandidateRow, DomainReportResult } from "@/lib/types";
@@ -14,11 +15,14 @@ import type { DomainCandidateRow, DomainReportResult } from "@/lib/types";
  *    none). With the Job ID it identifies a row, which is how a retried or second delivery
  *    (shortlist first, the rest later) never writes a candidate twice.
  *  - Columns are matched by name. The key columns sit at the front; a tab that predates one gets
- *    it inserted in place (old rows simply have it blank); other new columns go at the end.
+ *    it inserted in place (old rows simply have it blank); so does the Mentor column, right after
+ *    Internal Standing (ANCHORED_COLUMNS); other new columns go at the end.
  */
 
 /** The columns that lead every row, in order. */
 export const KEY_COLUMNS = ["Job ID", "Delivered At", "Mobile Number", "Rank", "Name", "Status", "Not Shortlisted Because", "Review Flags", "Source Tab"] as const;
+/** Columns a tab that predates them gets inserted right after another one: [column, after]. */
+export const ANCHORED_COLUMNS: readonly (readonly [string, string])[] = [[MENTOR_HEADER, "Internal Standing"]];
 /** Google Sheets holds at most 50,000 characters per cell. */
 const CELL_MAX = 45_000;
 
@@ -40,6 +44,8 @@ export interface DeliveryContext {
   flagsOf: (candidateId: string) => string[];
   /** Rows that weren't scored: not resumes, couldn't be screened. */
   unscored: (UnscoredRow & { sourceTab: string })[];
+  /** The Academy mentor's label of a row (the Mentor column); absent = blank. */
+  mentorOf?: (row: DomainCandidateRow) => string;
 }
 
 /** Every candidate as named cells, in rank order. `only: "shortlist"` = the shortlist alone. */
@@ -60,6 +66,8 @@ export function deliveryTable(
     presentation: false,
     poolChecked: true,
     unscored: only === "all" ? ctx.unscored : [],
+    mentorOf: ctx.mentorOf,
+    mentorHeader: MENTOR_HEADER,
   });
   const ids: { id: string; tab: string }[] = [
     ...result.candidates.map((c) => ({ id: c.id, tab: ctx.sourceTabOf(c.id) })),
@@ -85,7 +93,8 @@ export function deliveryTable(
 
 /**
  * How the tab's header changes for this job: key columns missing from an older tab are inserted
- * at their place (`inserts`, 0-based, applied in order), any other new column is appended.
+ * at their place, an anchored column right after its anchor (`inserts`, 0-based, applied in
+ * order), any other new column is appended.
  */
 export function planHeaders(existing: string[], wanted: string[]): { headers: string[]; inserts: number[]; appended: string[] } {
   const headers = existing.map((h) => String(h ?? "").trim());
@@ -103,6 +112,13 @@ export function planHeaders(existing: string[], wanted: string[]): { headers: st
       headers.splice(at, 0, key);
       inserts.push(at);
       at += 1;
+    }
+    for (const [column, after] of ANCHORED_COLUMNS) {
+      if (!wanted.includes(column) || headers.includes(column)) continue;
+      const i = headers.indexOf(after);
+      if (i < 0) continue;
+      headers.splice(i + 1, 0, column);
+      inserts.push(i + 1);
     }
   }
   const known = new Set(headers.filter(Boolean));

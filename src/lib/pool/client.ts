@@ -1,4 +1,5 @@
 import type { LookupInclude } from "@/lib/pool/lookup";
+import type { MentorLabels } from "@/lib/pool/mentor-label";
 import type { AssessmentKey, AssessmentScore, CandidateProfile, EligibilityFilter, PersonRef, ScoreImportResult, ScoresSummary } from "@/lib/pool/scores/catalogue";
 import type { CandidateStanding, PersonRecords, PoolSummary, Product, SyncResult } from "@/lib/pool/types";
 
@@ -47,6 +48,8 @@ export interface StandingLookup {
   /** Final scores / profiles per candidate id (asked with "scores" / "profile"). */
   scores?: Record<string, AssessmentScore[]>;
   profiles?: Record<string, CandidateProfile>;
+  /** Academy mentor labels ("p:<phone>" / "u:<uid>" / "e:<email>"; {} when unavailable). Read with mentorLabelFor. */
+  mentors: MentorLabels;
 }
 
 const obj = <T>(v: unknown): T | undefined => (v && typeof v === "object" ? (v as T) : undefined);
@@ -69,6 +72,7 @@ export const lookupPoolStandings = (people: { phone?: string; userId?: string }[
             records: obj<Record<string, PersonRecords>>(b.records) ?? {},
             scores: obj(b.scores),
             profiles: obj(b.profiles),
+            mentors: obj<MentorLabels>(b.mentors) ?? {},
           }
         : undefined,
   );

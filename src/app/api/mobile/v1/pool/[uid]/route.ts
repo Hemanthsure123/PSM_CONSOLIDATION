@@ -3,9 +3,10 @@ import { fail, readJson, withUser } from "@/lib/mobile/http";
 import { poolDetail, type PoolUpdateInput, updatePoolCandidate } from "@/lib/mobile/pool/service";
 
 /**
- * GET /pool/{uid} — one candidate: profile, every assessment attempt, interviews, resumes, meetings
- * and history. PATCH /pool/{uid} { version, priority?, track?, tags? } — the mentor's choices
- * (409 version_conflict when someone else changed them first). Both return the candidate.
+ * GET /pool/{uid} — one candidate (anyone signed in): profile, every assessment attempt, interviews,
+ * resumes, meetings, history, company shares and canEdit. PATCH /pool/{uid} { version, priority?,
+ * track?, tags? } — the assigned mentor's choices (leads and admins too; others 403
+ * not_your_candidate; 409 version_conflict when someone else changed them first). Both return the candidate.
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

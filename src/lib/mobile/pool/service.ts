@@ -14,6 +14,9 @@ import {
   type Priority,
   TRACK_LABEL,
 } from "@/lib/mobile/pool/parse";
+import { bestOutcome, isActiveShare, type ShareDto, type ShareOutcome } from "@/lib/mobile/pool/shares";
+import { lastSharesSync, type ShareRow, sharesByUid } from "@/lib/mobile/pool/shares-store";
+import { groupKeyOf, type PoolGroupDto, poolGroups, poolSummary, type PoolSummaryDto } from "@/lib/mobile/pool/summary";
 import { lastPoolSync } from "@/lib/mobile/pool/sync";
 import { assessmentInfo, type AssessmentScore } from "@/lib/pool/scores/catalogue";
 import { scoresFor } from "@/lib/pool/scores/queries";
@@ -22,15 +25,21 @@ import { rsaDocumentsForPhone } from "@/lib/rsa/list";
 /**
  * Academy priority pool — what the app reads and what mentors change.
  *
- * Who sees whom: admins and leads see every mentored candidate; everyone else sees the candidates
- * whose MENTOR cell names them (roster name or alias). The mentor is matched when read, so a
- * mentor added to the team later sees their candidates at once.
+ * Who sees whom (1.10.0): everyone signed in sees every Academy assessed candidate, assigned or
+ * not. Changes (priority, track, tags, resumes, contact log, meetings) are allowed to the assigned
+ * mentor (the MENTOR cell names them: roster name or alias), leads and admins; the server enforces
+ * it (403 not_your_candidate), the app only hides the buttons. The mentor is matched when read, so
+ * a mentor added to the team later gets their candidates at once.
  *
- * Joined at read time, never copied: assessment marks (placement.*, by UID then phone) and
- * interviews (the EDGE drill-down tab, by phone; cached 30 s by the preps code).
+ * Joined at read time, never copied: assessment marks (placement.*, by UID then phone), interviews
+ * (the EDGE drill-down tab, by phone; cached 30 s by the preps code) and company shares
+ * (app.company_shares, synced hourly from the company sheets: shares-sync.ts).
  */
 
-const canSeeAll = (u: RosterUser) => u.role === "admin" || u.role === "lead";
+const canEditAll = (u: RosterUser) => u.role === "admin" || u.role === "lead";
+
+/** The user may change this candidate: their own (assigned) candidate, or they are a lead / admin. */
+export const canEditCandidate = (u: RosterUser, mentor: RosterUser | null) => canEditAll(u) || (mentor !== null && mentor.email === u.email);
 
 interface CandidateRow {
   uid: string;
@@ -86,32 +95,53 @@ const SELECT_CANDIDATES = `
        order by e.at desc limit 1
     ) lc on true`;
 
-/** The candidates [user] may see (removed rows excluded), mentor matched to the roster. */
-async function visibleCandidates(user: RosterUser, roster: RosterUser[], uids?: string[]): Promise<(CandidateRow & { mentor: RosterUser | null })[]> {
+type Candidate = CandidateRow & { mentor: RosterUser | null; canEdit: boolean; mine: boolean };
+
+/** The pool's candidates (removed rows excluded), mentor matched to the roster, with what [user] may do. */
+async function visibleCandidates(user: RosterUser, roster: RosterUser[], uids?: string[]): Promise<Candidate[]> {
   const rows = uids
     ? await query<CandidateRow>(`${SELECT_CANDIDATES} where p.removed_at is null and p.uid = any($1::text[])`, [uids])
     : await query<CandidateRow>(`${SELECT_CANDIDATES} where p.removed_at is null`);
-  const all = canSeeAll(user);
-  const out: (CandidateRow & { mentor: RosterUser | null })[] = [];
-  for (const r of rows) {
-    const mentor = matchMentor(r.mentor_name, roster);
-    if (all || mentor?.email === user.email) out.push({ ...r, mentor });
-  }
-  return out;
+  return rows.map((r) => {
+    const mentor = r.mentor_name ? matchMentor(r.mentor_name, roster) : null;
+    return { ...r, mentor, mine: mentor?.email === user.email, canEdit: canEditCandidate(user, mentor) };
+  });
 }
 
-/** One candidate the user may see, or a 404 (not "forbidden": we don't reveal who exists). */
+/** One candidate (everyone may view), or a 404. */
 async function visibleCandidate(user: RosterUser, uid: string, roster?: RosterUser[]) {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$/.test(uid)) throw new UserError(404, "This candidate isn't in your pool.", "not_found");
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{5,63}$/.test(uid)) throw new UserError(404, "This candidate isn't in the pool.", "not_found");
   const r = roster ?? (await listRoster());
   const [row] = await visibleCandidates(user, r, [uid]);
-  if (!row) throw new UserError(404, "This candidate isn't in your pool.", "not_found");
+  if (!row) throw new UserError(404, "This candidate isn't in the pool.", "not_found");
   return row;
 }
 
-/** Access check for actions on one candidate (same 404 as the detail screen); returns their name. */
-export async function assertPoolAccess(user: RosterUser, uid: string): Promise<{ name: string }> {
+const notYours = (r: Candidate) =>
+  new UserError(
+    403,
+    r.mentor || r.mentor_name
+      ? `Only ${r.mentor?.name ?? r.mentor_name} (the assigned mentor), leads and admins can change this candidate.`
+      : "This candidate has no mentor yet. Only leads and admins can change them.",
+    "not_your_candidate",
+  );
+
+/** One candidate the user may change (their own, or they are a lead / admin): 404 / 403 otherwise. */
+async function editableCandidate(user: RosterUser, uid: string, roster?: RosterUser[]) {
+  const r = await visibleCandidate(user, uid, roster);
+  if (!r.canEdit) throw notYours(r);
+  return r;
+}
+
+/** Access check for viewing one candidate (404 when not in the pool); returns their name. */
+export async function assertPoolView(user: RosterUser, uid: string): Promise<{ name: string }> {
   const r = await visibleCandidate(user, uid);
+  return { name: r.name };
+}
+
+/** Access check for changing one candidate (404 / 403 not_your_candidate); returns their name. */
+export async function assertPoolEdit(user: RosterUser, uid: string): Promise<{ name: string }> {
+  const r = await editableCandidate(user, uid);
   return { name: r.name };
 }
 
@@ -229,6 +259,9 @@ const averagePercent = (latest: PoolScoreDto[]) => (latest.length ? Math.round(l
 
 // ── List ────────────────────────────────────────────────────────────────────
 
+/** The mentor as the app shows it: roster name and email, the sheet's name when not on the roster, "" when unassigned. */
+const mentorDto = (r: Pick<Candidate, "mentor" | "mentor_name">): PoolMentorDto => ({ name: r.mentor?.name ?? r.mentor_name.trim(), email: r.mentor?.email ?? null });
+
 export interface PoolMentorDto {
   name: string;
   email: string | null;
@@ -242,7 +275,14 @@ export interface PoolItemDto {
   yog: number | null;
   location: string | null;
   college: string | null;
+  /** { name: "", email: null } when unassigned. */
   mentor: PoolMentorDto;
+  /** Assigned to the caller. */
+  mine: boolean;
+  /** The caller may change this candidate (their own; leads and admins: all). */
+  canEdit: boolean;
+  /** The group this candidate is listed under (GET /pool groups[].key). */
+  groupKey: string;
   /** The track the candidate is on: the mentor's choice, else the sheet's TechStack. */
   track: PoolTrack | null;
   sheetTrack: PoolTrack | null;
@@ -258,6 +298,10 @@ export interface PoolItemDto {
   resumes: number;
   bestResumes: number;
   lastContact: { at: string; channel: string; by: string } | null;
+  /** Company sheets the candidate is in (null: the shares were never synced). */
+  shares: { count: number; active: number; companies: string[]; latest: ShareDto | null } | null;
+  /** The most advanced outcome across companies; null when never shared. */
+  stage: ShareOutcome | null;
   updatedAt: string;
 }
 
@@ -268,20 +312,39 @@ export interface PoolListDto {
   mentors: PoolMentorDto[];
   tagSuggestions: string[];
   tracks: { key: PoolTrack; label: string }[];
-  scope: "all" | "mine";
+  /** Always "all" since 1.10.0 (everyone sees every assessed candidate). */
+  scope: "all";
   syncedAt: string | null;
   interviewsAvailable: boolean;
+  summary: PoolSummaryDto;
+  groups: PoolGroupDto[];
+  /** When the company sheets were last synced (null: never). */
+  sharesSyncedAt: string | null;
+}
+
+/** The list card's share summary: count, still active, up to 5 companies (newest first), the latest share. */
+function shareSummary(rows: ShareRow[]): NonNullable<PoolItemDto["shares"]> {
+  const companies: string[] = [];
+  for (const r of rows) if (companies.length < 5 && !companies.some((c) => c.toLowerCase() === r.dto.company.toLowerCase())) companies.push(r.dto.company);
+  return {
+    count: rows.length,
+    active: rows.filter((r) => isActiveShare(r.dto.outcome, r.masterFinalStatus)).length,
+    companies,
+    latest: rows[0]?.dto ?? null,
+  };
 }
 
 export async function listPool(user: RosterUser): Promise<{ body: PoolListDto; etag: string }> {
   const roster = await listRoster();
-  const [rows, synced, allMentorNames, tagRows] = await Promise.all([
+  const [rows, synced, allMentorNames, tagRows, shares, sharesSyncedAt] = await Promise.all([
     visibleCandidates(user, roster),
     lastPoolSync(),
-    canSeeAll(user)
+    canEditAll(user)
       ? query<{ mentor_name: string; n: number }>("select mentor_name, count(*)::int n from app.pool_candidates where removed_at is null group by mentor_name")
       : Promise.resolve([]),
     query<{ tag: string }>("select distinct unnest(tags) as tag from app.pool_state order by 1 limit 200"),
+    sharesByUid(),
+    lastSharesSync(),
   ]);
   const ids = rows.map((r) => Number(r.candidate_id)).filter((n) => n > 0);
   const [scores, interviews] = await Promise.all([scoresFor(ids), interviewsByPhone(rows.map((r) => r.phone ?? ""))]);
@@ -290,6 +353,8 @@ export async function listPool(user: RosterUser): Promise<{ body: PoolListDto; e
   const items: PoolItemDto[] = rows.map((r) => {
     const latest = latestPerAssessment(r.candidate_id ? scores[Number(r.candidate_id)] ?? [] : []);
     const ivs = interviews ? interviews.get(r.phone ?? "") ?? [] : null;
+    const mentor = mentorDto(r);
+    const own = shares ? shares.get(r.uid) ?? [] : null;
     return {
       uid: r.uid,
       name: r.name,
@@ -298,7 +363,10 @@ export async function listPool(user: RosterUser): Promise<{ body: PoolListDto; e
       yog: r.yog,
       location: r.location,
       college: r.college,
-      mentor: { name: r.mentor?.name ?? r.mentor_name, email: r.mentor?.email ?? null },
+      mentor,
+      mine: r.mine,
+      canEdit: r.canEdit,
+      groupKey: groupKeyOf(mentor),
       track: r.track ?? r.sheet_track,
       sheetTrack: r.sheet_track,
       sheetTechStack: r.sheet_tech_stack,
@@ -317,25 +385,35 @@ export async function listPool(user: RosterUser): Promise<{ body: PoolListDto; e
       lastContact: r.last_contact_at
         ? { at: r.last_contact_at.toISOString(), channel: r.last_contact_action ?? "", by: roster2.get(r.last_contact_by ?? "")?.name ?? r.last_contact_by ?? "" }
         : null,
+      shares: own ? shareSummary(own) : null,
+      stage: own ? bestOutcome(own.map((x) => x.dto.outcome)) : null,
       updatedAt: (r.state_updated_at && r.state_updated_at > r.updated_at ? r.state_updated_at : r.updated_at).toISOString(),
     };
   });
   const unmatchedMentors = allMentorNames
-    .filter((m) => !matchMentor(m.mentor_name, roster))
+    .filter((m) => m.mentor_name.trim() && !matchMentor(m.mentor_name, roster))
     .map((m) => ({ name: m.mentor_name.trim(), candidates: m.n }))
     .sort((a, b) => b.candidates - a.candidates);
-  const mentors = canSeeAll(user)
-    ? [...new Map(items.map((i) => [i.mentor.email ?? `name:${i.mentor.name.toLowerCase()}`, i.mentor])).values()].sort((a, b) => a.name.localeCompare(b.name))
-    : [];
+  const mentors = [...new Map(items.filter((i) => i.mentor.name).map((i) => [i.groupKey, i.mentor])).values()].sort((a, b) => a.name.localeCompare(b.name));
+  const summaryItems = items.map((i) => ({
+    mentor: i.mentor,
+    mine: i.mine,
+    sharesCount: i.shares ? i.shares.count : null,
+    stage: i.stage,
+    upcomingInterviews: i.interviews?.upcoming ?? 0,
+  }));
   const body: PoolListDto = {
     items,
     unmatchedMentors,
     mentors,
     tagSuggestions: tagRows.map((t) => t.tag),
     tracks: POOL_TRACKS.map((key) => ({ key, label: TRACK_LABEL[key] })),
-    scope: canSeeAll(user) ? "all" : "mine",
+    scope: "all",
     syncedAt: synced?.toISOString() ?? null,
     interviewsAvailable: interviews !== null,
+    summary: poolSummary(summaryItems),
+    groups: poolGroups(summaryItems),
+    sharesSyncedAt: sharesSyncedAt?.toISOString() ?? null,
   };
   // Day-bucketed so "upcoming" counts roll over at midnight even when nothing else changed.
   const etag = `"${createHash("sha1").update(JSON.stringify(body)).update(today).digest("hex").slice(0, 32)}"`;
@@ -396,7 +474,7 @@ export async function poolDetail(user: RosterUser, uid: string) {
   const roster = await listRoster();
   const r = await visibleCandidate(user, uid, roster);
   const candidateId = Number(r.candidate_id);
-  const [scores, interviews, resumes, events, meetings, rsaDocuments] = await Promise.all([
+  const [scores, interviews, resumes, events, meetings, rsaDocuments, shares] = await Promise.all([
     candidateId > 0 ? scoresFor([candidateId]) : Promise.resolve({} as Record<number, AssessmentScore[]>),
     interviewsByPhone([r.phone ?? ""]),
     query<ResumeRow>(
@@ -412,6 +490,7 @@ export async function poolDetail(user: RosterUser, uid: string) {
       [uid],
     ),
     rsaDocumentsForPhone(r.phone ?? "").catch(() => []),
+    sharesByUid([uid]),
   ]);
   const all = (candidateId > 0 ? scores[candidateId] ?? [] : []).map(scoreDto);
   const latest = latestPerAssessment(candidateId > 0 ? scores[candidateId] ?? [] : []);
@@ -426,7 +505,9 @@ export async function poolDetail(user: RosterUser, uid: string) {
     college: r.college,
     course: r.course,
     specialization: r.specialization,
-    mentor: { name: r.mentor?.name ?? r.mentor_name, email: r.mentor?.email ?? null },
+    mentor: mentorDto(r),
+    mine: r.mine,
+    canEdit: r.canEdit,
     track: r.track ?? r.sheet_track,
     sheetTrack: r.sheet_track,
     sheetTechStack: r.sheet_tech_stack,
@@ -441,6 +522,8 @@ export async function poolDetail(user: RosterUser, uid: string) {
     interviews: interviews ? interviews.get(r.phone ?? "") ?? [] : null,
     /** Past RSA documents (empty: the app shows no RSA section). */
     rsaDocuments,
+    /** Every company sheet the candidate is in, newest activity first (empty when never shared or never synced). */
+    shares: (shares?.get(uid) ?? []).map((x) => x.dto),
     resumes: resumes.map((x) => resumeDto(x, roster)),
     meetings: meetings.map((m) => ({
       id: m.id,
@@ -472,7 +555,7 @@ export interface PoolUpdateInput {
  * the version the app last saw: someone else's newer change is never overwritten silently (409).
  */
 export async function updatePoolCandidate(user: RosterUser, uid: string, input: PoolUpdateInput) {
-  await visibleCandidate(user, uid);
+  await editableCandidate(user, uid);
   const has = (k: keyof PoolUpdateInput) => Object.prototype.hasOwnProperty.call(input, k);
   if (!has("priority") && !has("track") && !has("tags")) throw new UserError(422, "Nothing to change.", "invalid_body");
   if (has("priority") && input.priority !== null && !isPriority(input.priority)) throw new UserError(422, "Priority is P0, P1, P2 or P3.", "invalid_priority");
@@ -517,7 +600,7 @@ export async function updatePoolCandidate(user: RosterUser, uid: string, input: 
 /** The person called / messaged the candidate from the app (for "last contacted" and the history). */
 export async function logPoolContact(user: RosterUser, uid: string, channel: unknown): Promise<void> {
   if (channel !== "call" && channel !== "whatsapp" && channel !== "email") throw new UserError(422, "channel is call, whatsapp or email.", "invalid_body");
-  await visibleCandidate(user, uid);
+  await editableCandidate(user, uid);
   // A double tap logs once.
   await query(
     `insert into app.pool_events (uid, actor_email, action)
@@ -538,14 +621,25 @@ export interface PoolMember {
   mentor: string;
 }
 
-/** The pool candidates of a meeting: every id must be one the user can see (at most 100). */
+/** The pool candidates of a meeting: every id must be one the user may change (at most 100). */
 export async function poolMembersFor(user: RosterUser, raw: unknown): Promise<PoolMember[]> {
   if (!Array.isArray(raw) || !raw.length) return [];
   const ids = [...new Set(raw.map((x) => String(x ?? "").trim()).filter(Boolean))];
   if (ids.length > 100) throw new UserError(422, "A meeting can have at most 100 candidates.", "invalid_meeting");
   const roster = await listRoster();
   const rows = await visibleCandidates(user, roster, ids);
-  if (rows.length !== ids.length) throw new UserError(404, "Some of these candidates aren't in your pool any more. Refresh and pick again.", "not_found");
+  if (rows.length !== ids.length) throw new UserError(404, "Some of these candidates aren't in the pool any more. Refresh and pick again.", "not_found");
+  const notMine = rows.find((r) => !r.canEdit);
+  if (notMine) {
+    const owner = notMine.mentor?.name ?? notMine.mentor_name;
+    throw new UserError(
+      403,
+      owner
+        ? `${notMine.name || "A candidate"} is ${owner}'s candidate. You can schedule meetings for your own candidates.`
+        : `${notMine.name || "A candidate"} has no mentor yet. Only leads and admins can schedule a meeting for them.`,
+      "not_your_candidate",
+    );
+  }
   const order = new Map(ids.map((id, i) => [id, i]));
   return rows
     .sort((a, b) => (order.get(a.uid) ?? 0) - (order.get(b.uid) ?? 0))

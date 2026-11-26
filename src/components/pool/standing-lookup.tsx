@@ -36,6 +36,7 @@ import {
   type LookupOptions,
   type OutputColumn,
 } from "@/lib/pool/lookup";
+import { MENTOR_ASSIGNED_TAG, mentorParts } from "@/lib/pool/mentor-label";
 import { PRODUCT_LABEL, type CandidateStanding, type PersonRecords, type Product } from "@/lib/pool/types";
 
 const fmt = (n: number) => n.toLocaleString("en-IN");
@@ -121,6 +122,20 @@ function ResultCell({ col, value, row }: { col: OutputColumn; value: string; row
         );
       }
       return <TableCell className={cn("whitespace-nowrap", row.status !== "internal" && "text-muted-foreground")}>{row.status === "blank" ? "" : value}</TableCell>;
+    case "mentor": {
+      // "<Mentor> · Mentor assigned · <Tech stack>" (mentor-label.ts): the name, the tag, the stack.
+      const m = mentorParts(value);
+      if (!m) return <TableCell className="whitespace-nowrap text-[13px]">{value || null}</TableCell>;
+      return (
+        <TableCell className="min-w-[160px] text-[13px] leading-relaxed">
+          <span className="font-medium">{m.name}</span>
+          <Badge className="ml-1.5 align-middle">
+            {MENTOR_ASSIGNED_TAG}
+          </Badge>
+          {m.techStack ? <span className="mt-0.5 block text-muted-foreground">{m.techStack}</span> : null}
+        </TableCell>
+      );
+    }
     case "text":
       return (
         <TableCell className={cn("text-[13px] leading-relaxed", col.header === "Requirements" ? "min-w-[280px] whitespace-pre-line" : "min-w-[160px] max-w-[320px]")}>
@@ -149,8 +164,8 @@ function LinkOut({ href, label }: { href: string; label: string }) {
 /**
  * Standing lookup — paste UUIDs or phone numbers (or find everyone assessed from a college /
  * graduation year / above a mark / by job eligibility), get each candidate's internal standing
- * (Edge 2.0, Edge 1.0 and Academy assessments; no resume involved): Internal Standing, Stage and
- * Product, Job Eligibility (Eligible = in the eligible pool), plus the details picked. Marks — the Academy's exams and interviews, Edge 2.0's scores — always
+ * (Edge 2.0, Edge 1.0 and Academy assessments; no resume involved): Internal Standing, the Academy
+ * Mentor, Stage and Product, Job Eligibility (Eligible = in the eligible pool), plus the details picked. Marks — the Academy's exams and interviews, Edge 2.0's scores — always
  * get columns of their own ("DSA offline exam (130)" holding only the marks obtained), with the
  * verdict, date and recording beside them when asked for. Rows keep the pasted order, so the
  * result can be pasted straight back into the sheet.
@@ -237,7 +252,15 @@ export function StandingLookup() {
       return;
     }
     setLooked({ text: source, input });
-    setData({ standings: res.data.standings, assessed: res.data.assessed, records: res.data.records, scores: res.data.scores, profiles: res.data.profiles, fetched: include });
+    setData({
+      standings: res.data.standings,
+      assessed: res.data.assessed,
+      records: res.data.records,
+      scores: res.data.scores,
+      profiles: res.data.profiles,
+      mentors: res.data.mentors,
+      fetched: include,
+    });
     setLimit(PAGE);
   };
 
@@ -266,6 +289,7 @@ export function StandingLookup() {
           records,
           scores: res.data.scores ? { ...d.scores, ...res.data.scores } : d.scores,
           profiles: res.data.profiles ? { ...d.profiles, ...res.data.profiles } : d.profiles,
+          mentors: { ...d.mentors, ...res.data.mentors },
           fetched: [...new Set([...d.fetched, ...missing])],
         };
       });

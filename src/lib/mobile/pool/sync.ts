@@ -3,18 +3,24 @@ import { createHash } from "node:crypto";
 import { query, transaction } from "@/lib/db/client";
 import { poolSource } from "@/lib/pool/sources";
 import { readTab } from "@/lib/pool/sync";
+import { type AssignedChange, notifyAssigned } from "@/lib/mobile/pool/notify";
 import { parsePoolRows, type PoolSheetRow } from "@/lib/mobile/pool/parse";
+import { academySchemaReady } from "@/lib/mobile/pool/schema";
 
 /**
- * Copies the Academy sheet's mentored rows into app.pool_candidates (only the agreed columns, see
- * parse.ts). The app reads the database, never the sheet, so the pool opens instantly.
+ * Copies the Academy sheet's assessed rows into app.pool_candidates (only the agreed columns, see
+ * parse.ts): since 1.10.0 every row with a UID, assigned or not (mentor_name "" = unassigned); before
+ * migration 020 only the mentored rows. The app reads the database, never the sheet, so the pool
+ * opens instantly.
  *  - Change-aware: a row is rewritten only when its content hash changed.
  *  - Nothing mentors added is touched (pool_state / pool_resumes / pool_events are theirs).
- *  - A row that left the tab or lost its MENTOR is marked removed (kept); re-added, it comes back.
+ *  - A row that left the tab is marked removed (kept); re-added, it comes back.
+ *  - A MENTOR newly set to a roster mentor pushes pool_assigned to them (after the write; the first
+ *    sync after migration 020 is a baseline, see notify.ts).
  *  - One write at a time (transaction-level advisory lock: the app's pooler is transaction mode);
  *    each run is logged in app.pool_syncs.
- *  - Safety: a read that returns no mentored rows at all while the table has many is treated as a
- *    broken read (renamed column, emptied tab) and removes nothing.
+ *  - Safety: a read that returns no rows at all while the table has many, or no mentored rows while
+ *    many were mentored, is treated as a broken read (renamed column, emptied tab) and changes nothing.
  */
 
 /** The same Academy sheet and tab as the eligible pool (POOL_ACADEMY_SHEET / POOL_ACADEMY_TAB override both). */
@@ -64,7 +70,8 @@ export async function syncPoolIfStale(maxAgeMs: number, by: string): Promise<Poo
 
 const RETRY_AFTER_FAILURE_MS = 2 * 60_000;
 
-export async function syncPool(by: string): Promise<PoolSyncResult> {
+/** [table]: the tab's cells already read (tests); otherwise the sheet is read. */
+export async function syncPool(by: string, table?: string[][]): Promise<PoolSyncResult> {
   const empty = { rowsRead: 0, active: 0, added: 0, updated: 0, removed: 0, issues: [] as PoolSyncResult["issues"] };
   const startedAt = new Date();
   const log = (status: "succeeded" | "failed", r: Omit<PoolSyncResult, "status" | "syncedAt">) =>
@@ -75,23 +82,36 @@ export async function syncPool(by: string): Promise<PoolSyncResult> {
     );
   try {
     // The sheet is read outside the transaction, so the write transaction stays a few milliseconds.
-    const table = await readTab(POOL_SHEET.spreadsheetId, POOL_SHEET.tab);
-    const parsed = parsePoolRows(table);
+    table ??= await readTab(POOL_SHEET.spreadsheetId, POOL_SHEET.tab);
+    // Before migration 020 the table can't hold unassigned rows (mentor_name must be filled).
+    const allRows = await academySchemaReady().catch(() => false);
+    const parsed = parsePoolRows(table, { assignedOnly: !allRows });
+    const assigned: AssignedChange[] = [];
     const result = await transaction(async (tx) => {
       // Another sync is writing right now: it has the same sheet, so this one steps aside.
       const lock = await tx.query<{ ok: boolean }>("select pg_try_advisory_xact_lock($1) ok", [LOCK]);
       if (!lock.rows[0]?.ok) return null;
-      const existing = await tx.query<{ uid: string; row_hash: string; removed_at: Date | null }>("select uid, row_hash, removed_at from app.pool_candidates");
+      const existing = await tx.query<{ uid: string; row_hash: string; removed_at: Date | null; mentor_name: string }>(
+        "select uid, row_hash, removed_at, mentor_name from app.pool_candidates",
+      );
       const known = new Map(existing.rows.map((r) => [r.uid, r]));
       const activeBefore = existing.rows.filter((r) => !r.removed_at).length;
+      const mentoredBefore = existing.rows.filter((r) => !r.removed_at && r.mentor_name.trim()).length;
       if (!parsed.rows.length && activeBefore >= 10) {
-        throw new Error("The pool tab returned no mentored rows; nothing was changed (check the MENTOR and UID columns).");
+        throw new Error("The pool tab returned no rows; nothing was changed (check the UID and MENTOR columns).");
+      }
+      if (mentoredBefore >= 10 && !parsed.rows.some((r) => r.mentor)) {
+        throw new Error("The pool tab returned no mentored rows; nothing was changed (check the MENTOR column).");
       }
       let added = 0;
       let updated = 0;
       const changed: PoolSheetRow[] = [];
       for (const r of parsed.rows) {
         const k = known.get(r.uid);
+        const before = k && !k.removed_at ? k.mentor_name : "";
+        if (r.mentor && r.mentor.trim().toLowerCase() !== before.trim().toLowerCase()) {
+          assigned.push({ uid: r.uid, name: r.name, track: r.track, mentor: r.mentor, prevMentor: k ? k.mentor_name : "" });
+        }
         if (!k) added++;
         else if (k.row_hash !== hashOf(r) || k.removed_at) updated++;
         else continue;
@@ -131,6 +151,12 @@ export async function syncPool(by: string): Promise<PoolSyncResult> {
     if (!result) return { status: "skipped", ...empty, syncedAt: (await lastPoolSync())?.toISOString() ?? null };
     const counts = { rowsRead: parsed.read, ...result, issues: parsed.issues };
     await log("succeeded", counts);
+    // After the write: a failed push never undoes the copy.
+    const pushed = await notifyAssigned(assigned, startedAt.toISOString()).catch((err) => {
+      console.warn("[pool] assignment pushes failed:", err instanceof Error ? err.message.slice(0, 160) : err);
+      return 0;
+    });
+    if (pushed) console.log(`[pool] ${pushed} pool_assigned pushes`);
     if (result.added || result.updated || result.removed) {
       console.log(`[pool] synced: ${result.active} active, +${result.added} ~${result.updated} -${result.removed}, ${parsed.issues.length} row issues`);
     }

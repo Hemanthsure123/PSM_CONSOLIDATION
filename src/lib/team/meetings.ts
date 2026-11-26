@@ -5,6 +5,7 @@ import { query } from "@/lib/db/client";
 import { UserError } from "@/lib/mobile/http";
 import { normRound, type PrepRow } from "@/lib/mobile/preps/parse";
 import { readPrepSnapshot } from "@/lib/mobile/preps/sheet";
+import { notifyPoolMeeting } from "@/lib/mobile/pool/notify";
 import { logPoolMeeting, poolMembersFor, type PoolMember } from "@/lib/mobile/pool/service";
 import { TRACK_LABEL } from "@/lib/mobile/pool/parse";
 import { pushToUser } from "@/lib/mobile/push";
@@ -353,6 +354,12 @@ export async function createMeeting(user: RosterUser, input: MeetingInput): Prom
   }
   await audit(user.email, "meeting_created", row.id, { kind, prepKey, preps: prepKeys.length, pool: poolUids.length, jobKey: ctx.jobKey, startsAt: start.toISOString(), guests: guests.length, record, email: mode });
   await logPoolMeeting(user, poolUids, `${KIND_LABEL[kind]} · ${istRange(start, end)}`).catch(() => undefined);
+  // pool_meeting: the candidates' mentors hear about it (not the person who scheduled it).
+  if (pool.length) {
+    void notifyPoolMeeting(user, { id: row.id, kind, startsAt: start }, pool).catch((err) =>
+      console.warn("[meetings] pool_meeting pushes failed:", err instanceof Error ? err.message.slice(0, 160) : err),
+    );
+  }
   const warnings = created.art.warning ? [created.art.warning] : [];
   if (mode === "now") {
     const sent = await sendMeetingEmails(row, user.email);

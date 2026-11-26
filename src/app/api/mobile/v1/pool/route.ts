@@ -4,9 +4,10 @@ import { listPool } from "@/lib/mobile/pool/service";
 import { lastPoolSync, SYNC_EVERY_MS, syncPool, syncPoolIfStale } from "@/lib/mobile/pool/sync";
 
 /**
- * GET /pool — the Academy priority pool: the candidates the user mentors (admins and leads: all),
- * with priority, track, tags, assessment highlights, interviews and resumes. Read from the database
- * (the sheet is copied every 10 minutes), so it is fast. ETag-aware: unchanged → 304.
+ * GET /pool — the Academy assessed pool, everyone's candidates (1.10.0): priority, track, tags,
+ * assessment highlights, interviews, resumes and company shares, with mine / canEdit per candidate,
+ * the header summary and the mentor groups. Read from the database (the sheet is copied every 10
+ * minutes, the company sheets every hour), so it is fast. ETag-aware: unchanged → 304.
  */
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";

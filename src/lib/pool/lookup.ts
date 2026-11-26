@@ -1,4 +1,5 @@
 import { isAssessed, standingFor } from "@/lib/pool/match";
+import { MENTOR_HEADER, mentorLabelFor, type MentorLabels } from "@/lib/pool/mentor-label";
 import { normalisePhone, normaliseUserId } from "@/lib/pool/parse";
 import {
   JOB_ELIGIBILITY_LABEL,
@@ -31,8 +32,9 @@ import {
  * picked: candidate details, the Edge / Academy results, and the final MARKS of the Academy
  * exams and interviews. Pure and client-safe; tested in scripts/standing-lookup-selftest.ts.
  *
- * Output: UUID (+ Phone when phones were pasted), Internal Standing, Internal Stage, Internal
- * Product — the same three values Domain shortlisting exports — and Job Eligibility (Eligible =
+ * Output: UUID (+ Phone when phones were pasted), Internal Standing, Mentor (the Academy mentor,
+ * see mentor-label.ts), Internal Stage, Internal Product — the same standing values Domain
+ * shortlisting exports — and Job Eligibility (Eligible =
  * in the eligible pool with an eligible standing; Not eligible = assessed but not in the pool, or
  * not cleared), then
  *  - the picked text details: ONE "Requirements" column holding only the items the candidate has
@@ -638,6 +640,8 @@ export interface LookupRow {
   items: Record<string, string>;
   /** Every attempt at each picked mark, by mark key. */
   marks: Record<string, Attempt[]>;
+  /** The Academy mentor ("<Mentor> · Mentor assigned · <Tech stack>"), "" when none. */
+  mentor: string;
 }
 
 export interface LookupData {
@@ -648,6 +652,8 @@ export interface LookupData {
   /** By candidate id. */
   scores?: Record<string, AssessmentScore[]>;
   profiles?: Record<string, CandidateProfile>;
+  /** Academy mentor labels by "p:<phone>" / "u:<uid>" / "e:<email>" (src/lib/pool/mentors.ts). */
+  mentors?: MentorLabels;
 }
 
 /** Someone assessed outside the pool, matched like a standing: phone first, then user id. */
@@ -674,15 +680,19 @@ export function lookupRows(input: LookupInput, data: LookupData, keys: string[])
       tier: null,
       product: null,
       cells: {} as Record<string, string>,
+      mentor: "",
     };
     if (r.problem === "blank") return { ...base, status: "blank" };
     if (r.problem === "unrecognised") return { ...base, status: "unrecognised", cells: { "Internal Standing": "Not a UUID or phone number" } };
     const st = standingFor(data.standings, r.phone ?? "", r.userId ?? "");
+    // The pasted ids first, then the matched record's (a pasted phone finds the pool's UID).
+    const pasted = { phone: r.phone, userId: r.userId };
     if (!st) {
       const known = assessedFor(data.assessed, r.phone ?? "", r.userId ?? "");
-      if (!known) return { ...base, status: "external", cells: internalColumns(null, true) };
+      if (!known) return { ...base, status: "external", cells: internalColumns(null, true), mentor: mentorLabelFor(data.mentors, pasted) };
       return {
         ...base,
+        mentor: mentorLabelFor(data.mentors, pasted, known),
         uuid: r.userId ?? known.userId ?? "",
         status: "assessed",
         eligibility: "not-eligible",
@@ -695,6 +705,7 @@ export function lookupRows(input: LookupInput, data: LookupData, keys: string[])
     const eligible = isAssessed(st);
     return {
       ...base,
+      mentor: mentorLabelFor(data.mentors, pasted, standing),
       uuid: r.userId ?? standing.userId ?? "",
       status: eligible ? "internal" : "not-eligible",
       eligibility: eligible ? "eligible" : "not-eligible",
@@ -709,7 +720,7 @@ export function lookupRows(input: LookupInput, data: LookupData, keys: string[])
 /** A column of the result: its header, what it holds, and its value per row. */
 export interface OutputColumn {
   header: string;
-  kind: "id" | "standing" | "eligibility" | "text" | "score" | "verdict" | "date" | "recording";
+  kind: "id" | "standing" | "mentor" | "eligibility" | "text" | "score" | "verdict" | "date" | "recording";
   value: (r: LookupRow) => string;
 }
 
@@ -759,7 +770,8 @@ function markColumns(item: MarkItem, rows: LookupRow[], o: LookupOptions): Outpu
 }
 
 /**
- * The result's columns: UUID, Phone (when pasted), the three standing columns, Job Eligibility,
+ * The result's columns: UUID, Phone (when pasted), the three standing columns with Mentor right
+ * after Internal Standing, Job Eligibility,
  * the picked text details (one Requirements column, or one column each), then the picked marks —
  * always in columns of their own.
  */
@@ -769,7 +781,10 @@ export function lookupColumns(rows: LookupRow[], opts: { phoneColumn: boolean; k
   return [
     { header: "UUID", kind: "id", value: (r) => r.uuid },
     ...(opts.phoneColumn ? [{ header: "Phone", kind: "id" as const, value: (r: LookupRow) => r.phone }] : []),
-    ...STANDING_HEADERS.map((h) => ({ header: h, kind: "standing" as const, value: (r: LookupRow) => r.cells[h] ?? "" })),
+    ...STANDING_HEADERS.flatMap((h): OutputColumn[] => [
+      { header: h, kind: "standing", value: (r) => r.cells[h] ?? "" },
+      ...(h === "Internal Standing" ? [{ header: MENTOR_HEADER, kind: "mentor" as const, value: (r: LookupRow) => r.mentor }] : []),
+    ]),
     { header: JOB_ELIGIBILITY_HEADER, kind: "eligibility", value: (r) => (r.eligibility ? JOB_ELIGIBILITY_LABEL[r.eligibility] : "") },
     ...(text.length
       ? o.layout === "columns"

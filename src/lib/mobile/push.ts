@@ -32,7 +32,13 @@ export type PushKind =
   | "app_update"
   | "team_account"
   | "task_unassigned"
-  | "feedback";
+  | "feedback"
+  | "pool_assigned"
+  | "pool_shared"
+  | "pool_status"
+  | "pool_interview"
+  | "pool_meeting"
+  | "academy_digest";
 
 const g = globalThis as unknown as { __fcmAuth?: JWT };
 
@@ -103,6 +109,12 @@ export function inboxText(kind: PushKind, d: Record<string, string>): { title: s
     team_account: ["Team Google account needs attention", "An admin should reconnect it in Me → Team."],
     task_unassigned: [`New task · ${company}`, "No mentor yet. Tap to take it."],
     feedback: [`Feedback from ${d.from || "the team"}`, "Open Me → Feedback."],
+    pool_assigned: [`New candidate · ${d.name || "Academy pool"}`, "Assigned to you in the Academy pool."],
+    pool_shared: [`Shared with ${company} · ${d.name || "your candidate"}`, "Follow the rounds in the app."],
+    pool_status: [`${d.name || "Your candidate"} · ${company}`, d.stage ? `Now: ${d.stage}` : "The status changed."],
+    pool_interview: [`Interview · ${[d.name, d.company].filter(Boolean).join(" · ") || "your candidate"}`, [d.round, d.day, d.time].filter(Boolean).join(" · ")],
+    pool_meeting: [`Meeting · ${d.name || "your candidate"}`, d.by ? `Scheduled by ${d.by}.` : "A meeting was scheduled."],
+    academy_digest: ["Academy candidates", ""],
   };
   const [title, body] = t[kind] ?? ["Notification", ""];
   return { title: clip(title, 200), body: clip(body, 1000) };

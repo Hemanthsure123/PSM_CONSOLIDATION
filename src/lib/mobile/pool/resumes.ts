@@ -4,7 +4,7 @@ import { UserError } from "@/lib/mobile/http";
 import { dayOf } from "@/lib/mobile/preps/parse";
 import type { RosterUser } from "@/lib/mobile/roster";
 import { cleanStack, RESUME_MAX_BYTES, resumeFileName, resumeType } from "@/lib/mobile/pool/parse";
-import { assertPoolAccess, poolDetail } from "@/lib/mobile/pool/service";
+import { assertPoolEdit, assertPoolView, poolDetail } from "@/lib/mobile/pool/service";
 import { downloadFile, subFolder, uploadFile } from "@/lib/team/drive";
 
 /**
@@ -12,6 +12,8 @@ import { downloadFile, subFolder, uploadFile } from "@/lib/team/drive";
  * "Academy pool resumes" under the app's root folder), owned by the team account, so they outlive
  * any one person's access. Each resume has one tech stack; marking one "best" for a stack unmarks
  * the previous best of that stack. Removing a resume hides it (the Drive file stays, for audit).
+ * Everyone may open a resume; adding, changing and removing one is for the assigned mentor, leads
+ * and admins (403 not_your_candidate).
  */
 
 const FOLDER = "Academy pool resumes";
@@ -33,12 +35,12 @@ interface ResumeRow {
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
-/** A resume of a candidate the user can see (404 otherwise). */
-async function resumeOf(user: RosterUser, id: string): Promise<ResumeRow> {
+/** A resume of a pool candidate (404 otherwise); [edit]: the user must be allowed to change the candidate (403). */
+async function resumeOf(user: RosterUser, id: string, edit: boolean): Promise<ResumeRow> {
   if (!UUID.test(id)) throw new UserError(404, "This resume doesn't exist.", "not_found");
   const r = (await query<ResumeRow>("select * from app.pool_resumes where id = $1 and deleted_at is null", [id]))[0];
   if (!r) throw new UserError(404, "This resume doesn't exist.", "not_found");
-  await assertPoolAccess(user, r.uid);
+  await (edit ? assertPoolEdit(user, r.uid) : assertPoolView(user, r.uid));
   return r;
 }
 
@@ -54,7 +56,7 @@ export async function addResume(
   file: ResumeUpload,
   fields: { stack: unknown; best: unknown; note: unknown },
 ) {
-  const { name } = await assertPoolAccess(user, uid);
+  const { name } = await assertPoolEdit(user, uid);
   const stack = cleanStack(fields.stack);
   if (!stack) throw new UserError(422, "Pick the tech stack this resume is for.", "invalid_stack");
   if (!file.bytes.length) throw new UserError(422, "The file is empty.", "invalid_file");
@@ -101,7 +103,7 @@ export async function addResume(
 
 /** Changes a resume's stack, best flag or note. */
 export async function updateResume(user: RosterUser, id: string, input: { stack?: unknown; best?: unknown; note?: unknown }) {
-  const r = await resumeOf(user, id);
+  const r = await resumeOf(user, id, true);
   const has = (k: string) => Object.prototype.hasOwnProperty.call(input, k);
   const stack = has("stack") ? cleanStack(input.stack) : r.stack;
   if (!stack) throw new UserError(422, "Pick the tech stack this resume is for.", "invalid_stack");
@@ -119,7 +121,7 @@ export async function updateResume(user: RosterUser, id: string, input: { stack?
 }
 
 export async function removeResume(user: RosterUser, id: string) {
-  const r = await resumeOf(user, id);
+  const r = await resumeOf(user, id, true);
   await transaction(async (tx) => {
     await tx.query("update app.pool_resumes set deleted_at = now(), deleted_by = $2, best = false, updated_at = now() where id = $1", [id, user.email]);
     await tx.query("insert into app.pool_events (uid, actor_email, action, value) values ($1, $2, 'resume_removed', $3)", [r.uid, user.email, r.stack]);
@@ -129,7 +131,7 @@ export async function removeResume(user: RosterUser, id: string) {
 
 /** The file, streamed through the server (works on every phone, no Drive sharing needed). */
 export async function resumeFile(user: RosterUser, id: string): Promise<{ bytes: Buffer; mime: string; fileName: string }> {
-  const r = await resumeOf(user, id);
+  const r = await resumeOf(user, id, false);
   const f = await downloadFile(r.drive_file_id).catch((err) => {
     console.warn("[pool] resume download failed:", r.drive_file_id, err instanceof Error ? err.message.slice(0, 160) : err);
     throw new UserError(502, "Google Drive didn't return this resume. Try again in a minute.", "drive_unavailable");

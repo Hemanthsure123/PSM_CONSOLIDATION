@@ -8,6 +8,8 @@ import { JobError } from "@/lib/automation/errors";
 import { destinationTabName } from "@/lib/automation/instructions";
 import { loadCandidates, logEvent } from "@/lib/automation/store";
 import { jobVerdict, mainModelOf, missFlags, reviewFlags } from "@/lib/automation/validation";
+import { mentorLabelFor } from "@/lib/pool/mentor-label";
+import { mentorLabelsFor } from "@/lib/pool/mentors";
 import type { UnscoredRow } from "@/lib/domain-csv";
 import type { RunContext } from "@/lib/automation/context";
 import type { JobResult } from "@/lib/automation/types";
@@ -128,6 +130,9 @@ export async function deliver(ctx: RunContext, v: Validated, only: "shortlist" |
   const runDate = ctx.job.runDate ?? new Date().toISOString().slice(0, 10);
   const tab = destinationTabName(runDate);
   const spreadsheetId = ctx.plan.sourceSpreadsheetId;
+  // The Mentor column (after Internal Standing): read fresh from the Academy assessed pool; blank
+  // when it can't be read (never fails the delivery).
+  const mentors = await mentorLabelsFor([...v.report.candidates, ...v.unscored.map((u) => u.row)].map((r) => ({ phone: r.phone, userId: r.userId })));
   const { headers: wanted, rows } = deliveryTable(
     v.report,
     ctx.plan,
@@ -137,6 +142,7 @@ export async function deliver(ctx: RunContext, v: Validated, only: "shortlist" |
       sourceTabOf: (id) => v.sourceTabOf.get(id) ?? "",
       flagsOf: (id) => v.flags.get(id) ?? [],
       unscored: v.unscored,
+      mentorOf: (row) => mentorLabelFor(mentors, row),
     },
     only,
   );

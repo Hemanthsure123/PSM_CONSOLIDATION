@@ -338,8 +338,9 @@ const input = (o: Partial<DomainCsvInput> & Pick<DomainCsvInput, "result">): Dom
   ok("no interview / placement columns when the sheet has none", !base.headers.some((h) => ["Placed Company", "Package (LPA)", "Assessment Report", "TR-1 Panelist", "TR-2 Recording"].includes(h)));
   ok(
     "experience, resume, internal and Signals columns always",
-    ["Has Domain Experience", "Domain Experience", "Resume", "Matched In Pool By", "Internal Standing", "Internal Stage", "Internal Product", "Signals"].every((h) => base.headers.includes(h)),
+    ["Has Domain Experience", "Domain Experience", "Resume", "Matched In Pool By", "Internal Standing", "Assigned Mentor", "Internal Stage", "Internal Product", "Signals"].every((h) => base.headers.includes(h)),
   );
+  ok("Assigned Mentor right after Internal Standing (blank when not looked up)", base.headers[base.headers.indexOf("Internal Standing") + 1] === "Assigned Mentor" && base.rows.every((r) => r["Assigned Mentor"] === ""), base.headers);
   ok("complete CSV adds the audit columns last", base.headers.slice(-3).join("|") === "Scored By|Phone|User ID", base.headers.slice(-3));
   ok("headers are unique", new Set(base.headers).size === base.headers.length);
   ok("Signals are bullet lines", base.rows[0].Signals === "• Shortlisted at rank 1 of 1\n• Domain fit 82/100", base.rows[0].Signals);

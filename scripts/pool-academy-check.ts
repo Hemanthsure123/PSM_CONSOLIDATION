@@ -1,8 +1,9 @@
 /**
  * Read-only check of the Academy priority pool's source (changes nothing):
  *   npx tsx scripts/pool-academy-check.ts
- * Reads the "> 8LPA Assessed Pool" tab exactly as the server does and prints how many mentored rows
- * it finds per mentor and track, and the row problems. No candidate details are printed.
+ * Reads the "> 8LPA Assessed Pool" tab exactly as the server does (1.10.0: every assessed row) and
+ * prints how many rows it finds per mentor ("" = unassigned) and track, and the row problems. No
+ * candidate details are printed.
  */
 import "./server-only-shim";
 import { parsePoolRows } from "@/lib/mobile/pool/parse";
@@ -20,8 +21,8 @@ async function main() {
   const r = parsePoolRows(table);
   const by = (k: (x: (typeof r.rows)[number]) => string) =>
     Object.entries(r.rows.reduce<Record<string, number>>((m, x) => ((m[k(x)] = (m[k(x)] ?? 0) + 1), m), {})).sort((a, b) => b[1] - a[1]);
-  console.log(`rows with a UID or mentor: ${r.read}; mentored (in the pool): ${r.rows.length}`);
-  console.log("per mentor:", by((x) => x.mentor));
+  console.log(`rows read: ${r.read}; in the pool: ${r.rows.length} (mentored ${r.rows.filter((x) => x.mentor).length}, unassigned ${r.rows.filter((x) => !x.mentor).length})`);
+  console.log("per mentor:", by((x) => x.mentor || "(unassigned)"));
   console.log("per track:", by((x) => x.track ?? `(other: ${x.techStack ?? "blank"})`));
   console.log(`with email: ${r.rows.filter((x) => x.email).length}, with phone: ${r.rows.filter((x) => x.phone).length}`);
   console.log(`row problems: ${r.issues.length}`, r.issues.slice(0, 20));

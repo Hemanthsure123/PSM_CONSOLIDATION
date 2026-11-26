@@ -1,6 +1,7 @@
 import { GITHUB_INSPECT_CAP, githubEvidenceScore, githubStrengthNotOnResume, githubTechsNotOnResume } from "@/lib/domain-scoring";
 import { DSA_PLATFORMS, type DsaPlatformResult } from "@/lib/dsa-types";
 import { internalColumns } from "@/lib/pool/lookup";
+import { ASSIGNED_MENTOR_HEADER } from "@/lib/pool/mentor-label";
 import type { InternalStanding } from "@/lib/pool/types";
 import { formatDay } from "@/lib/utils";
 import type { DomainCandidate, DomainCandidateOutcome, DomainCandidateRow, DomainGithubGap, DomainGithubStatus, DomainReportResult } from "@/lib/types";
@@ -15,7 +16,8 @@ import type { DomainCandidate, DomainCandidateOutcome, DomainCandidateRow, Domai
  * blank cell always means "unknown", never 0.
  *
  * Order: outcome → resume → DSA → GitHub → mandatory / experience → presentation → the
- * sheet's interview columns → resume link → internal assessment → Signals; the complete CSV
+ * sheet's interview columns → resume link → internal assessment (with the Academy mentor right
+ * after Internal Standing) → Signals; the complete CSV
  * adds the audit columns (scored by, phone, user id) and a row for every resume that couldn't
  * be scored, so the sheet is fully accounted for.
  */
@@ -103,6 +105,13 @@ export interface DomainCsvInput {
   poolChecked: boolean;
   /** Complete CSV only: every row without a score. */
   unscored: UnscoredRow[];
+  /**
+   * The Academy mentor's label of a row (src/lib/pool/mentor-label.ts), "" for none. Absent =
+   * not looked up: the column is still there, blank.
+   */
+  mentorOf?: (row: DomainCandidateRow) => string;
+  /** The mentor column's header: "Assigned Mentor" (Domain shortlisting) unless the caller names it. */
+  mentorHeader?: string;
 }
 
 const DSA_HEADERS = [
@@ -208,6 +217,8 @@ export function domainCsv(input: DomainCsvInput): { headers: string[]; rows: Rec
   const reviewed = outcomes.some((c) => c.projectReview);
   const allRows: DomainCandidateRow[] = [...outcomes, ...unscored.map((u) => u.row)];
   const sheetColumns = SHEET_COLUMNS.filter(([, key]) => allRows.some((r) => String(r[key] ?? "").trim()));
+  const mentorHeader = input.mentorHeader?.trim() || ASSIGNED_MENTOR_HEADER;
+  const mentorCell = (r: DomainCandidateRow) => ({ [mentorHeader]: input.mentorOf?.(r) ?? "" });
 
   const headers = [
     "Rank",
@@ -251,6 +262,7 @@ export function domainCsv(input: DomainCsvInput): { headers: string[]; rows: Rec
     "Resume",
     "Matched In Pool By",
     "Internal Standing",
+    mentorHeader,
     "Internal Stage",
     "Internal Product",
     "Signals Used",
@@ -272,6 +284,7 @@ export function domainCsv(input: DomainCsvInput): { headers: string[]; rows: Rec
     ...(input.dsaOn ? dsaCells(c) : {}),
     ...(githubChecked ? githubCells(c, input) : {}),
     ...internalColumns(c.internal, input.poolChecked),
+    ...mentorCell(c),
     Rank: c.rank ? String(c.rank) : "",
     Status: c.shortlisted ? "Shortlisted" : "Not shortlisted",
     "Not Shortlisted Because": c.outcomeReason,
@@ -292,6 +305,7 @@ export function domainCsv(input: DomainCsvInput): { headers: string[]; rows: Rec
     rows.push({
       ...sheetCells(u.row),
       ...internalColumns(u.internal, input.poolChecked),
+      ...mentorCell(u.row),
       Status: u.status,
       "Not Shortlisted Because": u.reason,
       "Signals Used": u.status,

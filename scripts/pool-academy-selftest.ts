@@ -65,17 +65,23 @@ test("a missing required column is a clear error", () => {
   assert.throws(() => findPoolColumns([["a", "b"], ["c"]]), /UID/);
 });
 
-test("only mentored rows, only the agreed columns", () => {
+test("every assessed row (unassigned too, 1.10.0), only the agreed columns", () => {
   const r = parsePoolRows([
     banner,
     header,
     row(UID1, "ASHA RAO", "9000000001", "Backend", "Asif", "Asha.Rao@Example.com"),
     row(UID2, "Ravi Kumar", "+91 90000 00002", "FULL STACK", "Rakesh"),
-    row(UID3, "No Mentor Yet", "9000000001", "AI/ML", ""),
+    row(UID3, "No Mentor Yet", "9000000003", "AI/ML", ""),
     [],
   ]);
-  assert.equal(r.rows.length, 2);
+  assert.equal(r.rows.length, 3);
   assert.equal(r.read, 3);
+  assert.equal(r.rows[2].mentor, "");
+  // Without migration 020 the server keeps the old rule: mentored rows only.
+  assert.deepEqual(
+    parsePoolRows([banner, header, row(UID1, "A", "9000000001", "Backend", "Asif"), row(UID3, "B", "9000000003", "AI/ML", "")], { assignedOnly: true }).rows.map((x) => x.uid),
+    [UID1],
+  );
   const a = r.rows[0];
   assert.equal(a.uid, UID1);
   assert.equal(a.email, "asha.rao@example.com");

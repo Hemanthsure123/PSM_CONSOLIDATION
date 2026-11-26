@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.9.0
+  version: 1.10.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
     This file is the source of truth. Change it first, then the routes under
@@ -1298,7 +1298,7 @@ paths:
                 kind: { type: string, enum: [prep, guidance, mock, custom] }
                 prepId: { type: string, description: "Required for prep / mock" }
                 prepIds: { type: array, maxItems: 100, items: { type: string }, description: "Guidance (or custom) for several candidates: each row gets the emails and, after the call, its transcript and summary" }
-                poolIds: { type: array, maxItems: 100, items: { type: string }, description: "Academy priority pool candidates (UIDs): mock (exactly one), guidance or custom. No prep needed; nothing is written to any sheet." }
+                poolIds: { type: array, maxItems: 100, items: { type: string }, description: "Academy priority pool candidates (UIDs): mock (exactly one), guidance or custom. No prep needed; nothing is written to any sheet. 1.10.0: every candidate must be one the caller may change (their own; leads and admins: all), else 403 not_your_candidate. A mock / guidance meet sends pool_meeting to each candidate's mentor who isn't the caller." }
                 jobId: { type: string, description: "Guidance for a whole job" }
                 company: { type: string }
                 title: { type: string }
@@ -1316,6 +1316,7 @@ paths:
                 force: { type: boolean, description: "Schedule despite duplicate_meeting / meeting_conflict" }
       responses:
         "201": { description: "The Meeting: { id, kind, title, prepId, prepIds, poolIds, jobKey, company, startsAt, endsAt, meetUrl, calendarUrl, record, recordingOn, attendees, status, email: {status, subject, sendAt, sentAt, error}, artifacts: {status, durationSec, recordingUrl, transcriptUrl}, createdBy, createdByName, whatsapp, warnings }" }
+        "403": { description: "not_your_candidate (1.10.0): a poolIds candidate isn't the caller's (leads and admins may schedule for anyone)" }
         "409": { description: "duplicate_meeting / meeting_conflict (send force to override)" }
         "422": { description: "invalid_meeting / invalid_attendee" }
 
@@ -1380,7 +1381,22 @@ paths:
     get:
       tags: [pool]
       x-phase: P6
-      summary: "Academy priority pool: the candidates the user mentors (admins and leads: everyone). Read from the database (the sheet is copied every 10 minutes). ETag-aware."
+      summary: "Academy assessed pool: every assessed candidate, for everyone signed in (1.10.0). Read from the database (the sheet is copied every 10 minutes, the company sheets every hour). ETag-aware."
+      description: |
+        1.10.0:
+        - **Everyone sees everyone.** `items` holds every Academy assessed candidate (the sheet's rows
+          with a UID), assigned or not; `scope` is always `"all"`. An unassigned candidate has
+          `mentor: { name: "", email: null }`.
+        - Per item: `mine` (assigned to the caller), `canEdit` (the caller's own; leads and admins:
+          all), `groupKey`, `shares` (company sheets, null when never synced) and `stage` (the most
+          advanced outcome across companies: selected > in_process > on_hold > unknown > no_show >
+          rejected; null when never shared).
+        - Edits (PATCH /pool/{uid}, resumes, contact, meeting setup, POST /meetings with poolIds)
+          stay limited to the assigned mentor, leads and admins: others get **403
+          not_your_candidate**. The app shows edit actions only when `canEdit`.
+        - New top-level `summary`, `groups` (the caller's own group first, only when they have
+          candidates; then the other mentors A–Z; then `unassigned`) and `sharesSyncedAt`.
+        - `mentors` is now sent to everyone; `unmatchedMentors` stays for admins and leads.
       parameters:
         - { name: If-None-Match, in: header, schema: { type: string } }
       responses:
@@ -1399,12 +1415,12 @@ paths:
     get:
       tags: [pool]
       x-phase: P6
-      summary: "One candidate with every assessment attempt, interviews (EDGE drill-down by phone), resumes, meetings, history and rsaDocuments (past RSA documents by phone; empty = no RSA section)."
+      summary: "One candidate (anyone signed in, 1.10.0) with every assessment attempt, interviews (EDGE drill-down by phone), resumes, meetings, history, rsaDocuments (past RSA documents by phone; empty = no RSA section), shares (every company sheet, newest activity first), mine and canEdit."
       parameters:
         - { name: uid, in: path, required: true, schema: { type: string } }
       responses:
         "200": { description: "PoolDetail", content: { application/json: { schema: { $ref: "#/components/schemas/PoolDetail" } } } }
-        "404": { description: "not_found (not in the user's pool)" }
+        "404": { description: "not_found (not in the pool)" }
     patch:
       tags: [pool]
       x-phase: P6
@@ -1425,6 +1441,7 @@ paths:
                 tags: { type: array, maxItems: 20, items: { type: string, maxLength: 40 } }
       responses:
         "200": { description: "PoolDetail" }
+        "403": { description: "not_your_candidate (1.10.0): only the assigned mentor, leads and admins change a candidate" }
         "409": { description: "version_conflict: someone else changed the candidate first (refresh and retry)" }
         "422": { description: "invalid_priority / invalid_track / invalid_tags" }
 
@@ -1437,6 +1454,7 @@ paths:
         - { name: uid, in: path, required: true, schema: { type: string } }
       responses:
         "204": { description: "Logged" }
+        "403": { description: "not_your_candidate (1.10.0)" }
 
   /pool/{uid}/resumes:
     post:
@@ -1447,6 +1465,7 @@ paths:
         - { name: uid, in: path, required: true, schema: { type: string } }
       responses:
         "201": { description: "PoolDetail" }
+        "403": { description: "not_your_candidate (1.10.0)" }
         "413": { description: "file_too_large" }
         "415": { description: "invalid_file" }
         "503": { description: "team_not_connected / team_reconnect" }
@@ -1460,6 +1479,7 @@ paths:
         - { name: resumeId, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         "200": { description: "PoolDetail" }
+        "403": { description: "not_your_candidate (1.10.0)" }
     delete:
       tags: [pool]
       x-phase: P6
@@ -1468,12 +1488,13 @@ paths:
         - { name: resumeId, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
         "200": { description: "PoolDetail" }
+        "403": { description: "not_your_candidate (1.10.0)" }
 
   /pool/resumes/{resumeId}/file:
     get:
       tags: [pool]
       x-phase: P6
-      summary: The resume file (Content-Type and Content-Disposition set), streamed through the server.
+      summary: The resume file (Content-Type and Content-Disposition set), streamed through the server. Anyone signed in (1.10.0).
       parameters:
         - { name: resumeId, in: path, required: true, schema: { type: string, format: uuid } }
       responses:
@@ -1486,6 +1507,49 @@ paths:
       summary: "{ ids: [uid] } -> { members: [{ uid, name, email, phone, track, mentor }], kinds, google: { connected, account, status }, email: { mock|guidance|custom: { subject, body } }, whatsapp: { mock|guidance|custom }, placeholders }. Then POST /meetings with poolIds."
       responses:
         "200": { description: "OK" }
+        "403": { description: "not_your_candidate (1.10.0): one of the ids isn't the caller's candidate (leads and admins: anyone)" }
+
+  /pool/shares/status:
+    get:
+      tags: [pool]
+      x-phase: P7
+      summary: "Admins (1.10.0). The company-sheet sync: the last run and the sheets the service account can't open, so the owner can share them."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [lastRun, unreadable]
+                properties:
+                  lastRun:
+                    type: [object, "null"]
+                    properties:
+                      startedAt: { type: string, format: date-time }
+                      finishedAt: { type: [string, "null"], format: date-time }
+                      status: { type: string, enum: [running, succeeded, failed] }
+                      sheetsChecked: { type: integer, description: "Company sheets whose Drive modifiedTime was checked" }
+                      sheetsRead: { type: integer, description: "Sheets read (changed, never read, or last read 24 h ago)" }
+                      rowsMatched: { type: integer, description: "Academy assessed rows found in the sheets read" }
+                      changes: { type: integer, description: "New shares, round / final-status changes and removals" }
+                      errors: { type: integer, description: "Sheets that couldn't be read" }
+                      error: { type: [string, "null"] }
+                  unreadable:
+                    type: array
+                    items: { type: object, properties: { company: { type: string }, sheetUrl: { type: string, format: uri }, error: { type: string } } }
+                  running: { type: boolean }
+        "403": { description: "admin_only" }
+
+  /pool/shares/sync:
+    post:
+      tags: [pool]
+      x-phase: P7
+      summary: "Admins (1.10.0). Re-check the company sheets now (Pool → Company sheets → Sync now). Answers 202 at once; the run goes on in the background (a few minutes). At most once every 5 minutes: { status: started | running | fresh, startedAt }."
+      responses:
+        "202": { description: "Accepted: { status: started | running | fresh, startedAt: date-time | null }" }
+        "403": { description: "admin_only" }
+        "503": { description: "not_ready: migration 020 isn't applied on the server" }
 
   /me/notifications:
     get:
@@ -1994,18 +2058,76 @@ components:
         resumes: { type: integer }
         bestResumes: { type: integer }
         lastContact: { type: [object, "null"], properties: { at: { type: string, format: date-time }, channel: { type: string }, by: { type: string } } }
+        mine: { type: boolean, description: "1.10.0. Assigned to the caller" }
+        canEdit: { type: boolean, description: "1.10.0. The caller may change this candidate (their own; leads and admins: all). Edits are enforced server-side (403 not_your_candidate)." }
+        groupKey: { type: string, description: "1.10.0. The PoolList.groups key this candidate is listed under: the mentor's email, name:<lower name> for a sheet mentor not on the roster, or unassigned" }
+        shares:
+          type: [object, "null"]
+          description: "1.10.0. The company sheets the candidate is in. Null when the shares were never synced (unknown, not never shared)."
+          properties:
+            count: { type: integer }
+            active: { type: integer, description: "Still going: outcome in_process / on_hold / unknown, and the master doesn't mark the requirement closed" }
+            companies: { type: array, maxItems: 5, items: { type: string }, description: "Distinct companies, newest activity first" }
+            latest: { oneOf: [{ $ref: "#/components/schemas/Share" }, { type: "null" }] }
+        stage: { oneOf: [{ $ref: "#/components/schemas/ShareOutcome" }, { type: "null" }], description: "1.10.0. The most advanced outcome across companies (selected > in_process > on_hold > unknown > no_show > rejected); null when never shared" }
         updatedAt: { type: string, format: date-time }
     PoolList:
       type: object
       properties:
         items: { type: array, items: { $ref: "#/components/schemas/PoolItem" } }
-        unmatchedMentors: { type: array, items: { type: object, properties: { name: { type: string }, candidates: { type: integer } } } }
-        mentors: { type: array, items: { type: object, properties: { name: { type: string }, email: { type: [string, "null"] } } } }
+        unmatchedMentors: { type: array, items: { type: object, properties: { name: { type: string }, candidates: { type: integer } } }, description: "Admins and leads: MENTOR names nobody on the roster matches" }
+        mentors: { type: array, items: { type: object, properties: { name: { type: string }, email: { type: [string, "null"] } } }, description: "Every mentor with candidates (1.10.0: for everyone)" }
         tagSuggestions: { type: array, items: { type: string } }
         tracks: { type: array, items: { type: object, properties: { key: { type: string }, label: { type: string } } } }
-        scope: { type: string, enum: [all, mine] }
+        scope: { type: string, enum: [all, mine], description: "Always all since 1.10.0" }
         syncedAt: { type: [string, "null"], format: date-time }
         interviewsAvailable: { type: boolean }
+        summary:
+          type: object
+          description: "1.10.0. Header numbers. shared / neverShared are 0 until the shares were synced once."
+          properties:
+            total: { type: integer }
+            assigned: { type: integer }
+            unassigned: { type: integer }
+            shared: { type: integer, description: "Candidates in at least one company sheet" }
+            neverShared: { type: integer }
+            inProcess: { type: integer, description: "Candidates whose stage is in_process" }
+            selected: { type: integer, description: "Candidates whose stage is selected" }
+            upcomingInterviews: { type: integer, description: "Scheduled drill-down interviews from today on (sum of items[].interviews.upcoming)" }
+        groups:
+          type: array
+          description: "1.10.0. The caller's own group first (only when they have candidates), then the other mentors A–Z, then unassigned."
+          items:
+            type: object
+            properties:
+              key: { type: string, description: "The mentor's email, name:<lower name> for a sheet mentor not on the roster, or unassigned" }
+              mentor: { type: [object, "null"], properties: { name: { type: string }, email: { type: [string, "null"] } }, description: "Null for unassigned" }
+              mine: { type: boolean }
+              total: { type: integer }
+              shared: { type: integer }
+              neverShared: { type: integer }
+              upcomingInterviews: { type: integer }
+        sharesSyncedAt: { type: [string, "null"], format: date-time, description: "1.10.0. When the company sheets were last synced (null: never)" }
+    ShareOutcome:
+      type: string
+      description: "1.10.0. From the Final Status first, else the latest round that says something. selected (Selected, Offer released, Hired), rejected (Rejected, Not cleared, Not shortlisted, Failed), in_process (Cleared, Shortlisted, Passed, Moved to next round, scheduled / pending / awaiting), on_hold (Hold), no_show (Absent, No show, Didn't join), unknown (anything else, or nothing yet). In a round column \"Selected\" means that round was cleared (in_process), except in the tab's last round."
+      enum: [selected, rejected, in_process, on_hold, no_show, unknown]
+    Share:
+      type: object
+      description: "1.10.0. An Academy assessed candidate in a company sheet (one per sheet, tab and candidate), from the master's CRPs tab → Company Sheet Link. Re-checked hourly."
+      required: [id, company, role, tab, sheetUrl, sharedOn, rounds, finalStatus, stage, outcome, updatedAt]
+      properties:
+        id: { type: string, description: "Stable id (list keys)" }
+        company: { type: string }
+        role: { type: string, description: "The tab title, or the master Role when the sheet has one candidate tab" }
+        tab: { type: string }
+        sheetUrl: { type: string, format: uri, description: "The company sheet, opened at the tab (#gid=…)" }
+        sharedOn: { type: string, format: date, description: "When the server first saw the candidate there (IST day). For shares found at a sheet's first read: the best estimate (the resume upload stamp, not before the sheet was created)." }
+        rounds: { type: array, items: { type: object, properties: { name: { type: string }, value: { type: string } } }, description: "Round columns in sheet order, non-empty values only, as typed" }
+        finalStatus: { type: string, description: "As typed; \"\" when blank" }
+        stage: { type: string, description: "A short label: \"Selected\", \"TR Round 1 · Cleared\", \"Assignment Round · Pending\", \"Shared\"" }
+        outcome: { $ref: "#/components/schemas/ShareOutcome" }
+        updatedAt: { type: string, format: date-time, description: "When the rounds or the final status last changed" }
     PoolResume:
       type: object
       properties:
@@ -2021,7 +2143,7 @@ components:
         createdAt: { type: string, format: date-time }
     PoolDetail:
       type: object
-      description: "PoolItem's profile fields plus course, specialization, assessments (every attempt), latestAssessments, interviews (null = drill-down unavailable), resumes, meetings [{ id, kind, title, startsAt, endsAt, status, meetUrl, createdByName }], history [{ at, action, value, by, byName }], updatedBy, updatedAt."
+      description: "PoolItem's profile fields plus course, specialization, assessments (every attempt), latestAssessments, interviews (null = drill-down unavailable), resumes, meetings [{ id, kind, title, startsAt, endsAt, status, meetUrl, createdByName }], history [{ at, action, value, by, byName }], updatedBy, updatedAt. 1.10.0: mine, canEdit, and shares: Share[] (every company, newest activity first; [] when never shared or never synced)."
     ApiKeyProvider:
       type: object
       required: [id, label]
@@ -2105,6 +2227,35 @@ components:
         itself: sticky assignment with countdown, re-post on swipe. High priority for assignment,
         reminder and overdue; normal for job updates.
 
+        1.10.0 (Academy candidates; channel "Academy candidates", default importance; academy_digest
+        on the digest channel). Every one carries `title` and `body` (names and companies, never
+        phone numbers) and has inbox text. Tapping opens the candidate (`uid`), else the Pool tab.
+        At most ~30 per mentor per run: the rest come as one push of the same kind with
+        `summary: "true"`, no uid ("12 updates for your candidates"). Each job's first run (and the
+        first after the deploy) is a baseline: nothing is sent.
+        - `pool_assigned` → the mentor, when a candidate's MENTOR cell is set to them (from blank or
+          someone else). Data: uid, name, track (frontend|backend|fullstack|aiml|""). Dedupe
+          `pool:assigned:<uid>:<email>`.
+        - `pool_shared` → the candidate's mentor (unassigned: nobody; it's in the digest), when the
+          candidate first appears in a company sheet. Data: uid, name, company, role. Dedupe
+          `pool:shared:<shareId>:<email>`.
+        - `pool_status` → the candidate's mentor, when a round or the final status changed; one push
+          per candidate per company per run (body like "TR Round 1: Cleared · Final status:
+          Selected"). Data: uid, name, company, role, stage, outcome. Dedupe
+          `pool:status:<shareId>:<hash of rounds+final>:<email>`.
+        - `pool_interview` → the candidate's mentor, when a drill-down interview row appears for an
+          assessed candidate (dated today or later) or its date / time changes. Data: uid, name,
+          company, round, day (YYYY-MM-DD), time ("4:00 PM – 5:00 PM" or as typed), prepId. Dedupe
+          `pool:iv:<prepId>:<day>:<time>:<email>`.
+        - `pool_meeting` → each candidate's mentor who didn't schedule it, when a mock interview or
+          guidance meet with their candidate is scheduled. Data: uid, name ("Asha + 2 more" for
+          several), kind (mock|guidance), startsAt, by (the scheduler's name), meetingId. Dedupe
+          `pool:meet:<meetingId>:<email>`.
+        - `academy_digest` → every active member at 08:30 IST (sent until noon if the server slept),
+          only when a number is above zero: "Academy interviews today 5 (2 yours) · tomorrow 3 ·
+          shared yesterday 12 · selected this week 1" (zero parts left out). Data: day, title, body.
+          Dedupe `academy:digest:<day>:<email>`.
+
         1.9.0:
         - `task_unassigned`: a task nobody has taken (blank Mentor cell). Channel "New tasks" (high
           importance, not sticky); tapping opens the task. Data: taskId, company, profilesRequired,
@@ -2134,14 +2285,25 @@ components:
       properties:
         type:
           type: string
-          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest, prep_doc_ready, recording_ready, rsa_ready, meeting_reminder, team_account, admin_notice, app_update, task_unassigned, feedback]
+          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest, prep_doc_ready, recording_ready, rsa_ready, meeting_reminder, team_account, admin_notice, app_update, task_unassigned, feedback, pool_assigned, pool_shared, pool_status, pool_interview, pool_meeting, academy_digest]
         taskId: { type: string, description: "Task pushes (incl. task_unassigned)" }
-        prepId: { type: string, description: "Prep pushes (prep_*, interview_checkin) prep_doc_ready, recording_ready (the call was added to the sheet), meeting_reminder (when the meeting is a prep's)" }
-        meetingId: { type: string, description: "meeting_reminder, recording_ready (Meet)" }
+        prepId: { type: string, description: "Prep pushes (prep_*, interview_checkin) prep_doc_ready, recording_ready (the call was added to the sheet), meeting_reminder (when the meeting is a prep's), pool_interview" }
+        meetingId: { type: string, description: "meeting_reminder, recording_ready (Meet), pool_meeting" }
         meetUrl: { type: string, format: uri, description: "meeting_reminder: the Join action" }
         url: { type: string, format: uri, description: "prep_doc_ready, rsa_ready: the document" }
         candidate: { type: string }
         round: { type: string }
+        uid: { type: string, description: "1.10.0 pool_* pushes: the Academy pool candidate (opens GET /pool/{uid})" }
+        name: { type: string, description: "1.10.0 pool_* pushes: the candidate's name" }
+        role: { type: string, description: "pool_shared, pool_status" }
+        outcome: { $ref: "#/components/schemas/ShareOutcome" }
+        track: { type: string, description: "pool_assigned: frontend | backend | fullstack | aiml | \"\"" }
+        day: { type: string, format: date, description: "pool_interview: the interview day; academy_digest: today" }
+        time: { type: string, description: "pool_interview: the interview time as shown (\"\" when none)" }
+        kind: { type: string, enum: [mock, guidance], description: "pool_meeting" }
+        startsAt: { type: string, format: date-time, description: "pool_meeting" }
+        by: { type: string, description: "pool_meeting: who scheduled it (roster name)" }
+        summary: { type: string, enum: ["true"], description: "pool_*: this push sums up the run's other updates (no uid)" }
         category: { type: string, enum: [academy, edge, external, problem, idea, other], description: "Prep pushes: academy / edge / external. feedback: problem / idea / other." }
         edgeVersion: { type: string }
         interviewDay: { type: string, format: date }
@@ -2160,7 +2322,7 @@ components:
         sticky: { type: string, enum: ["true", "false"], description: "admin_notice: stays until Acknowledge" }
         from: { type: string, description: "admin_notice: the sending admin's name. feedback: the sender's name." }
         feedbackId: { type: string, format: uuid, description: "feedback" }
-        stage: { type: string, enum: [new, reminder, due], description: "task_unassigned" }
+        stage: { type: string, description: "task_unassigned: new | reminder | due. pool_status (1.10.0): the share's stage label (\"TR Round 1 · Cleared\")" }
         ise: { type: string, description: "task_unassigned: the PC column as written (empty when blank)" }
         iseOwner: { type: string, description: "task_unassigned: the name of the mentor the ISE maps to (empty when none)" }
         product: { type: string, description: "task_unassigned: the Product column" }
