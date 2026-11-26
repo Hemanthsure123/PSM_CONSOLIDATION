@@ -10,7 +10,9 @@ import { syncMeetings } from "@/lib/team/meetings";
 import { resumeRecordings } from "@/lib/team/recordings";
 
 /**
- * Once a minute: new Mentor assignments, reminders, escalations and job news become pushes, and
+ * Once a minute: new Mentor assignments, reminders, escalations and job news become pushes (1.11.0:
+ * blank Mentor cells are first filled from the ISE mapping, and the 09:15 / 18:00 IST task digests
+ * go out; all inside syncAssignments, each step wrapped so it never stops the others), and
  * the drill-down tab's preps and interviews are synced (the SLA clock starts when a row first
  * appears) and pushed (preps/notify.ts). The Academy pool: its sheet copy every 10 minutes, the
  * company-sheet shares every hour (pool/shares-sync.ts, in the background), and the interview and

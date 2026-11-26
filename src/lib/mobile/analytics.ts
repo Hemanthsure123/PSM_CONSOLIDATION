@@ -9,7 +9,7 @@ import { dayOf, type PrepRow } from "@/lib/mobile/preps/parse";
 import { readPrepSnapshot } from "@/lib/mobile/preps/sheet";
 import { mentorsOf } from "@/lib/mobile/preps/track";
 import { listRoster, matchMentor, type RosterUser } from "@/lib/mobile/roster";
-import { loadAssignments } from "@/lib/mobile/tasks";
+import { doneAtFor, loadAssignments } from "@/lib/mobile/tasks";
 
 /**
  * GET /analytics: what happened to the control sheet's rows in a date range, from the real sheet
@@ -35,6 +35,8 @@ export interface AnalyticsRow {
   onTime: boolean | null;
   shortlistUrl: string | null;
   sheetRowUrl: string;
+  /** 1.11.0: when the shortlisting was marked done (for the current assignee); null = not done. */
+  doneAt: string | null;
 }
 
 export interface MemberStats {
@@ -66,13 +68,16 @@ export function rowStats(
   ackAt: string | null,
   sheetUrl: string,
   now = new Date(),
+  doneAt: Date | null = null,
 ): AnalyticsRow {
   const delivered = deliveredAt(job);
   const started = job ? new Date(job.createdAt) : null;
-  // A delivered shortlist is judged against the deadline. An undelivered row only counts as late
-  // when someone was assigned it here: rows handled by hand before the app have no job to show.
+  // A delivered shortlist (else, 1.11.0, a "Shortlisting done" mark) is judged against the deadline.
+  // An unfinished row only counts as late when someone was assigned it here: rows handled by hand
+  // before the app have no job to show.
+  const finished = delivered ?? doneAt;
   let onTime: boolean | null = null;
-  if (task.deadline && delivered) onTime = delivered.getTime() <= task.deadline.getTime();
+  if (task.deadline && finished) onTime = finished.getTime() <= task.deadline.getTime();
   else if (task.deadline && assignee && task.deadline.getTime() < now.getTime()) onTime = false;
   return {
     taskId: task.taskId,
@@ -91,11 +96,12 @@ export function rowStats(
     onTime,
     shortlistUrl: job ? (job.progress?.shortlistUrl ?? job.result?.destinationUrl ?? null) : null,
     sheetRowUrl: `${sheetUrl}&range=A${task.row}`,
+    doneAt: doneAt?.toISOString() ?? null,
   };
 }
 
-/** Assigned in the app, past the deadline, no shortlist yet. */
-const isOverdue = (r: AnalyticsRow, now: Date) => Boolean(r.mentorEmail && !r.deliveredAt && r.deadline && new Date(r.deadline) < now);
+/** Assigned in the app, past the deadline, no shortlist yet and (1.11.0) not marked done. */
+const isOverdue = (r: AnalyticsRow, now: Date) => Boolean(r.mentorEmail && !r.deliveredAt && !r.doneAt && r.deadline && new Date(r.deadline) < now);
 
 function median(values: number[]): number | null {
   if (!values.length) return null;
@@ -169,7 +175,7 @@ export async function analyticsFor(user: RosterUser, scope: "mine" | "team", ran
     .map(({ task, assignee }) => {
       const a = assignments.get(task.taskId);
       const ack = a?.ack_at && a.assignee_email === assignee?.email ? new Date(a.ack_at).toISOString() : null;
-      return rowStats(task, assignee, jobs.get(task.taskId), ack, sheetUrl, now);
+      return rowStats(task, assignee, jobs.get(task.taskId), ack, sheetUrl, now, doneAtFor(a, assignee?.email ?? null));
     })
     .sort((a, b) => String(b.assignedAt ?? b.deadline).localeCompare(String(a.assignedAt ?? a.deadline)));
   const members = scope === "team" ? roster.filter((u) => u.active) : [roster.find((u) => u.email === user.email) ?? user];
@@ -209,12 +215,18 @@ const bump = (m: Map<string, number>, key: string, n = 1) => m.set(key, (m.get(k
 
 /**
  * Shortlistings: control-tab tasks assigned to the member whose shortlist was delivered in the
- * range (delivered = the early shortlist or the job's end, as byMember.delivered counts it).
+ * range (delivered = the early shortlist or the job's end, as byMember.delivered counts it), or
+ * (1.11.0) that were marked "Shortlisting done" in the range. One task counts once, even when it
+ * was both delivered and marked done in the range.
  */
-export function countShortlistings(items: { assigneeEmail: string | null; deliveredAt: Date | null }[], range: Range): Map<string, number> {
+export function countShortlistings(
+  items: { assigneeEmail: string | null; deliveredAt: Date | null; doneAt?: Date | null }[],
+  range: Range,
+): Map<string, number> {
   const out = new Map<string, number>();
+  const inRange = (d: Date | null | undefined) => Boolean(d && d >= range.from && d < range.to);
   for (const it of items) {
-    if (it.assigneeEmail && it.deliveredAt && it.deliveredAt >= range.from && it.deliveredAt < range.to) bump(out, it.assigneeEmail);
+    if (it.assigneeEmail && (inRange(it.deliveredAt) || inRange(it.doneAt))) bump(out, it.assigneeEmail);
   }
   return out;
 }
@@ -317,8 +329,9 @@ async function activityFor(
       const at = task.assignedAt ?? task.deadline;
       return !at || at.getTime() >= lookback;
     });
-  const [jobs, preps, db] = await Promise.all([
+  const [jobs, assignments, preps, db] = await Promise.all([
     jobsFor(owned.map((o) => o.task)),
+    loadAssignments(owned.map((o) => o.task.taskId)),
     readPrepSnapshot()
       .then((s) => s.preps)
       .catch((err) => {
@@ -328,7 +341,11 @@ async function activityFor(
     dbCounts([...emails], range, now),
   ]);
   const shortlistings = countShortlistings(
-    owned.map(({ task, assignee }) => ({ assigneeEmail: assignee?.email ?? null, deliveredAt: deliveredAt(jobs.get(task.taskId)) })),
+    owned.map(({ task, assignee }) => ({
+      assigneeEmail: assignee?.email ?? null,
+      deliveredAt: deliveredAt(jobs.get(task.taskId)),
+      doneAt: doneAtFor(assignments.get(task.taskId), assignee?.email ?? null),
+    })),
     range,
   );
   return buildActivity(members, { ...db, shortlistings, prepsGiven: countPrepsGiven(preps, roster, range) });

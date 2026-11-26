@@ -5,7 +5,9 @@ import { query, transaction } from "@/lib/db/client";
 import { env } from "@/lib/env";
 import { UserError } from "@/lib/mobile/http";
 import { ACCESS_TTL_SECONDS, signAccessToken } from "@/lib/mobile/jwt";
+import { cleanHealth, type DeviceHealthInput } from "@/lib/mobile/device-health";
 import { ensureBootstrapAdmin, rosterUserForSignIn, type RosterUser } from "@/lib/mobile/roster";
+import { deviceHealthReady } from "@/lib/mobile/task-schema";
 
 /** Refresh tokens live 60 days; each use replaces it with a new one. */
 const REFRESH_TTL_DAYS = 60;
@@ -147,7 +149,7 @@ export async function endSession(sessionId: string): Promise<void> {
   await query("delete from app.devices where session_id = $1", [sessionId]);
 }
 
-export interface DeviceInfo {
+export interface DeviceInfo extends DeviceHealthInput {
   platform?: string;
   appVersion?: string;
   osVersion?: number;
@@ -155,7 +157,11 @@ export interface DeviceInfo {
   fcmToken?: string;
 }
 
-/** Saves the device's push token (a token moves to whoever signs in on that phone last). */
+/**
+ * Saves the device's push token (a token moves to whoever signs in on that phone last). 1.11.0: the
+ * optional notification-health fields (device-health.ts) are stored with health_at when the phone
+ * sends any (and migration 021 exists); a phone that sends none keeps what it reported before.
+ */
 export async function registerDevice(email: string, sessionId: string, d: DeviceInfo | null | undefined): Promise<void> {
   const token = (d?.fcmToken ?? "").trim();
   if (!token || token.length > 4096) return;
@@ -167,4 +173,12 @@ export async function registerDevice(email: string, sessionId: string, d: Device
        model = excluded.model, last_seen_at = now()`,
     [token, email, sessionId, (d?.platform ?? "android").slice(0, 20), d?.appVersion?.slice(0, 40) ?? null, d?.osVersion ?? null, d?.model?.slice(0, 80) ?? null],
   );
+  const health = cleanHealth(d);
+  if (!health || !(await deviceHealthReady())) return;
+  await query(
+    `update app.devices set notifications_enabled = $2, task_channel_enabled = $3, battery_optimized = $4, background_restricted = $5,
+            manufacturer = coalesce($6, manufacturer), health_at = now()
+      where fcm_token = $1`,
+    [token, health.notificationsEnabled, health.taskChannelEnabled, health.batteryOptimized, health.backgroundRestricted, health.manufacturer],
+  ).catch((err) => console.warn("[mobile] device health not saved:", err instanceof Error ? err.message.slice(0, 200) : err));
 }

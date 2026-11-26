@@ -38,7 +38,9 @@ export type PushKind =
   | "pool_status"
   | "pool_interview"
   | "pool_meeting"
-  | "academy_digest";
+  | "academy_digest"
+  | "task_done"
+  | "task_digest";
 
 const g = globalThis as unknown as { __fcmAuth?: JWT };
 
@@ -115,6 +117,8 @@ export function inboxText(kind: PushKind, d: Record<string, string>): { title: s
     pool_interview: [`Interview · ${[d.name, d.company].filter(Boolean).join(" · ") || "your candidate"}`, [d.round, d.day, d.time].filter(Boolean).join(" · ")],
     pool_meeting: [`Meeting · ${d.name || "your candidate"}`, d.by ? `Scheduled by ${d.by}.` : "A meeting was scheduled."],
     academy_digest: ["Academy candidates", ""],
+    task_done: [`${d.by || "A mentor"} finished ${company}'s shortlisting`, "Marked done in the app."],
+    task_digest: ["Your tasks", ""],
   };
   const [title, body] = t[kind] ?? ["Notification", ""];
   return { title: clip(title, 200), body: clip(body, 1000) };

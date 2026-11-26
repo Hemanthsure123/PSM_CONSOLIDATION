@@ -1,9 +1,23 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.10.0
+  version: 1.11.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
+
+    1.11.0 (server side; migration 021, which the server detects: before it, "done", the ISE
+    auto-assignment and device health stay off and the rest keeps working):
+    - "Shortlisting done": `POST /tasks/{taskId}/done`, TaskState `done`, TaskSummary `doneAt`,
+      `doneBy`, `autoAssigned`, `assignedVia`; Mine / Team ordered overdue, due today, upcoming,
+      no deadline, then done / delivered (kept 7 days after they were finished).
+    - Automatic assignment by ISE: a blank Mentor cell whose ISE maps to an active mentor is filled
+      with that mentor's name 5 minutes after the row appeared (at most 10 a minute;
+      `MOBILE_ISE_AUTO_ASSIGN=off` turns it off; `MOBILE_ISE_OWNERS` sets the mapping).
+    - More task reminders (nudge:30 / nudge:90, soon1h / soon15, overdue every 2 h), `task_done`
+      and `task_digest` pushes (PushMessage). Done and delivered tasks get none.
+    - Notification health: DeviceInfo's optional health fields, RosterEntry `devices`.
+    - Analytics: `activity.shortlistings` also counts tasks marked done in the range (once each);
+      a done row is never overdue.
     This file is the source of truth. Change it first, then the routes under
     `src/app/api/mobile/v1/`, then the app (which copies this file with `scripts/sync-api.ps1`).
 
@@ -114,6 +128,12 @@ paths:
       tags: [auth]
       x-phase: P1
       summary: Register or refresh this device's FCM token (on token refresh and app start)
+      description: |
+        1.11.0: the app also sends its notification health (DeviceInfo's optional fields) at
+        sign-in, on resume (at most every 6 hours) and after any Fix in Me → Notifications. The
+        server stores them on the device with the time (`healthAt`); a request without any of them
+        keeps what was stored. Admins see them in GET /admin/roster (`devices`). No push is sent
+        about health.
       requestBody:
         required: true
         content:
@@ -150,6 +170,15 @@ paths:
           Date & Time) or with no assigned date, and a deadline not more than 24 h ago (or none).
           Sorted by deadline, soonest first, no deadline last. They have `assignee: null` and state
           `overdue` once the deadline has passed, `new` otherwise.
+          1.11.0: since blank cells whose ISE maps to a mentor are now filled automatically (after
+          5 minutes), this mostly lists ISEs that have no mapping. A row a lead or admin marked
+          done (POST /tasks/{taskId}/done) is left out.
+        - 1.11.0, `mine` and `team`: ordered overdue, due today (IST), upcoming (each soonest
+          deadline first), no deadline (newest assignment first), then done / delivered (state
+          `done`, `shortlist_ready`, `shared`; most recently finished first). Done and delivered
+          tasks stay in the list for 7 days after `doneAt` or the delivery, then drop off; open
+          tasks keep the 45-day window (a row drops when both its assigned date and its deadline
+          are more than 45 days old).
         The ETag is per scope, as before.
       parameters:
         - name: scope
@@ -254,6 +283,41 @@ paths:
                 required: [ackAt]
                 properties:
                   ackAt: { type: string, format: date-time }
+
+  /tasks/{taskId}/done:
+    parameters:
+      - $ref: "#/components/parameters/TaskId"
+    post:
+      tags: [tasks]
+      x-phase: P9
+      summary: '1.11.0. "Shortlisting done" (or undo). The task''s assignee, leads and admins.'
+      description: |
+        - `done: true` sets `done_at = now()` and `done_by = <caller>` for the person the row is
+          assigned to now. Idempotent: a second call keeps the first time (and sends nothing).
+        - `done: false` clears both (undo).
+        - A task is `done` while the mark stands and the assignee hasn't changed: a reassignment
+          (sheet, Take, Assign) clears it, as it clears the acknowledgement. A lead or admin may
+          also mark a row nobody has; it then leaves `scope=unassigned`.
+        - A done task stops showing as overdue (lists, analytics, digests) and gets no reminder,
+          nudge, overdue or escalation push.
+        - Audit log: `task_done` / `task_reopened` (on a change only).
+        - A new done mark pushes `task_done` to every active admin except the caller.
+        - 503 `not_available` until the server's migration 021 is applied.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [done]
+              properties:
+                done: { type: boolean }
+      responses:
+        "200": { description: "The task as it is now (state done, doneAt, doneBy; or reopened)", content: { application/json: { schema: { $ref: "#/components/schemas/TaskDetail" } } } }
+        "400": { description: "invalid_body: done must be true or false", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: "not_your_task: the caller is neither the task's assignee nor a lead / admin", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "503": { description: "not_available: the server's database isn't updated for this yet (migration 021)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
 
   /tasks/{taskId}/access:
     parameters:
@@ -629,6 +693,7 @@ paths:
       tags: [admin]
       x-phase: P1
       summary: The roster (admin). The app's Me → Team screen.
+      description: "1.11.0: every entry carries `devices` (its signed-in phones with their notification health, most recently seen first; [] when none). PUT answers the same shape."
       responses:
         "403": { description: Not an admin (code admin_only) }
         "200":
@@ -1617,6 +1682,29 @@ components:
         osVersion: { type: integer, description: Android API level }
         model: { type: string }
         fcmToken: { type: string }
+        notificationsEnabled: { type: boolean, description: "1.11.0, optional. NotificationManagerCompat.areNotificationsEnabled()" }
+        taskChannelEnabled: { type: boolean, description: "1.11.0, optional. The task channel's importance is not NONE" }
+        batteryOptimized: { type: boolean, description: "1.11.0, optional. True when the app is NOT exempt from battery optimisations" }
+        backgroundRestricted: { type: boolean, description: "1.11.0, optional. ActivityManager.isBackgroundRestricted" }
+        manufacturer: { type: string, maxLength: 80, description: "1.11.0, optional. Build.MANUFACTURER" }
+
+    RosterDevice:
+      type: object
+      description: "1.11.0. A signed-in phone and its notification health (as last reported; null = never reported, e.g. an older app)."
+      required: [lastSeenAt, healthy]
+      properties:
+        model: { type: [string, "null"] }
+        manufacturer: { type: [string, "null"] }
+        appVersion: { type: [string, "null"] }
+        lastSeenAt: { type: string, format: date-time }
+        notificationsEnabled: { type: [boolean, "null"] }
+        taskChannelEnabled: { type: [boolean, "null"] }
+        batteryOptimized: { type: [boolean, "null"], description: "A warning (amber), not unhealthy" }
+        backgroundRestricted: { type: [boolean, "null"] }
+        healthAt: { type: [string, "null"], format: date-time, description: "When the phone last reported its health" }
+        healthy:
+          type: boolean
+          description: "notificationsEnabled and taskChannelEnabled are true and backgroundRestricted is false (unknown counts as not healthy). Battery optimisation doesn't make a phone unhealthy."
 
     Session:
       type: object
@@ -1656,6 +1744,11 @@ components:
             their work account). Signing in with one opens this person's session: same tasks, role
             and notifications. Each account belongs to one person and can't be a roster email.
             On PUT, omit to keep the stored list; [] removes all (their devices are signed out).
+        devices:
+          type: array
+          readOnly: true
+          items: { $ref: "#/components/schemas/RosterDevice" }
+          description: "1.11.0, in answers only (ignored on PUT). The person's signed-in phones, most recently seen first; [] when none."
 
     TaskState:
       type: string
@@ -1663,6 +1756,9 @@ components:
       description: |
         new → acknowledged (Start now) → screening (job running) → shortlist_ready (AI delivered)
         → shared (sent to company) → done. "overdue" applies to any open state past the deadline.
+        1.11.0: `done` = "Shortlisting done" was marked (POST /tasks/{taskId}/done) and the assignee
+        hasn't changed since; it wins over every other state and is never overdue. A screening the
+        automation delivered still shows as `shortlist_ready` (delivered), never overdue either.
 
     TaskSummary:
       type: object
@@ -1691,6 +1787,13 @@ components:
               properties:
                 email: { type: string, format: email }
                 name: { type: string }
+        doneAt: { type: [string, "null"], format: date-time, description: "1.11.0. When the shortlisting was marked done (null: not done). Always present." }
+        doneBy: { type: [string, "null"], description: "1.11.0. Who marked it done (roster name; null: not done). Always present." }
+        autoAssigned: { type: boolean, description: "1.11.0. The server filled the Mentor cell from the ISE mapping (assignedVia = ise). Always present." }
+        assignedVia:
+          type: string
+          enum: [sheet, ise, app]
+          description: "1.11.0. How the current mentor got the row: typed in the sheet, filled from the ISE mapping (\"via ISE\"), or taken / assigned in the app. sheet for rows nobody has. Always present."
 
     TaskDetail:
       allOf:
@@ -1862,9 +1965,10 @@ components:
               shortlisted: { type: integer, nullable: true }
               deliveredAt: { type: string, format: date-time, nullable: true }
               minutesToShortlist: { type: integer, nullable: true }
-              onTime: { type: boolean, nullable: true }
+              onTime: { type: boolean, nullable: true, description: "Delivered (else, 1.11.0, marked done) by the deadline; false when past the deadline unfinished" }
               shortlistUrl: { type: string, format: uri, nullable: true }
               sheetRowUrl: { type: string, format: uri }
+              doneAt: { type: string, format: date-time, nullable: true, description: "1.11.0. When it was marked done (a done row never counts as overdue)" }
         activity:
           type: array
           description: |
@@ -1874,6 +1978,8 @@ components:
             - shortlistings: control-tab tasks assigned to the member whose shortlist was delivered
               in the range (delivered = the early shortlist or the job's end, as byMember.delivered
               counts it; by the delivery time, so a task assigned before the range can count);
+              1.11.0: plus tasks marked "Shortlisting done" in the range. A task both delivered
+              and marked done in the range counts once. byMember.delivered is unchanged;
             - prepsGiven: drill-down rows whose "Prep Given" says done (Yes), whose "Prep Given By"
               names the member, with the interview on an IST day the range touches;
             - prepCalls: call recordings by the member (call_at in the range) plus prep meetings they
@@ -2227,6 +2333,37 @@ components:
         itself: sticky assignment with countdown, re-post on swipe. High priority for assignment,
         reminder and overdue; normal for job updates.
 
+        1.11.0 (tasks). Every push also lands in the inbox. Done tasks (POST /tasks/{taskId}/done)
+        and delivered ones (shortlist_ready) get no reminder, overdue, escalation or nudge push.
+        - `reminder` and `overdue` now carry `slot`, `title` and `body` (the 1.10 app ignores them
+          and builds its own text; the inbox uses them). Per task, at most:
+          - `reminder` slot `nudge:30` / `nudge:90`: not started (no Start now, no screening) 30
+            and 90 min after the assignment push (never past the deadline, never more than 6 h
+            after it). "Not started · Acme" / "Assigned to you 30 min ago · due 6:00 PM. Tap Start now."
+            Dedupe `nudge:30|nudge:90:<taskId>:<email>`.
+          - `reminder` slot `soon1h` / `soon15`: 1 h and 15 min before the deadline, started or
+            not, each only when the person was told before that moment. "Due in 1 hour · Acme".
+            Dedupe `soon1h|soon15:<taskId>:<email>` (1.10's `soon:` key counts as soon15).
+          - `overdue` slot `overdue:0` … `overdue:3`: at the deadline, then every 2 h until done,
+            at most 4, up to a day after the deadline. "Overdue · Acme" / "2 h past the deadline
+            (6:00 PM). Mark done when the shortlist is shared." Dedupe
+            `overdue:<0-3>:<taskId>:<email>` (1.10's `overdue:` key counts as slot 0).
+          A server that slept through a slot sends the latest one only. The 1.10 "half the time
+          gone" reminder is no longer sent. `escalation` is unchanged.
+        - `assignment` for a row the server filled from the ISE mapping also carries
+          `assignedVia: "ise"`, `ise`, `title` ("New task · Acme") and `body` ("Assigned to you as
+          Sneha Padi's mentor (ISE)"). Such rows get no task_unassigned "new" push.
+        - `task_done` → every active admin except the person who marked it, when a task is marked
+          done. Task channel, not sticky; tapping opens the task. Data: taskId, company, by (roster
+          name), title ("Rakesh finished Acme's shortlisting"), body. Dedupe
+          `done:<taskId>:<doneAt ms>:<email>` (a mark undone and set again notifies again).
+        - `task_digest` → each active member who has open tasks (not done or delivered), at 09:15
+          IST (sent until noon if the server slept) and 18:00 IST (until 22:00). Daily summary
+          channel; tapping opens Tasks. Data: day (YYYY-MM-DD), slot (am|pm), title, body, count
+          (open tasks). am: "Your tasks today: 3 open · 1 overdue · 2 due today" / "Acme, Globex,
+          Initech +1 more". pm: "Still open: Acme, Globex" / "Mark done when the shortlist is
+          shared." Dedupe `task:digest:<am|pm>:<day>:<email>`.
+
         1.10.0 (Academy candidates; channel "Academy candidates", default importance; academy_digest
         on the digest channel). Every one carries `title` and `body` (names and companies, never
         phone numbers) and has inbox text. Tapping opens the candidate (`uid`), else the Pool tab.
@@ -2285,7 +2422,7 @@ components:
       properties:
         type:
           type: string
-          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest, prep_doc_ready, recording_ready, rsa_ready, meeting_reminder, team_account, admin_notice, app_update, task_unassigned, feedback, pool_assigned, pool_shared, pool_status, pool_interview, pool_meeting, academy_digest]
+          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest, prep_doc_ready, recording_ready, rsa_ready, meeting_reminder, team_account, admin_notice, app_update, task_unassigned, feedback, pool_assigned, pool_shared, pool_status, pool_interview, pool_meeting, academy_digest, task_done, task_digest]
         taskId: { type: string, description: "Task pushes (incl. task_unassigned)" }
         prepId: { type: string, description: "Prep pushes (prep_*, interview_checkin) prep_doc_ready, recording_ready (the call was added to the sheet), meeting_reminder (when the meeting is a prep's), pool_interview" }
         meetingId: { type: string, description: "meeting_reminder, recording_ready (Meet), pool_meeting" }
@@ -2298,11 +2435,14 @@ components:
         role: { type: string, description: "pool_shared, pool_status" }
         outcome: { $ref: "#/components/schemas/ShareOutcome" }
         track: { type: string, description: "pool_assigned: frontend | backend | fullstack | aiml | \"\"" }
-        day: { type: string, format: date, description: "pool_interview: the interview day; academy_digest: today" }
+        day: { type: string, format: date, description: "pool_interview: the interview day; academy_digest, task_digest: today" }
+        slot: { type: string, description: "1.11.0. reminder: nudge:30 | nudge:90 | soon1h | soon15; overdue: overdue:0 … overdue:3; task_digest: am | pm" }
+        count: { type: string, description: "1.11.0 task_digest: the person's open tasks" }
+        assignedVia: { type: string, enum: [ise], description: "1.11.0 assignment: the server filled the Mentor cell from the ISE mapping" }
         time: { type: string, description: "pool_interview: the interview time as shown (\"\" when none)" }
         kind: { type: string, enum: [mock, guidance], description: "pool_meeting" }
         startsAt: { type: string, format: date-time, description: "pool_meeting" }
-        by: { type: string, description: "pool_meeting: who scheduled it (roster name)" }
+        by: { type: string, description: "pool_meeting: who scheduled it (roster name). task_done (1.11.0): who marked it done" }
         summary: { type: string, enum: ["true"], description: "pool_*: this push sums up the run's other updates (no uid)" }
         category: { type: string, enum: [academy, edge, external, problem, idea, other], description: "Prep pushes: academy / edge / external. feedback: problem / idea / other." }
         edgeVersion: { type: string }
@@ -2323,7 +2463,7 @@ components:
         from: { type: string, description: "admin_notice: the sending admin's name. feedback: the sender's name." }
         feedbackId: { type: string, format: uuid, description: "feedback" }
         stage: { type: string, description: "task_unassigned: new | reminder | due. pool_status (1.10.0): the share's stage label (\"TR Round 1 · Cleared\")" }
-        ise: { type: string, description: "task_unassigned: the PC column as written (empty when blank)" }
+        ise: { type: string, description: "task_unassigned, and assignment with assignedVia ise (1.11.0): the PC column as written (empty when blank)" }
         iseOwner: { type: string, description: "task_unassigned: the name of the mentor the ISE maps to (empty when none)" }
         product: { type: string, description: "task_unassigned: the Product column" }
         versionCode: { type: string, description: "app_update" }
