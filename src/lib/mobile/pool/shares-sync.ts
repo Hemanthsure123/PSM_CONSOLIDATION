@@ -3,16 +3,21 @@ import { google, type drive_v3 } from "googleapis";
 import { query, transaction } from "@/lib/db/client";
 import { env } from "@/lib/env";
 import { UserError } from "@/lib/mobile/http";
+import { refreshHubspotDeals } from "@/lib/hubspot/deals";
 import { notifyShareEvents, type ShareNotice } from "@/lib/mobile/pool/notify";
-import { academySchemaReady, hasRunBefore } from "@/lib/mobile/pool/schema";
+import { academySchemaReady, companiesSchemaReady, hasRunBefore } from "@/lib/mobile/pool/schema";
 import {
   baselineSharedAt,
   buildShares,
   type BuiltSheet,
   diffShares,
+  inferCrpYear,
   type MasterParse,
+  type MasterRequirement,
   type MasterSheet,
   MAX_ROWS_PER_TAB,
+  normHead,
+  parseCrpMonth,
   parseCrpsMaster,
   pickTabs,
   type PoolIndex,
@@ -56,6 +61,12 @@ const MAX_COLUMNS = 104; // CZ
 const LOCK = 74_210_020;
 
 const MASTER_ID = "1y1FgqMNvSFR8f3HRHlb4RYP1rDIDfRTYN5GwD6IXg7U";
+
+/**
+ * The version of the reading rules (round columns, statuses). When it changes, every sheet is read
+ * again once, silently: rows that look different only because the rules changed send no pushes.
+ */
+export const SHARE_RULES_VERSION = "2026-11-27.status";
 
 /** The master sheet and tab (ACADEMY_CRP_SHEET / ACADEMY_CRP_TAB override them). */
 export function crpMaster(): { spreadsheetId: string; tab: string } {
@@ -106,7 +117,46 @@ export async function readCrpMaster(pace: () => Promise<void>): Promise<MasterPa
       { timeout: 60_000 },
     ),
   );
-  return parseCrpsMaster((res.data.values ?? []) as unknown[][]);
+  const rows = (res.data.values ?? []) as unknown[][];
+  return parseCrpsMaster(rows, await readJdLinks(spreadsheetId, tab, rows, pace));
+}
+
+/**
+ * The JD column's hyperlinks (a cell can show a file name that links to the JD), by row index.
+ * Best effort: on any error the JD column's text links are used alone.
+ */
+async function readJdLinks(spreadsheetId: string, tab: string, rows: unknown[][], pace: () => Promise<void>): Promise<(string | null)[]> {
+  const head = (rows[0] ?? []).map(normHead);
+  const at = head.findIndex((h) => ["jd", "jd link", "job description", "job description link"].includes(h));
+  if (at < 0 || rows.length < 2) return [];
+  const col = columnName(at + 1);
+  try {
+    await pace();
+    const res = await withSheetsRetry(() =>
+      getSheets().spreadsheets.get(
+        {
+          spreadsheetId,
+          ranges: [`${q(tab)}!${col}1:${col}${Math.min(rows.length, MAX_ROWS_PER_TAB + 1)}`],
+          includeGridData: true,
+          fields: "sheets.data.rowData.values(hyperlink,textFormatRuns.format.link.uri,chipRuns.chip.richLinkProperties.uri)",
+        },
+        { timeout: 60_000 },
+      ),
+    );
+    const data = res.data.sheets?.[0]?.data?.[0]?.rowData ?? [];
+    return data.map((r) => {
+      const v = r.values?.[0];
+      if (!v) return null;
+      const run = v.textFormatRuns?.find((t) => t.format?.link?.uri)?.format?.link?.uri;
+      // chipRuns (smart chips) isn't in this googleapis version's types.
+      const chips = (v as { chipRuns?: { chip?: { richLinkProperties?: { uri?: string | null } } }[] }).chipRuns;
+      const chip = chips?.find((c) => c.chip?.richLinkProperties?.uri)?.chip?.richLinkProperties?.uri;
+      return v.hyperlink ?? run ?? chip ?? null;
+    });
+  } catch (err) {
+    console.warn("[shares] JD links not read (text links only):", short(err));
+    return [];
+  }
 }
 
 export type DriveMeta =
@@ -241,6 +291,12 @@ async function runSync(by: string): Promise<SharesSyncResult> {
     const master = await readCrpMaster(pace);
     if (!master.sheets.length) throw new Error("The CRPs tab lists no company sheets; nothing was changed.");
     await saveMaster(master.sheets);
+    const companies = await companiesSchemaReady().catch(() => false);
+    if (companies) {
+      await saveRequirements(master.requirements).catch((err) => console.warn("[shares] requirements not saved:", short(err)));
+    }
+    // When the reading rules change, every sheet is read again once (silently, see SHARE_RULES_VERSION).
+    const rulesAt = companies ? await rulesChangedAt().catch(() => null) : null;
 
     const people = await query<{ uid: string; phone: string | null; email: string | null }>("select uid, phone, email from app.pool_candidates where removed_at is null");
     if (people.length < 10) throw new Error("The Academy pool has fewer than 10 candidates; the shares were left as they are.");
@@ -275,6 +331,7 @@ async function runSync(by: string): Promise<SharesSyncResult> {
       let priority = -1;
       if (!st?.last_read_at) priority = 0;
       else if (meta.ok && meta.modifiedAt && (!st.drive_modified_at || meta.modifiedAt.getTime() > st.drive_modified_at.getTime())) priority = 1;
+      else if (rulesAt && st.last_read_at.getTime() < rulesAt.getTime()) priority = 1;
       else if (stale) priority = 2;
       if (priority < 0) continue;
       // A sheet that failed less than an hour ago and didn't change waits.
@@ -297,8 +354,10 @@ async function runSync(by: string): Promise<SharesSyncResult> {
         const built = buildShares(sheet, tabs, idx);
         const written = await writeSheet(sheet, built, {
           baseline: !st?.last_read_at,
+          silent: Boolean(rulesAt && st?.last_read_at && st.last_read_at.getTime() < rulesAt.getTime()),
           modifiedAt: meta.ok ? meta.modifiedAt : null,
           createdAt: meta.ok ? meta.createdAt : null,
+          withStatus: companies,
         });
         out.sheetsRead++;
         out.rowsMatched += built.academyRows;
@@ -315,6 +374,8 @@ async function runSync(by: string): Promise<SharesSyncResult> {
       console.warn("[shares] pushes failed:", short(err));
       return 0;
     });
+    // HubSpot (GET only): the JD link / Nurturing Team Remarks of each requirement's deal. Never fails the run.
+    if (companies) await refreshHubspotDeals(master.requirements.map((r) => r.hubspotDealId ?? "").filter(Boolean));
     await finish("succeeded");
     if (out.sheetsRead || out.changes || out.errors) {
       console.log(`[shares] ${out.sheetsChecked} sheets checked, ${out.sheetsRead} read, ${out.rowsMatched} Academy rows, ${out.changes} changes, ${out.errors} unreadable, ${out.pushed} pushes`);
@@ -361,6 +422,84 @@ export async function saveMaster(sheets: MasterSheet[]): Promise<void> {
   );
 }
 
+/** When the current reading rules were first used (recorded on the first run under them). */
+async function rulesChangedAt(): Promise<Date | null> {
+  const name = `shares:rules:${SHARE_RULES_VERSION}`.slice(0, 80);
+  await query("insert into app.sync_marks (name) values ($1) on conflict (name) do nothing", [name]);
+  const [row] = await query<{ at: Date }>("select at from app.sync_marks where name = $1", [name]);
+  return row?.at ?? null;
+}
+
+/**
+ * The master's requirement rows (migration 022). A month's year is fixed the first time the row is
+ * seen with that month text (a CRP "Nov" stays Nov 2026 years later). Rows no longer in the master
+ * are deleted, unless the read looks broken (fewer than half the rows stored).
+ */
+export async function saveRequirements(reqs: MasterRequirement[], now = new Date()): Promise<void> {
+  if (!reqs.length) return;
+  const year = (r: MasterRequirement) => {
+    const m = parseCrpMonth(r.crpMonth);
+    if (!m) return null;
+    const y = m.year ?? inferCrpYear(m.month, now);
+    return y >= 2020 && y <= 2100 ? y : null;
+  };
+  const rows = reqs.map((r) => ({
+    key: r.key,
+    row_index: r.row,
+    sheet_id: r.sheetId,
+    company: r.company.slice(0, 200) || "Company",
+    role: r.role.slice(0, 200),
+    job_id: r.jobId.slice(0, 80),
+    job_type: r.jobType.slice(0, 80),
+    crp_month: r.crpMonth.slice(0, 40),
+    crp_year: year(r),
+    crp_week: r.crpWeek,
+    openings: r.openings,
+    ctc_text: r.ctcText.slice(0, 80),
+    final_status: r.finalStatus.slice(0, 200),
+    stage: r.stage.slice(0, 200),
+    id_status: r.idStatus.slice(0, 200),
+    academy_sent: r.academySent,
+    assessed_sent: r.assessedSent,
+    non_assessed_sent: r.nonAssessedSent,
+    requested: r.requested.slice(0, 200),
+    tech_stack: r.techStack.slice(0, 200),
+    pass_out: r.passOut.slice(0, 80),
+    interview_process: r.interviewProcess.slice(0, 200),
+    ise: r.ise.slice(0, 80),
+    crm: r.crm.slice(0, 80),
+    jd_url: r.jdUrl && r.jdUrl.length <= 2000 ? r.jdUrl : null,
+    hubspot_url: r.hubspotUrl && r.hubspotUrl.length <= 2000 ? r.hubspotUrl : null,
+    hubspot_deal_id: r.hubspotDealId,
+  }));
+  await transaction(async (tx) => {
+    const cols = Object.keys(rows[0]);
+    const types: Record<string, string> = { row_index: "integer", crp_year: "integer", crp_week: "integer", openings: "integer", academy_sent: "integer", assessed_sent: "integer", non_assessed_sent: "integer" };
+    await tx.query(
+      `insert into app.crp_requirements (${cols.join(", ")})
+       select ${cols.join(", ")} from jsonb_to_recordset($1::jsonb) as x(${cols.map((c) => `${c} ${types[c] ?? "text"}`).join(", ")})
+       on conflict (key) do update set
+         ${cols
+           .filter((c) => c !== "key" && c !== "crp_year")
+           .map((c) => `${c} = excluded.${c}`)
+           .join(", ")},
+         crp_year = case when app.crp_requirements.crp_month = excluded.crp_month and app.crp_requirements.crp_year is not null
+                         then app.crp_requirements.crp_year else excluded.crp_year end,
+         listed_at = now(),
+         updated_at = case when (${cols.filter((c) => c !== "key" && c !== "crp_year").map((c) => `app.crp_requirements.${c}`).join(", ")})
+                                is distinct from (${cols.filter((c) => c !== "key" && c !== "crp_year").map((c) => `excluded.${c}`).join(", ")})
+                           then now() else app.crp_requirements.updated_at end`,
+      [JSON.stringify(rows)],
+    );
+    const [{ n }] = (await tx.query<{ n: number }>("select count(*)::int as n from app.crp_requirements")).rows;
+    if (rows.length * 2 < n) {
+      console.warn(`[shares] the CRPs read has ${rows.length} requirements against ${n} stored: nothing deleted`);
+      return;
+    }
+    await tx.query("delete from app.crp_requirements where not (key = any($1::text[]))", [rows.map((r) => r.key)]);
+  });
+}
+
 interface StoredRow {
   id: string;
   tab: string;
@@ -380,7 +519,15 @@ interface StoredRow {
 export async function writeSheet(
   sheet: MasterSheet,
   built: BuiltSheet,
-  opts: { baseline: boolean; modifiedAt: Date | null; createdAt: Date | null },
+  opts: {
+    baseline: boolean;
+    /** Read again because the reading rules changed: recorded without pushes, times kept. */
+    silent?: boolean;
+    modifiedAt: Date | null;
+    createdAt: Date | null;
+    /** Migration 022 is applied: store each row's status. */
+    withStatus?: boolean;
+  },
 ): Promise<{ changes: number; notices: ShareNotice[] }> {
   return transaction(async (tx) => {
     const prev = await tx.query<StoredRow>(
@@ -401,33 +548,35 @@ export async function writeSheet(
       changedAt: r.changed_at.getTime(),
       removed: r.removed_at !== null,
     }));
-    const diff = diffShares(stored, built.shares, opts.baseline);
+    const quiet = opts.baseline || Boolean(opts.silent);
+    const diff = diffShares(stored, built.shares, quiet);
     const now = Date.now();
     const rows = diff.writes.map((w) => {
       const from = w.from ? byId.get(w.from.id) ?? null : null;
-      const firstSeen = from ? from.first_seen_at.getTime() : opts.baseline ? baselineSharedAt(w.resumeAt, opts.createdAt?.getTime() ?? null, now) : now;
+      const firstSeen = from ? from.first_seen_at.getTime() : quiet ? baselineSharedAt(w.resumeAt, opts.createdAt?.getTime() ?? null, now) : now;
       return {
         ...w,
         firstSeen: new Date(firstSeen),
-        changedAt: from ? (w.changed ? new Date(now) : from.changed_at) : new Date(firstSeen),
-        outcomeAt: from ? (w.outcomeChanged ? new Date(now) : from.outcome_at) : opts.baseline ? null : new Date(now),
-        baseline: from ? from.baseline : opts.baseline,
+        changedAt: from ? (w.changed && !opts.silent ? new Date(now) : from.changed_at) : new Date(firstSeen),
+        outcomeAt: from ? (w.outcomeChanged && !opts.silent ? new Date(now) : from.outcome_at) : quiet ? null : new Date(now),
+        baseline: from ? from.baseline : quiet,
       };
     });
     const ids = new Map<string, string>();
     for (let i = 0; i < rows.length; i += 300) {
       const c = rows.slice(i, i + 300);
+      const ws = Boolean(opts.withStatus);
       const res = await tx.query<{ id: string; tab: string; uid: string }>(
-        `insert into app.company_shares (sheet_id, tab, tab_gid, uid, phone, company, role, rounds, final_status, stage, outcome, hash, first_seen_at, changed_at, outcome_at, baseline)
-         select $1, t, gid, u, ph, co, ro, rd::jsonb, fs, st, oc, h, f, ca, oa, b
+        `insert into app.company_shares (sheet_id, tab, tab_gid, uid, phone, company, role, rounds, final_status, stage, outcome, hash, first_seen_at, changed_at, outcome_at, baseline${ws ? ", status" : ""})
+         select $1, t, gid, u, ph, co, ro, rd::jsonb, fs, st, oc, h, f, ca, oa, b${ws ? ", ss" : ""}
            from unnest($2::text[], $3::int[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[],
-                       $13::timestamptz[], $14::timestamptz[], $15::timestamptz[], $16::boolean[])
-             as x(t, gid, u, ph, co, ro, rd, fs, st, oc, h, f, ca, oa, b)
+                       $13::timestamptz[], $14::timestamptz[], $15::timestamptz[], $16::boolean[]${ws ? ", $17::text[]" : ""})
+             as x(t, gid, u, ph, co, ro, rd, fs, st, oc, h, f, ca, oa, b${ws ? ", ss" : ""})
          on conflict (sheet_id, tab, uid) do update set
            tab_gid = excluded.tab_gid, phone = excluded.phone, company = excluded.company, role = excluded.role, rounds = excluded.rounds,
            final_status = excluded.final_status, stage = excluded.stage, outcome = excluded.outcome, hash = excluded.hash,
            first_seen_at = excluded.first_seen_at, changed_at = excluded.changed_at, outcome_at = excluded.outcome_at, baseline = excluded.baseline,
-           last_seen_at = now(), removed_at = null
+           ${ws ? "status = excluded.status, " : ""}last_seen_at = now(), removed_at = null
          returning id::text as id, tab, uid`,
         [
           sheet.sheetId,
@@ -446,6 +595,7 @@ export async function writeSheet(
           c.map((r) => r.changedAt),
           c.map((r) => r.outcomeAt),
           c.map((r) => r.baseline),
+          ...(ws ? [c.map((r) => r.status)] : []),
         ],
       );
       for (const r of res.rows) ids.set(`${r.tab}\u0000${r.uid}`, r.id);

@@ -14,7 +14,7 @@ import {
   type Priority,
   TRACK_LABEL,
 } from "@/lib/mobile/pool/parse";
-import { bestOutcome, isActiveShare, type ShareDto, type ShareOutcome } from "@/lib/mobile/pool/shares";
+import { bestOutcome, bestStatus, isActiveStatus, type ShareDto, type ShareOutcome, type ShareStatus } from "@/lib/mobile/pool/shares";
 import { lastSharesSync, type ShareRow, sharesByUid } from "@/lib/mobile/pool/shares-store";
 import { groupKeyOf, type PoolGroupDto, poolGroups, poolSummary, type PoolSummaryDto } from "@/lib/mobile/pool/summary";
 import { lastPoolSync } from "@/lib/mobile/pool/sync";
@@ -299,10 +299,15 @@ export interface PoolItemDto {
   resumes: number;
   bestResumes: number;
   lastContact: { at: string; channel: string; by: string } | null;
-  /** Company sheets the candidate is in (null: the shares were never synced). */
-  shares: { count: number; active: number; companies: string[]; latest: ShareDto | null } | null;
-  /** The most advanced outcome across companies; null when never shared. */
+  /**
+   * Company sheets the candidate is in (null: the shares were never synced). 1.12.0: count / active
+   * count profiles we shared only; applied = rows in applications tabs (the candidate applied).
+   */
+  shares: { count: number; active: number; applied: number; companies: string[]; latest: ShareDto | null } | null;
+  /** The most advanced outcome across companies (1.10 enum); null when never shared. */
   stage: ShareOutcome | null;
+  /** 1.12.0: the most advanced status across companies (shared rows, else applications); null when in no company sheet. */
+  status: ShareStatus | null;
   updatedAt: string;
 }
 
@@ -323,16 +328,32 @@ export interface PoolListDto {
   sharesSyncedAt: string | null;
 }
 
-/** The list card's share summary: count, still active, up to 5 companies (newest first), the latest share. */
+/** A row counts as shared when it is a profile tab, or an applications tab with a round filled in. */
+const isSharedRow = (r: ShareRow) => r.dto.kind === "shared" || r.own !== "shared";
+
+/**
+ * The list card's share summary: shared rows (count, still active), applications, up to 5 companies
+ * (newest first, shared ones before applications), the latest share.
+ */
 function shareSummary(rows: ShareRow[]): NonNullable<PoolItemDto["shares"]> {
+  const shared = rows.filter(isSharedRow);
   const companies: string[] = [];
-  for (const r of rows) if (companies.length < 5 && !companies.some((c) => c.toLowerCase() === r.dto.company.toLowerCase())) companies.push(r.dto.company);
+  for (const r of [...shared, ...rows.filter((x) => !isSharedRow(x))]) {
+    if (companies.length < 5 && !companies.some((c) => c.toLowerCase() === r.dto.company.toLowerCase())) companies.push(r.dto.company);
+  }
   return {
-    count: rows.length,
-    active: rows.filter((r) => isActiveShare(r.dto.outcome, r.masterFinalStatus)).length,
+    count: shared.length,
+    active: shared.filter((r) => isActiveStatus(r.dto.status)).length,
+    applied: rows.length - shared.length,
     companies,
-    latest: rows[0]?.dto ?? null,
+    latest: shared[0]?.dto ?? rows[0]?.dto ?? null,
   };
+}
+
+/** The candidate's best status: across shared rows when any, else across applications. */
+function candidateStatus(rows: ShareRow[]): ShareStatus | null {
+  const shared = rows.filter(isSharedRow);
+  return bestStatus((shared.length ? shared : rows).map((r) => r.dto.status));
 }
 
 export async function listPool(user: RosterUser): Promise<{ body: PoolListDto; etag: string }> {
@@ -390,7 +411,8 @@ export async function listPool(user: RosterUser): Promise<{ body: PoolListDto; e
         ? { at: r.last_contact_at.toISOString(), channel: r.last_contact_action ?? "", by: roster2.get(r.last_contact_by ?? "")?.name ?? r.last_contact_by ?? "" }
         : null,
       shares: own ? shareSummary(own) : null,
-      stage: own ? bestOutcome(own.map((x) => x.dto.outcome)) : null,
+      stage: own ? bestOutcome(own.filter(isSharedRow).map((x) => x.dto.outcome)) : null,
+      status: own ? candidateStatus(own) : null,
       updatedAt: (r.state_updated_at && r.state_updated_at > r.updated_at ? r.state_updated_at : r.updated_at).toISOString(),
     };
   });
@@ -404,6 +426,7 @@ export async function listPool(user: RosterUser): Promise<{ body: PoolListDto; e
     mine: i.mine,
     sharesCount: i.shares ? i.shares.count : null,
     stage: i.stage,
+    status: i.status,
     upcomingInterviews: i.interviews?.upcoming ?? 0,
   }));
   const body: PoolListDto = {

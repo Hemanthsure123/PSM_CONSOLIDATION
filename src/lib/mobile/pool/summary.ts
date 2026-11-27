@@ -1,4 +1,4 @@
-import type { ShareOutcome } from "@/lib/mobile/pool/shares";
+import type { ShareOutcome, ShareStatus } from "@/lib/mobile/pool/shares";
 
 /**
  * GET /pool's header summary and mentor groups (PSM 1.10.0). Pure, tested in
@@ -21,6 +21,8 @@ export interface SummaryItem {
   sharesCount: number | null;
   /** The most advanced outcome across companies (null: never shared). */
   stage: ShareOutcome | null;
+  /** 1.12.0: the most advanced status (when known, it decides the in-process / selected counts). */
+  status?: ShareStatus | null;
   upcomingInterviews: number;
 }
 
@@ -65,8 +67,8 @@ export function poolSummary(items: SummaryItem[]): PoolSummaryDto {
     unassigned,
     shared: items.filter(isShared).length,
     neverShared: items.filter(isNeverShared).length,
-    inProcess: items.filter((i) => i.stage === "in_process").length,
-    selected: items.filter((i) => i.stage === "selected").length,
+    inProcess: items.filter((i) => (i.status !== undefined ? i.status === "in_process" || i.status === "awaiting" : i.stage === "in_process")).length,
+    selected: items.filter((i) => (i.status !== undefined ? i.status === "selected" : i.stage === "selected")).length,
     upcomingInterviews: items.reduce((n, i) => n + i.upcomingInterviews, 0),
   };
 }

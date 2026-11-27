@@ -39,6 +39,7 @@ import {
   shareHash,
   shareOutcome,
   shareStage,
+  shareVerdict,
   sheetIdOf,
   sheetUrl,
   statusChangeText,
@@ -310,6 +311,7 @@ const rec = (uid: string, tabName: string, rounds: Round[], finalStatus = ""): S
   finalStatus,
   stage: shareStage(rounds, finalStatus),
   outcome: shareOutcome(rounds, finalStatus),
+  status: shareVerdict(rounds, finalStatus).status,
   hash: shareHash(rounds, finalStatus),
   resumeAt: null,
 });
@@ -438,7 +440,11 @@ test("share DTO: IST share day, sheet link to the tab, defensive rounds", () => 
   assert.equal(dto.sharedOn, "2026-11-27");
   assert.equal(dto.sheetUrl, `https://docs.google.com/spreadsheets/d/${ID_A}/edit#gid=5`);
   assert.deepEqual(dto.rounds, [{ name: "TR Round 1", value: "Cleared" }]);
-  assert.equal(dto.outcome, "unknown");
+  // Worked out again from the rounds (a row read before migration 022 has no stored status).
+  assert.equal(dto.outcome, "in_process");
+  assert.equal(dto.status, "in_process");
+  assert.equal(dto.kind, "shared");
+  assert.equal(dto.companyStatus, "");
 });
 
 // ── Digest, interviews and dedupe keys ──────────────────────────────────────

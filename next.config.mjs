@@ -15,6 +15,8 @@ const nextConfig = {
       // Candidate Bucketing's LangGraph workflow — Node-only, loaded as-is at runtime.
       "@langchain/langgraph",
       "@langchain/core",
+      // Companies' Excel export / import (PSM 1.12.0): Node streams and zip, loaded as-is.
+      "exceljs",
     ],
     // Assignment Evaluation uploads the assignment PDF through a server action.
     serverActions: {

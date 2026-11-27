@@ -73,19 +73,92 @@ export const sheetUrl = (id: string, gid?: number | null) =>
 
 // ── The CRPs master ─────────────────────────────────────────────────────────
 
-export type MasterField = "company" | "role" | "jobId" | "crpMonth" | "ise" | "crm" | "finalStatus" | "stage" | "link";
+export type MasterField =
+  | "company"
+  | "role"
+  | "jobId"
+  | "crpMonth"
+  | "crpWeek"
+  | "jobType"
+  | "openings"
+  | "ctc"
+  | "jd"
+  | "hubspot"
+  | "requested"
+  | "techStack"
+  | "passOut"
+  | "interviewProcess"
+  | "idStatus"
+  | "academySent"
+  | "assessedSent"
+  | "nonAssessedSent"
+  | "ise"
+  | "crm"
+  | "finalStatus"
+  | "stage"
+  | "link";
 
 const MASTER_HEADERS: Record<MasterField, string[]> = {
   company: ["company name", "company"],
   role: ["role", "job role", "designation"],
   jobId: ["job id", "jobid"],
   crpMonth: ["crp month"],
+  crpWeek: ["crp week"],
+  jobType: ["job type"],
+  openings: ["no of openings", "number of openings", "openings", "no of positions"],
+  ctc: ["ctc", "ctc lpa", "ctc in lpa"],
+  jd: ["jd", "jd link", "job description", "job description link"],
+  hubspot: ["hubspot link", "hubspot"],
+  requested: ["requested the academy profiles"],
+  techStack: ["tech stack"],
+  passOut: ["pass out year", "passout year"],
+  interviewProcess: ["interview process"],
+  idStatus: ["company id status"],
+  academySent: ["total academy pool shared"],
+  assessedSent: ["no of assessed academy shared"],
+  nonAssessedSent: ["no of non assessed academy profiles shared", "no of non assessed academy shared"],
   ise: ["ise"],
   crm: ["crm"],
   finalStatus: ["final status"],
   stage: ["current stage of interview", "current stage"],
   link: ["company sheet link", "company sheet"],
 };
+
+/**
+ * One row of the CRPs tab: one company requirement (role) of one CRP. Every value as typed, except
+ * the counts and openings (whole numbers, null when blank or not a number). [key] is stable across
+ * reads (job id, month, week, sheet), so a tentative start date stays with its requirement.
+ */
+export interface MasterRequirement {
+  key: string;
+  /** 1-based row in the CRPs tab. */
+  row: number;
+  sheetId: string | null;
+  company: string;
+  role: string;
+  jobId: string;
+  jobType: string;
+  crpMonth: string;
+  crpWeek: number | null;
+  openings: number | null;
+  ctcText: string;
+  finalStatus: string;
+  stage: string;
+  idStatus: string;
+  academySent: number | null;
+  assessedSent: number | null;
+  nonAssessedSent: number | null;
+  requested: string;
+  techStack: string;
+  passOut: string;
+  interviewProcess: string;
+  ise: string;
+  crm: string;
+  /** The JD column when it holds a link (the cell's text, or its hyperlink). */
+  jdUrl: string | null;
+  hubspotUrl: string | null;
+  hubspotDealId: string | null;
+}
 
 export interface MasterSheet {
   sheetId: string;
@@ -103,6 +176,8 @@ export interface MasterSheet {
 
 export interface MasterParse {
   sheets: MasterSheet[];
+  /** Every requirement row (with or without a company sheet), in sheet order. */
+  requirements: MasterRequirement[];
   /** Data rows read (non-empty). */
   rows: number;
   /** Rows with a Company Sheet Link that isn't a Google Sheet (a portal page, a Drive file). */
@@ -115,11 +190,55 @@ const pushDistinct = (list: string[], v: string, max = 20) => {
   if (v && list.length < max && !list.some((x) => x.toLowerCase() === v.toLowerCase())) list.push(v);
 };
 
+/** A whole number in a typed cell ("2", "10 ", "2-3" → 3), else null. Negative and absurd values are null. */
+export function countOf(raw: string): number | null {
+  const nums = (raw.replace(/,/g, "").match(/\d+(?:\.\d+)?/g) ?? []).map(Number).filter((n) => Number.isFinite(n));
+  if (!nums.length) return null;
+  const n = Math.round(Math.max(...nums));
+  return n >= 0 && n <= 100_000 ? n : null;
+}
+
+/** An http(s) link in a cell ("NA", "-", file names and #REF! are not links). */
+export function linkOf(raw: string | null | undefined): string | null {
+  const t = String(raw ?? "").trim();
+  if (!/^https?:\/\/[^\s]+$/i.test(t) || t.length > 2000) return null;
+  try {
+    const u = new URL(t);
+    return u.protocol === "https:" || u.protocol === "http:" ? u.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The HubSpot deal id of a record link (".../record/0-3/58635688970/", ".../deal/123"), else null. */
+export function hubspotDealIdOf(link: string): string | null {
+  const m = link.match(/\/record\/0-3\/(\d{3,20})(?:\/|$|\?)/) ?? link.match(/\/deal\/(\d{3,20})(?:\/|$|\?)/);
+  return m ? m[1] : null;
+}
+
+const keyText = (s: string) =>
+  s
+    .normalize("NFKC")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+/** A requirement's stable key (hex): its sheet, job id (else company and role), CRP month and week, and the n-th duplicate. */
+export function requirementKey(r: Pick<MasterRequirement, "sheetId" | "jobId" | "company" | "role" | "crpMonth" | "crpWeek">, dup: number): string {
+  const who = r.jobId ? `job:${r.jobId.toLowerCase()}` : `co:${keyText(r.company)}/${keyText(r.role)}`;
+  return createHash("sha1")
+    .update(`${r.sheetId ?? "-"}|${who}|${keyText(r.crpMonth)}|${r.crpWeek ?? ""}|${dup}`)
+    .digest("hex")
+    .slice(0, 24);
+}
+
 /**
- * The CRPs tab (header row 1, columns by name) → one entry per distinct company sheet. Company Name is
- * a merged cell over a company's role rows, so a blank one belongs to the row above.
+ * The CRPs tab (header row 1, columns by name) → one entry per distinct company sheet, and every
+ * requirement row. Company Name is a merged cell over a company's role rows, so a blank one belongs
+ * to the row above. [jdLinks]: the JD column's hyperlinks by row index (a cell's text can be a file
+ * name that links to the JD).
  */
-export function parseCrpsMaster(rows: unknown[][]): MasterParse {
+export function parseCrpsMaster(rows: unknown[][], jdLinks: (string | null)[] = []): MasterParse {
   const head = (rows[0] ?? []).map(normHead);
   const col: Partial<Record<MasterField, number>> = {};
   for (const f of Object.keys(MASTER_HEADERS) as MasterField[]) {
@@ -135,19 +254,61 @@ export function parseCrpsMaster(rows: unknown[][]): MasterParse {
   let read = 0;
   let notSheetLinks = 0;
   let noLink = 0;
+  const requirements: MasterRequirement[] = [];
+  const dups = new Map<string, number>();
   const end = Math.min(rows.length, MAX_ROWS_PER_TAB + 1);
   for (let i = 1; i < end; i++) {
     const r = rows[i] ?? [];
     if (!r.some((c) => cellText(c))) continue;
-    read++;
     const name = at(r, "company");
     if (name) company = name;
     const link = String(r[col.link!] ?? "").trim();
+    const id = link ? sheetIdOf(link) : null;
+    const role = at(r, "role");
+    // A row is a requirement when it names a role or a CRP month (blank rows under a merged company don't).
+    if (role || at(r, "crpMonth") || at(r, "jobId") || id) {
+      const hubspotUrl = linkOf(at(r, "hubspot", 2000));
+      const base = {
+        row: i + 1,
+        sheetId: id,
+        // NFKC: "𝗕𝗮𝗰𝗸𝗲𝗻𝗱 𝗜𝗻𝘁𝗲𝗿𝗻" (styled letters pasted from a post) reads "Backend Intern".
+        company: (company || name).normalize("NFKC").slice(0, 200) || "Company",
+        role: role.normalize("NFKC").slice(0, 200),
+        jobId: at(r, "jobId", 80),
+        jobType: at(r, "jobType", 80),
+        crpMonth: at(r, "crpMonth", 40),
+        crpWeek: (() => {
+          const w = countOf(at(r, "crpWeek", 20));
+          return w !== null && w >= 1 && w <= 6 ? w : null;
+        })(),
+        openings: countOf(at(r, "openings", 40)),
+        ctcText: at(r, "ctc", 80),
+        finalStatus: at(r, "finalStatus", 200),
+        stage: at(r, "stage", 200),
+        idStatus: at(r, "idStatus", 200),
+        academySent: countOf(at(r, "academySent", 40)),
+        assessedSent: countOf(at(r, "assessedSent", 40)),
+        nonAssessedSent: countOf(at(r, "nonAssessedSent", 40)),
+        requested: at(r, "requested", 200),
+        techStack: at(r, "techStack", 200),
+        passOut: at(r, "passOut", 80),
+        interviewProcess: at(r, "interviewProcess", 200),
+        ise: at(r, "ise", 80),
+        crm: at(r, "crm", 80),
+        jdUrl: linkOf(at(r, "jd", 2000)) ?? linkOf(jdLinks[i]),
+        hubspotUrl,
+        hubspotDealId: hubspotUrl ? hubspotDealIdOf(hubspotUrl) : null,
+      };
+      const probe = requirementKey(base, 0);
+      const dup = dups.get(probe) ?? 0;
+      dups.set(probe, dup + 1);
+      requirements.push({ key: dup ? requirementKey(base, dup) : probe, ...base });
+    }
+    read++;
     if (!link) {
       noLink++;
       continue;
     }
-    const id = sheetIdOf(link);
     if (!id) {
       notSheetLinks++;
       continue;
@@ -175,11 +336,133 @@ export function parseCrpsMaster(rows: unknown[][]): MasterParse {
     masterFinalStatus: join(statuses),
     masterStage: join(stages),
   }));
-  return { sheets, rows: read, notSheetLinks, noLink };
+  return { sheets, requirements, rows: read, notSheetLinks, noLink };
 }
 
-/** The master says the requirement is over (closed / nobody selected): its shares are no longer active. */
-export const masterClosed = (masterFinalStatus: string) => /closed|no candidate selected|cancel/i.test(masterFinalStatus);
+/** How a requirement stands in the master: still running, paused, or over (closed / nobody selected / filled elsewhere). */
+export type MasterState = "open" | "on_hold" | "closed" | "unknown";
+
+const CLOSED_TEXT = /closed|no candidate selected|cancel|not hired|filled|withdrawn|dropped/i;
+
+/**
+ * One requirement's state from its master cells: Final Status first (when filled), then Current
+ * Stage of Interview, then Company ID Status.
+ */
+export function requirementState(finalStatus: string, stage = "", idStatus = ""): MasterState {
+  const f = finalStatus.trim();
+  if (f) {
+    if (CLOSED_TEXT.test(f)) return "closed";
+    if (/hold/i.test(f)) return "on_hold";
+    return "open";
+  }
+  const s = stage.trim();
+  if (s) {
+    if (/requirement closed|\bclosed\b/i.test(s)) return "closed";
+    if (/hold/i.test(s)) return "on_hold";
+    return "open";
+  }
+  const id = idStatus.trim();
+  if (id) {
+    if (/requirement closed|id done/i.test(id)) return "closed";
+    if (/hold/i.test(id)) return "on_hold";
+    return "open";
+  }
+  return "unknown";
+}
+
+/** Several requirements (one sheet): open when any is open (or not known), else on hold when any is, else closed. */
+export function combinedState(states: MasterState[]): MasterState {
+  if (!states.length) return "unknown";
+  if (states.some((s) => s === "open")) return "open";
+  if (states.some((s) => s === "unknown")) return "unknown";
+  if (states.some((s) => s === "on_hold")) return "on_hold";
+  return "closed";
+}
+
+/**
+ * The master says the requirement is over. [masterFinalStatus] may join several requirements' Final
+ * Status with " / " (one sheet, several roles): it is closed only when every part is.
+ */
+export const masterClosed = (masterFinalStatus: string) => {
+  const parts = masterFinalStatus
+    .split(" / ")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return parts.length > 0 && parts.every((p) => requirementState(p) === "closed");
+};
+
+// ── CRP period, CTC ─────────────────────────────────────────────────────────
+
+const MONTHS = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"];
+const MONTH_LABEL = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/** "Oct", "October", "Oct'26", "Oct 2026" → { month: 9, year: 2026 | null }. Null when no month. */
+export function parseCrpMonth(raw: string): { month: number; year: number | null } | null {
+  const t = raw.normalize("NFKC").toLowerCase();
+  const m = t.match(/\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*/);
+  if (!m) return null;
+  const month = MONTHS.indexOf(m[1]);
+  const y4 = t.match(/\b(20\d{2})\b/);
+  const y2 = t.match(/['’]\s?(\d{2})\b/);
+  const year = y4 ? Number(y4[1]) : y2 ? 2000 + Number(y2[1]) : null;
+  return { month, year };
+}
+
+/**
+ * The year of a CRP month typed without one: the latest year in which that month starts no later
+ * than two months after [now] (so in Nov 2026, "Dec" and "Jan" are upcoming, "Apr" is Apr 2026).
+ */
+export function inferCrpYear(month: number, now: Date): number {
+  const y = now.getUTCFullYear();
+  const limit = Date.UTC(y, now.getUTCMonth() + 2, 1);
+  for (const year of [y + 1, y]) if (Date.UTC(year, month, 1) <= limit) return year;
+  return y - 1;
+}
+
+const iso = (y: number, m: number, d: number) => new Date(Date.UTC(y, m, d)).toISOString().slice(0, 10);
+
+/** A CRP's dates: week n = days 7n−6 … 7n (week 5 runs to the month's end); no week = the whole month. */
+export function crpPeriod(year: number, month: number, week: number | null): { from: string; to: string } {
+  const last = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+  if (!week) return { from: iso(year, month, 1), to: iso(year, month, last) };
+  const start = Math.min((week - 1) * 7 + 1, last);
+  const end = week >= 5 ? last : Math.min(week * 7, last);
+  return { from: iso(year, month, start), to: iso(year, month, end) };
+}
+
+export const crpMonthLabel = (year: number, month: number) => `${MONTH_LABEL[month]} ${year}`;
+
+/**
+ * A CTC cell in LPA: "8-12" → 8–12, "15" → 15, "7.5–8" → 7.5–8, "50000" (a monthly stipend) → 6,
+ * "₹12,00,000" → 12, "50k" → 6. Null when there is no number.
+ */
+export function parseCtc(raw: string): { min: number; max: number } | null {
+  const t = raw.normalize("NFKC").replace(/,/g, "");
+  const nums: number[] = [];
+  for (const m of t.matchAll(/(\d+(?:\.\d+)?)\s*(k\b|l\b|lpa\b|lakhs?\b)?/gi)) {
+    let n = Number(m[1]);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const unit = (m[2] ?? "").toLowerCase();
+    if (unit === "k") n *= 1000;
+    if (n >= 200_000) n /= 100_000; // a yearly amount in rupees
+    else if (n >= 1000) n = (n * 12) / 100_000; // a monthly stipend
+    nums.push(Math.round(n * 100) / 100);
+  }
+  const sane = nums.filter((n) => n > 0 && n <= 500);
+  if (!sane.length) return null;
+  return { min: Math.min(...sane), max: Math.max(...sane) };
+}
+
+/** "8–12 LPA", "15 LPA", or the cell as typed when it isn't plain numbers ("50000" → "50000 (≈6 LPA)"). */
+export function ctcLabel(raw: string): string {
+  const t = raw.trim();
+  if (!t) return "";
+  const c = parseCtc(t);
+  if (!c) return t;
+  const plain = /^[\d.\s\-–to]+(lpa)?$/i.test(t) && !/\d{4,}/.test(t);
+  const range = c.min === c.max ? `${c.min}` : `${c.min}–${c.max}`;
+  return plain ? `${range} LPA` : `${t} (≈${range} LPA)`;
+}
 
 // ── Company sheet tabs ──────────────────────────────────────────────────────
 
@@ -190,6 +473,13 @@ export interface TabInfo {
   rowCount: number;
   columnCount: number;
 }
+
+/**
+ * A tab of applications rather than profiles we shared: "Applied Users", "Total Applications",
+ * "Academy Applied", "Form Responses 1". Its rows are candidates who applied.
+ */
+export const isApplicationsTab = (title: string) =>
+  /\bappl(y|ied|ications?|icants?)\b|\bregistrations?\b|\bform responses?\b|\bresponses?\b/i.test(title.normalize("NFKC"));
 
 /** The tabs worth reading: visible, and not a "Read me". Hidden tabs are raw exports or copies. */
 export function pickTabs(tabs: TabInfo[]): TabInfo[] {
@@ -206,7 +496,7 @@ const FINAL_HEADS = [/^final status$/, /^final result$/, /^final decision$/, /^f
 const ROUND_HEAD =
   /\bround|\btr ?\d|\btr\b|\bhr\b|\bmr\b|\bgd\b|\br\d\b|assessment|assignment|\btest\b|interview|screening|shortlist|\bcall\b|coding|aptitude|technical|managerial|culture|offline drive|\bdrive\b|case study|\btask\b|evaluation|discussion|presentation/;
 const NOT_ROUND_HEAD =
-  /link|recording|\burl\b|github|deployed|document|\bdoc\b|video|remark|comment|reason|feedback|\bnote|panel|\bspoc\b|\bpoc\b|\btime|timing|slot|\bdate\b|\bmeet\b|availab|location|\bstate\b|\bcity\b|portal|skill|summary|score|marks|percentage|cgpa|college|course|department|\byear\b|graduation|degree|branch|e ?mail|\bmail\b|phone|mobile|\bname\b|\bsent\b|registered|attendance|\bmode\b|venue|\bctc\b|notice|experience|company|current|expected|recruiter|interviewer|evaluator|\bby\b|\bsheet\b|\bform\b|willing|\bare you\b|\bdo you\b|\bhave you\b|\bconfirm|challenge|\bwhy\b|\bhow\b|\bwhat\b|describe|explain/;
+  /read ?only|\bid\b|rating|date ?time|\bdates?\b|\btag\b|\btitle\b|\bpath\b|\breport\b|\bpdf\b|\bupdates?\b|\brate\b|\balignment\b|ability|collaboration|debugging|self intro|problem solving|overall|link|recording|\burl\b|github|deployed|document|\bdoc\b|video|remark|comment|reason|feedback|\bnote|panel|\bspoc\b|\bpoc\b|\btime|timing|slot|\bmeet\b|availab|location|\bstate\b|\bcity\b|portal|skill|summary|score|marks|percentage|cgpa|college|course|department|\byear\b|graduation|degree|branch|e ?mail|\bmail\b|phone|mobile|\bname\b|\bsent\b|registered|attendance|\bmode\b|venue|\bctc\b|notice|experience|company|current|expected|recruiter|interviewer|evaluator|\bby\b|\bsheet\b|\bform\b|willing|\bare you\b|\bdo you\b|\bhave you\b|\bconfirm|challenge|\bwhy\b|\bhow\b|\bwhat\b|describe|explain/;
 
 export interface TabRound {
   index: number;
@@ -245,15 +535,26 @@ export function findTabColumns(rows: unknown[][]): TabColumns | null {
       if (fallback === null && head.filter(Boolean).length >= 3) fallback = r;
       continue;
     }
-    return columnsAt(head, r, phones, emails, nameAt, resumeAt);
+    return columnsAt(head, roundHeads(rows[r] ?? []), r, phones, emails, nameAt, resumeAt);
   }
   if (fallback === null) return null;
   const head = (rows[fallback] ?? []).map(normHead);
   const phones = head.map((h, i) => (h && PHONE_HEAD.test(h) && !NOT_PHONE_HEAD.test(h) ? i : -1)).filter((i) => i >= 0);
-  return columnsAt(head, fallback, phones, [], -1, -1);
+  return columnsAt(head, roundHeads(rows[fallback] ?? []), fallback, phones, [], -1, -1);
 }
 
-function columnsAt(head: string[], headerRow: number, phones: number[], emails: number[], nameAt: number, resumeAt: number): TabColumns | null {
+/** Headers for round detection: camelCase split first ("tr1ReportUrl" → "tr1 report url"), so platform exports' data columns aren't rounds. */
+const roundHeads = (raw: unknown[]) => raw.map((h) => normHead(String(h ?? "").replace(/([a-z0-9])([A-Z])/g, "$1 $2")));
+
+function columnsAt(
+  head: string[],
+  roundHead: string[],
+  headerRow: number,
+  phones: number[],
+  emails: number[],
+  nameAt: number,
+  resumeAt: number,
+): TabColumns | null {
   let finalAt = -1;
   for (const re of FINAL_HEADS) {
     finalAt = head.findIndex((h) => re.test(h));
@@ -263,7 +564,8 @@ function columnsAt(head: string[], headerRow: number, phones: number[], emails: 
   const rounds: TabRound[] = [];
   head.forEach((h, i) => {
     if (!h || taken.has(i) || rounds.length >= MAX_ROUNDS) return;
-    if (ROUND_HEAD.test(h) && !NOT_ROUND_HEAD.test(h)) rounds.push({ index: i, name: "" });
+    const rh = roundHead[i] ?? h;
+    if (ROUND_HEAD.test(rh) && !NOT_ROUND_HEAD.test(rh)) rounds.push({ index: i, name: "" });
   });
   if (resumeAt < 0 && finalAt < 0 && !rounds.length) return null;
   return { headerRow, phones, emails, name: nameAt >= 0 ? nameAt : null, resume: resumeAt >= 0 ? resumeAt : null, finalStatus: finalAt >= 0 ? finalAt : null, rounds };
@@ -334,7 +636,7 @@ export function readTabRows(rows: unknown[][], cols: TabColumns, now = Date.now(
   return out;
 }
 
-// ── Outcome and stage ───────────────────────────────────────────────────────
+// ── Outcome, status and stage ───────────────────────────────────────────────
 
 export const SHARE_OUTCOMES = ["selected", "rejected", "in_process", "on_hold", "no_show", "unknown"] as const;
 export type ShareOutcome = (typeof SHARE_OUTCOMES)[number];
@@ -342,45 +644,117 @@ export type ShareOutcome = (typeof SHARE_OUTCOMES)[number];
 /** Most advanced first: selected beats in process, which beats rejected. */
 export const OUTCOME_RANK: Record<ShareOutcome, number> = { selected: 6, in_process: 5, on_hold: 4, unknown: 3, no_show: 2, rejected: 1 };
 
+/**
+ * What the app shows for a candidate at a company (PSM 1.12.0). [outcome] (the 1.10 enum) stays for
+ * older apps: awaiting → in_process, closed → rejected, shared / applied → unknown.
+ *  - awaiting: a round is done (completed, attempted, attended) and its result isn't out;
+ *  - closed:   the requirement is over (closed, filled, "not reached") without this candidate;
+ *  - applied:  in an applications tab, nothing filled in yet (not a profile we shared);
+ *  - shared:   shared, nothing filled in yet.
+ */
+export const SHARE_STATUSES = ["selected", "in_process", "awaiting", "on_hold", "shared", "applied", "closed", "no_show", "rejected"] as const;
+export type ShareStatus = (typeof SHARE_STATUSES)[number];
+
+/** Most advanced first (a candidate's best status across companies). */
+export const STATUS_RANK: Record<ShareStatus, number> = {
+  selected: 9,
+  in_process: 8,
+  awaiting: 7,
+  on_hold: 6,
+  shared: 5,
+  applied: 4,
+  closed: 3,
+  no_show: 2,
+  rejected: 1,
+};
+
+export const isShareStatus = (v: unknown): v is ShareStatus => typeof v === "string" && (SHARE_STATUSES as readonly string[]).includes(v);
+
+/** The 1.10 outcome of a status. */
+export function outcomeOfStatus(s: ShareStatus): ShareOutcome {
+  switch (s) {
+    case "selected":
+    case "rejected":
+    case "no_show":
+    case "on_hold":
+    case "in_process":
+      return s;
+    case "awaiting":
+      return "in_process";
+    case "closed":
+      return "rejected";
+    default:
+      return "unknown";
+  }
+}
+
 const NO_SHOW =
   /\b(absent|no ?show|did ?n ?'?o?t (join|attend|turn up|show up|appear|attempt)|didnt (join|attend|attempt)|not (joined|attended|appeared|turned up|attempted)|dnj)\b/;
+const CLOSED =
+  /\b(requirement|position|role|hiring|job|process|opening|openings|drive|vacancy)( is| has been| was| got)? (closed|cancell?ed|filled|stopped|paused|withdrawn)\b|\bnot reached\b|^closed$|\bposition filled\b/;
 const NEGATIVE =
-  /\b(not|no|non|un) ?(selected|shortlisted|cleared|qualified|interested|a fit|fit|moving forward|moved|progressing|suitable|considered|offer|proceeding|accepted|hired|placed|completed|submitted)\b|\b(did ?n ?'?o?t|didnt) (complete|submit|clear|pass|qualify)\b|\breject|\bfail(ed|s)?\b|\bdisqualif|\bdropped\b|\bdrop ?out\b|\bdeclined\b|\bunsuccessful\b|\b(requirement|position|role|hiring|job|process|opening)( is| has been| was)? (closed|cancelled|canceled)\b/;
+  /\b(not|no|non|un) ?(selected|shortlisted|cleared|qualified|interested|a fit|fit|moving forward|moved|progressing|suitable|considered|offer|proceeding|accepted|hired|placed|completed|submitted)\b|\b(did ?n ?'?o?t|didnt) (complete|submit|clear|pass|qualify)\b|\breject|\bfail(ed|s)?\b|\bdisqualif|\bdropped\b|\bdrop ?out\b|\bdeclined\b|\bunsuccessful\b/;
 const HOLD = /\bhold\b|\bon ?hold\b|\bparked\b/;
 const NEXT = /next round|next stage|\bmoved\b|\bmoving (to|ahead|forward)\b|\bpromoted\b/;
 const STRONG_SELECTED = /\b(hired|offer(ed)?|placed|joined|onboarded|accepted)\b|yet to join|joining (date|on)/;
 const SELECTED = /\bselect(ed|ion)?\b/;
-const IN_PROCESS =
-  /\b(clear(ed)?|shortlist(ed)?|pass(ed)?|qualified|through|scheduled|reschedul\w*|pending|await(ing|ed)?|waiting|in ?pro(gress|cess)|ongoing|yet to|to be|tbd|under review|in review|submitted|attempted|complete(d)?|done|interview(ed|ing)|attended|registered|invited|sent|shared|go ahead|proceed(ed|ing)?|positive)\b|\br\d ?(clear|pass)/;
+const CLEARED = /\b(clear(ed)?|shortlist(ed)?|pass(ed)?|qualified|through|go ahead|proceed(ed|ing)?|positive)\b|\br\d ?(clear|pass)/;
+/** A round took place, its result isn't known yet. */
+const AWAITING =
+  /\b(complete(d)?|done|attempted|attended|appeared|submitted|interviewed|await(ing|ed)?|waiting|pending|under review|in review|results? (awaited|pending)|evaluation)\b/;
+/** Something is coming up or going on: a round to schedule, scheduled, or the process running. */
+const UPCOMING =
+  /\b(scheduled|reschedul\w*|yet to|to be|tbd|invited|registered|sent|shared|in ?pro(gress|cess)|ongoing|interviewing|confirmed|planned)\b/;
 
-/**
- * One cell → an outcome. [kind] "round": "Selected" in a round column means the round was cleared
- * (in process), unless it is the tab's last round; "Yes"/"No" count there too. "final": the Final
- * Status column, where "Selected" means selected.
- */
-export function outcomeOfValue(raw: string, kind: "final" | "round" = "final", lastRound = false): ShareOutcome {
-  const s = String(raw ?? "")
+/** What one cell says. Decisive values decide a candidate's status; weak ones only say a round is on or done. */
+export interface CellSignal {
+  status: ShareStatus;
+  decisive: boolean;
+  /** A cleared round (the candidate moves on). */
+  cleared?: boolean;
+}
+
+const normValue = (raw: string) =>
+  String(raw ?? "")
     .normalize("NFKC")
     .replace(/[‘’ʼ`]/g, "'")
     .toLowerCase()
     .replace(/\s+/g, " ")
     .trim();
-  if (!s) return "unknown";
-  if (NO_SHOW.test(s)) return /panel|interviewer/.test(s) ? "in_process" : "no_show";
-  if (NEGATIVE.test(s)) return "rejected";
-  if (HOLD.test(s)) return "on_hold";
-  if (NEXT.test(s)) return "in_process";
-  if (STRONG_SELECTED.test(s)) return "selected";
-  if (SELECTED.test(s)) return kind === "final" || lastRound ? "selected" : "in_process";
-  if (IN_PROCESS.test(s)) return "in_process";
+
+/** A screening-type round ("Resume Shortlisted", "Screening Round"): "Selected" there is never the offer. */
+const SCREENING_ROUND = /resume|shortlist|screening|application|profile/i;
+
+/**
+ * One cell → a signal, or null when it says nothing about the process (a name, a date, a score).
+ * [kind] "round": "Selected" means the round was cleared, unless it is the tab's last (non-screening)
+ * round; "Yes" / "No" count. "final": the Final Status column, where "Selected" means selected.
+ */
+export function cellSignal(raw: string, kind: "final" | "round" = "final", lastRound = false): CellSignal | null {
+  const s = normValue(raw);
+  if (!s) return null;
+  if (NO_SHOW.test(s)) return /panel|interviewer/.test(s) ? { status: "in_process", decisive: false } : { status: "no_show", decisive: true };
+  if (CLOSED.test(s)) return { status: "closed", decisive: true };
+  if (NEGATIVE.test(s)) return { status: "rejected", decisive: true };
+  if (HOLD.test(s)) return { status: "on_hold", decisive: true };
+  if (NEXT.test(s)) return { status: "in_process", decisive: true, cleared: true };
+  if (STRONG_SELECTED.test(s)) return { status: "selected", decisive: true };
+  if (SELECTED.test(s)) return kind === "final" || lastRound ? { status: "selected", decisive: true } : { status: "in_process", decisive: true, cleared: true };
+  if (CLEARED.test(s)) return { status: "in_process", decisive: true, cleared: true };
+  if (AWAITING.test(s)) return { status: "awaiting", decisive: false };
+  if (UPCOMING.test(s)) return { status: "in_process", decisive: false };
   if (kind === "round") {
-    if (/^(yes|y|ok|okay)$/.test(s)) return "in_process";
-    if (/^(no|n)$/.test(s)) return "rejected";
+    if (/^(yes|y|ok|okay)$/.test(s)) return { status: "in_process", decisive: true, cleared: true };
+    if (/^(no|n)$/.test(s)) return { status: "rejected", decisive: true };
   }
-  return "unknown";
+  return null;
 }
 
-const SCREENING_ROUND = /resume|shortlist|screening|application|profile/i;
+/** One cell → the 1.10 outcome (kept for the dry-run script and older callers). */
+export function outcomeOfValue(raw: string, kind: "final" | "round" = "final", lastRound = false): ShareOutcome {
+  const sig = cellSignal(raw, kind, lastRound);
+  return sig ? outcomeOfStatus(sig.status) : "unknown";
+}
 
 /**
  * The rounds in the order they happen: resume shortlisting / screening first (some sheets put
@@ -393,36 +767,77 @@ function logical<T extends { name: string }>(rounds: T[]): T[] {
     .map((x) => x.r);
 }
 
+const clipLabel = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+const roundLabel = (r: Round) => clipLabel(`${r.name} · ${clipLabel(r.value, 40)}`, 80);
+
+export interface ShareVerdict {
+  /** From the candidate's row only (the company's state is applied later: effectiveStatus). */
+  status: ShareStatus;
+  /** The cell that decided it: "TR Round 1 · Rejected", "HR Round · Yet to Schedule", "Selected", "Shared". */
+  stage: string;
+}
+
 /**
- * The share's outcome: from Final Status first, otherwise from the latest non-empty round (the
- * latest one that says something, when the last one is a typed name or a note). [lastRoundName] is
- * the tab's last round column, where "Selected" means selected.
+ * A candidate's status in one company tab.
+ *  1. Final Status, when it says something decisive (Selected, Hired, Rejected, Hold, Not reached…).
+ *  2. Otherwise the latest decisive round (from the last round back). A weak value after it ("Done",
+ *     "Completed & Waiting for Results", "Yet to Schedule") never reopens a rejection or a no show;
+ *     after a cleared round it tells what is happening now (awaiting a result / the next round).
+ *  3. Only weak values: the latest one. Nothing at all: shared.
+ * [lastRoundName]: the tab's last round column, where "Selected" means selected (never a screening round).
  */
-export function shareOutcome(rounds: Round[], finalStatus: string, lastRoundName?: string): ShareOutcome {
-  if (finalStatus) {
-    const f = outcomeOfValue(finalStatus, "final");
-    if (f !== "unknown") return f;
-  }
+export function shareVerdict(rounds: Round[], finalStatus: string, lastRoundName?: string): ShareVerdict {
+  const fin = finalStatus ? cellSignal(finalStatus, "final") : null;
+  if (fin?.decisive) return { status: fin.status, stage: clipLabel(finalStatus, 60) };
   const ordered = logical(rounds);
+  let weak: { r: Round; sig: CellSignal } | null = null;
   for (let i = ordered.length - 1; i >= 0; i--) {
     const r = ordered[i];
-    const o = outcomeOfValue(r.value, "round", lastRoundName !== undefined && r.name === lastRoundName);
-    if (o !== "unknown") return o;
+    const last = lastRoundName !== undefined && r.name === lastRoundName && !SCREENING_ROUND.test(r.name);
+    const sig = cellSignal(r.value, "round", last);
+    if (!sig) continue;
+    if (!sig.decisive) {
+      weak ??= { r, sig };
+      continue;
+    }
+    if (sig.cleared && weak) return { status: weak.sig.status, stage: roundLabel(weak.r) };
+    return { status: sig.status, stage: roundLabel(r) };
   }
-  return "unknown";
-}
-
-const clipLabel = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
-
-/** A short label: "Selected", "TR Round 1 · Cleared", "Assignment Round · Pending", "Shared". */
-export function shareStage(rounds: Round[], finalStatus: string): string {
-  if (finalStatus && outcomeOfValue(finalStatus, "final") !== "unknown") return clipLabel(finalStatus, 60);
-  const ordered = logical(rounds);
+  if (weak) return { status: weak.sig.status, stage: roundLabel(weak.r) };
+  if (fin) return { status: fin.status, stage: clipLabel(finalStatus, 60) };
+  if (finalStatus) return { status: "shared", stage: clipLabel(finalStatus, 60) };
   const latest = ordered[ordered.length - 1];
-  if (latest) return clipLabel(`${latest.name} · ${clipLabel(latest.value, 40)}`, 80);
-  if (finalStatus) return clipLabel(finalStatus, 60);
-  return "Shared";
+  return { status: "shared", stage: latest ? roundLabel(latest) : "Shared" };
 }
+
+/** The 1.10 outcome of a share (Final Status first, then the latest decisive round). */
+export function shareOutcome(rounds: Round[], finalStatus: string, lastRoundName?: string): ShareOutcome {
+  return outcomeOfStatus(shareVerdict(rounds, finalStatus, lastRoundName).status);
+}
+
+/** A short label: "Selected", "TR Round 1 · Rejected", "Assignment Round · Pending", "Shared". */
+export function shareStage(rounds: Round[], finalStatus: string, lastRoundName?: string): string {
+  return shareVerdict(rounds, finalStatus, lastRoundName).stage;
+}
+
+/**
+ * The status the app shows: the candidate's own status, then the requirement's state. A candidate
+ * still open (in process, awaiting, shared, applied, on hold) at a closed requirement is closed; at
+ * a requirement on hold, on hold. An applications-tab row with nothing filled in is "applied".
+ */
+export function effectiveStatus(own: ShareStatus, kind: "shared" | "applied", company: MasterState): ShareStatus {
+  const s: ShareStatus = kind === "applied" && own === "shared" ? "applied" : own;
+  const open = s === "in_process" || s === "awaiting" || s === "shared" || s === "applied" || s === "on_hold";
+  if (open && company === "closed") return "closed";
+  if (open && s !== "on_hold" && company === "on_hold") return "on_hold";
+  return s;
+}
+
+/** Still going with that company: in process, awaiting a result, on hold, or shared with no result yet. */
+export const isActiveStatus = (s: ShareStatus) => s === "in_process" || s === "awaiting" || s === "on_hold" || s === "shared";
+
+/** A finished status: selected, rejected, no show or closed. */
+export const isFinalStatus = (s: ShareStatus) => s === "selected" || s === "rejected" || s === "no_show" || s === "closed";
 
 /** The most advanced of several outcomes (null: none). */
 export function bestOutcome(outcomes: ShareOutcome[]): ShareOutcome | null {
@@ -431,7 +846,14 @@ export function bestOutcome(outcomes: ShareOutcome[]): ShareOutcome | null {
   return best;
 }
 
-/** Still going: not finished (selected / rejected / no show), and the company hasn't closed the requirement. */
+/** The most advanced of several statuses (null: none). */
+export function bestStatus(statuses: ShareStatus[]): ShareStatus | null {
+  let best: ShareStatus | null = null;
+  for (const s of statuses) if (!best || STATUS_RANK[s] > STATUS_RANK[best]) best = s;
+  return best;
+}
+
+/** Still going (1.10 callers): not finished, and the company hasn't closed the requirement. */
 export const isActiveShare = (outcome: ShareOutcome, masterFinalStatus: string) =>
   (outcome === "in_process" || outcome === "on_hold" || outcome === "unknown") && !masterClosed(masterFinalStatus);
 
@@ -481,6 +903,8 @@ export interface ShareRecord {
   finalStatus: string;
   stage: string;
   outcome: ShareOutcome;
+  /** The candidate's own status in this tab (before the requirement's state). */
+  status: ShareStatus;
   hash: string;
   resumeAt: number | null;
 }
@@ -530,6 +954,7 @@ export function buildShares(sheet: Pick<MasterSheet, "company" | "roles">, tabs:
       academyRows++;
       const prev = byUid.get(m.uid);
       if (prev && prev.rounds.length + (prev.finalStatus ? 1 : 0) >= row.rounds.length + (row.finalStatus ? 1 : 0)) continue;
+      const verdict = shareVerdict(row.rounds, row.finalStatus, lastRound);
       byUid.set(m.uid, {
         tab,
         gid: Number.isInteger(p.info.gid) ? p.info.gid : null,
@@ -539,8 +964,9 @@ export function buildShares(sheet: Pick<MasterSheet, "company" | "roles">, tabs:
         role,
         rounds: row.rounds,
         finalStatus: row.finalStatus,
-        stage: shareStage(row.rounds, row.finalStatus),
-        outcome: shareOutcome(row.rounds, row.finalStatus, lastRound),
+        stage: verdict.stage,
+        outcome: outcomeOfStatus(verdict.status),
+        status: verdict.status,
         hash: shareHash(row.rounds, row.finalStatus),
         resumeAt: row.resumeAt,
       });
@@ -737,6 +1163,12 @@ export interface ShareDto {
   finalStatus: string;
   stage: string;
   outcome: ShareOutcome;
+  /** 1.12.0: the chip to show (the candidate's status, then the requirement's state). */
+  status: ShareStatus;
+  /** 1.12.0: "applied" when the row is in an applications tab. */
+  kind: "shared" | "applied";
+  /** 1.12.0: the master's Final Status for this requirement ("" when unknown). */
+  companyStatus: string;
   updatedAt: string;
 }
 
@@ -751,8 +1183,16 @@ export interface ShareRowLike {
   final_status: string;
   stage: string;
   outcome: string;
+  /** Migration 022: the candidate's own status as computed at the last read (null before it). */
+  status?: string | null;
   first_seen_at: Date;
   changed_at: Date;
+}
+
+/** The requirement a share belongs to, for its company state. */
+export interface ShareCompany {
+  state: MasterState;
+  statusText: string;
 }
 
 const isOutcome = (v: string): v is ShareOutcome => (SHARE_OUTCOMES as readonly string[]).includes(v);
@@ -767,7 +1207,23 @@ export function roundsOf(raw: unknown): Round[] {
     .slice(0, MAX_ROUNDS);
 }
 
-export function shareDto(r: ShareRowLike): ShareDto {
+/**
+ * The candidate's own status of a stored row: the one stored at the last read (current rules), else
+ * worked out again from its rounds (rows read before migration 022; "Selected" in the tab's last
+ * round was stored as selected, so a stored selected stays selected).
+ */
+export function ownStatusOf(r: Pick<ShareRowLike, "rounds" | "final_status" | "outcome" | "status">): { status: ShareStatus; stage: string | null } {
+  if (isShareStatus(r.status)) return { status: r.status, stage: null };
+  const rounds = roundsOf(r.rounds);
+  const lastName = r.outcome === "selected" ? logical(rounds).at(-1)?.name : undefined;
+  const v = shareVerdict(rounds, r.final_status, lastName);
+  return { status: v.status, stage: v.stage };
+}
+
+export function shareDto(r: ShareRowLike, company?: ShareCompany): ShareDto {
+  const own = ownStatusOf(r);
+  const kind = isApplicationsTab(r.tab) ? "applied" : "shared";
+  const status = effectiveStatus(own.status, kind, company?.state ?? "unknown");
   return {
     id: String(r.id),
     company: r.company,
@@ -777,10 +1233,40 @@ export function shareDto(r: ShareRowLike): ShareDto {
     sharedOn: dayOf(r.first_seen_at),
     rounds: roundsOf(r.rounds),
     finalStatus: r.final_status,
-    stage: r.stage,
-    outcome: isOutcome(r.outcome) ? r.outcome : "unknown",
+    stage: own.stage ?? r.stage,
+    outcome: own.stage !== null ? outcomeOfStatus(own.status) : isOutcome(r.outcome) ? r.outcome : "unknown",
+    status,
+    kind,
+    companyStatus: company?.statusText ?? "",
     updatedAt: r.changed_at.toISOString(),
   };
+}
+
+/**
+ * The requirement of a sheet that a share's tab belongs to, when the sheet serves several: the one
+ * whose role words the tab title (or the share's role) holds best (at least half of them), and that
+ * is the only best match. Null when it can't be told; the caller then uses the whole sheet.
+ */
+export function pickRequirement<T extends { role: string; crpMonth: string }>(share: { tab: string; role: string }, reqs: T[]): T | null {
+  if (reqs.length === 1) return reqs[0];
+  if (!reqs.length) return null;
+  const words = (s: string) => new Set(keyText(s).split(" ").filter((w) => w.length > 1 && !["jd", "batch", "intern", "the", "and", "of"].includes(w)));
+  const hay = words(`${share.tab} ${share.role}`);
+  const tabMonth = parseCrpMonth(share.tab)?.month ?? null;
+  let best: { r: T; score: number } | null = null;
+  let tie = false;
+  for (const r of reqs) {
+    const want = [...words(r.role)];
+    if (!want.length) continue;
+    let score = want.filter((w) => hay.has(w)).length / want.length;
+    if (score < 0.5) continue;
+    if (tabMonth !== null && parseCrpMonth(r.crpMonth)?.month === tabMonth) score += 0.25;
+    if (!best || score > best.score) {
+      best = { r, score };
+      tie = false;
+    } else if (score === best.score) tie = true;
+  }
+  return best && !tie ? best.r : null;
 }
 
 /** Newest activity first. */

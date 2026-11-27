@@ -22,6 +22,25 @@ export async function academySchemaReady(): Promise<boolean> {
   return ok;
 }
 
+const gc = globalThis as unknown as { __companiesSchema?: { at: number; ok: boolean } };
+
+/**
+ * Whether migration 022 (requirements, HubSpot deals, tentative starts, company_shares.status) is
+ * applied. Until it is, Companies answers 503 not_ready and the sync keeps the 1.11 behaviour.
+ */
+export async function companiesSchemaReady(): Promise<boolean> {
+  const hit = gc.__companiesSchema;
+  if (hit && (hit.ok || Date.now() - hit.at < RECHECK_MS)) return hit.ok;
+  const rows = await query<{ ok: boolean }>(
+    `select (to_regclass('app.crp_requirements') is not null and to_regclass('app.hubspot_deals') is not null
+             and to_regclass('app.requirement_starts') is not null
+             and exists (select 1 from information_schema.columns where table_schema = 'app' and table_name = 'company_shares' and column_name = 'status')) as ok`,
+  );
+  const ok = Boolean(rows[0]?.ok);
+  gc.__companiesSchema = { at: Date.now(), ok };
+  return ok;
+}
+
 /** "relation app.company_shares does not exist" and the like: the migration isn't applied (yet). */
 export const isMissingSchema = (err: unknown) => /relation "app\.(company_\w+|sync_marks|pool_interview_marks)" does not exist/.test(err instanceof Error ? err.message : String(err));
 

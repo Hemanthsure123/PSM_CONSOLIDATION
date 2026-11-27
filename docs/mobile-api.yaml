@@ -1,9 +1,22 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.11.0
+  version: 1.12.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
+
+    1.12.0 (server side; migration 022, which the server detects: before it, /pool/companies*
+    answers 503 not_ready and the rest keeps working):
+    - Share status: `Share.status` (selected, in_process, awaiting, on_hold, shared, applied, closed,
+      no_show, rejected), `Share.kind` (shared | applied: an applications tab), `Share.companyStatus`.
+      The latest decisive round decides ("Done" / "Completed" after a rejection never reopens it);
+      the requirement's master state then applies (closed → closed, on hold → on_hold).
+      `outcome` keeps its 1.10 values for older apps. `PoolItem.status`, `PoolItem.shares.applied`;
+      `shares.count` / `active` count shared profiles only.
+    - Companies: `GET /pool/companies` (hiring drives with requirements, candidates and checks),
+      `GET /pool/companies/export` (.xlsx), `POST /pool/companies/import` (tentative start dates from
+      the exported file), `PUT /pool/companies/requirements/{key}/tentative-start`,
+      `GET /pool/companies/starts` (Calendar).
 
     1.11.0 (server side; migration 021, which the server detects: before it, "done", the ISE
     auto-assignment and device health stay off and the rest keeps working):
@@ -1616,6 +1629,80 @@ paths:
         "403": { description: "admin_only" }
         "503": { description: "not_ready: migration 020 isn't applied on the server" }
 
+  /pool/companies:
+    get:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.12.0. Every hiring drive Academy assessed candidates were sent to (a company sheet, or a master requirement without one): requirements from the CRPs master, the candidates found in the sheet with their status, verified-against-master checks, JD link or HubSpot nurturing remarks, tentative starts. Everyone sees everything; candidates[].mine marks the caller's. ETag-aware."
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [generatedAt, companies]
+                properties:
+                  generatedAt: { type: string, format: date-time }
+                  sharesSyncedAt: { type: [string, "null"], format: date-time }
+                  companies: { type: array, items: { $ref: "#/components/schemas/Company" } }
+        "304": { description: Unchanged (If-None-Match) }
+        "503": { description: "not_ready: migration 022 isn't applied on the server" }
+
+  /pool/companies/starts:
+    get:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.12.0. Tentative process starts in [from, to] (each optional, at most 400 days), for the Calendar: { starts: [{ key, companyId, company, role, date, by, sheetUrl, crpLabel }] }."
+      parameters:
+        - { name: from, in: query, schema: { type: string, format: date } }
+        - { name: to, in: query, schema: { type: string, format: date } }
+      responses:
+        "200": { description: OK }
+        "400": { description: invalid_range }
+        "503": { description: not_ready }
+
+  /pool/companies/requirements/{key}/tentative-start:
+    put:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.12.0. Sets ({\"date\": \"YYYY-MM-DD\"}, within two years of today) or clears ({\"date\": null}) a requirement's tentative process start. Any active member; audited. 200 { key, tentativeStart: { date, by, at } | null }."
+      parameters:
+        - { name: key, in: path, required: true, schema: { type: string, pattern: "^[0-9a-f]{24}$" } }
+      responses:
+        "200": { description: OK }
+        "400": { description: invalid_date }
+        "404": { description: "not_found: the requirement left the CRPs master" }
+        "503": { description: not_ready }
+
+  /pool/companies/export:
+    get:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.12.0. The Companies list as an .xlsx (one row per requirement Academy candidates went to), with the screen's filters. Sheets: Companies (company, role, job type, CRP month / week, CTC, openings, Academy sent / assessed / non-assessed from the master, assessed found in the company sheet, check, outcome, master status / stage, JD link or HubSpot nurturing remarks and their source, HubSpot deal, company sheet, ISE, Tentative start date (editable), set by, Ref) and About (sources, definitions, sync times)."
+      parameters:
+        - { name: state, in: query, schema: { type: string, enum: [in_progress, waiting, on_hold, done, active, all], default: all } }
+        - { name: from, in: query, schema: { type: string, format: date }, description: "Requirements whose CRP period overlaps [from, to]" }
+        - { name: to, in: query, schema: { type: string, format: date } }
+        - { name: mine, in: query, schema: { type: string, enum: ["0", "1"] } }
+        - { name: sort, in: query, schema: { type: string, enum: [activity, ctc, openings, crp], default: ctc }, description: "ctc: CTC high → low, then openings" }
+        - { name: q, in: query, schema: { type: string, maxLength: 80 } }
+      responses:
+        "200": { description: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet (attachment)" }
+        "400": { description: invalid_filter }
+        "503": { description: not_ready }
+
+  /pool/companies/import:
+    post:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.12.0. multipart/form-data, field file: an exported .xlsx (at most 5 MB). Each row's Tentative start date (found by header, with its Ref) sets that requirement's tentative start; an empty cell changes nothing. 200 { applied, unchanged, unknown, invalid: [{ row, reason }] }."
+      responses:
+        "200": { description: OK }
+        "400": { description: "invalid_file: not an .xlsx, or no Tentative start date / Ref columns" }
+        "413": { description: too_large }
+        "503": { description: not_ready }
+
   /me/notifications:
     get:
       tags: [me]
@@ -2175,7 +2262,9 @@ components:
             active: { type: integer, description: "Still going: outcome in_process / on_hold / unknown, and the master doesn't mark the requirement closed" }
             companies: { type: array, maxItems: 5, items: { type: string }, description: "Distinct companies, newest activity first" }
             latest: { oneOf: [{ $ref: "#/components/schemas/Share" }, { type: "null" }] }
+            applied: { type: integer, description: "1.12.0. Rows in applications tabs with nothing filled in (the candidate applied; not counted in count / active)" }
         stage: { oneOf: [{ $ref: "#/components/schemas/ShareOutcome" }, { type: "null" }], description: "1.10.0. The most advanced outcome across companies (selected > in_process > on_hold > unknown > no_show > rejected); null when never shared" }
+        status: { oneOf: [{ $ref: "#/components/schemas/ShareStatus" }, { type: "null" }], description: "1.12.0. The most advanced status across shared rows (else applications): selected > in_process > awaiting > on_hold > shared > applied > closed > no_show > rejected; null when in no company sheet" }
         updatedAt: { type: string, format: date-time }
     PoolList:
       type: object
@@ -2233,7 +2322,92 @@ components:
         finalStatus: { type: string, description: "As typed; \"\" when blank" }
         stage: { type: string, description: "A short label: \"Selected\", \"TR Round 1 · Cleared\", \"Assignment Round · Pending\", \"Shared\"" }
         outcome: { $ref: "#/components/schemas/ShareOutcome" }
+        status: { $ref: "#/components/schemas/ShareStatus" }
+        kind: { type: string, enum: [shared, applied], description: "1.12.0. applied: the row is in an applications tab (Applied Users, Total Applications, Form Responses …)" }
+        companyStatus: { type: string, description: "1.12.0. The master's Final Status for this requirement (\"\" when unknown)" }
         updatedAt: { type: string, format: date-time, description: "When the rounds or the final status last changed" }
+    ShareStatus:
+      type: string
+      description: "1.12.0. The chip to show. From the Final Status when decisive, else the latest decisive round (rejected, no show, on hold, closed, selected, cleared); weak values (Done, Completed, Attended, Waiting for results, Scheduled, Yet to schedule) never reopen a rejection, and after a cleared round say what is happening now (awaiting a result, or the next round). Then the requirement's master state: an open status at a closed requirement is closed, at a requirement on hold on_hold. applied = an applications-tab row with nothing filled in; shared = nothing filled in."
+      enum: [selected, in_process, awaiting, on_hold, shared, applied, closed, no_show, rejected]
+    Company:
+      type: object
+      description: "1.12.0. A hiring drive. counts / candidates: Academy assessed candidates found in the company sheet (one per candidate). academy: the master's typed counts summed over the requirements."
+      properties:
+        id: { type: string, description: "The sheet id, or req:<key> for a requirement without a sheet" }
+        company: { type: string }
+        sheetUrl: { type: [string, "null"], format: uri }
+        state: { type: string, enum: [in_progress, waiting, on_hold, done], description: "done: the requirement closed or every Academy candidate finished; in_progress: one is in process / awaiting a result; on_hold; waiting: shared, nothing filled in yet" }
+        masterState: { type: string, enum: [open, on_hold, closed, unknown] }
+        statusText: { type: string }
+        stageText: { type: string }
+        crp: { type: object, properties: { from: { type: [string, "null"], format: date }, to: { type: [string, "null"], format: date }, label: { type: string } } }
+        ctc: { type: object, properties: { text: { type: string }, min: { type: [number, "null"] }, max: { type: [number, "null"] } }, description: "LPA" }
+        openings: { type: [integer, "null"] }
+        ise: { type: string }
+        requirements: { type: array, items: { $ref: "#/components/schemas/Requirement" } }
+        counts:
+          type: object
+          properties:
+            candidates: { type: integer }
+            shared: { type: integer }
+            applied: { type: integer }
+            inProcess: { type: integer }
+            awaiting: { type: integer }
+            selected: { type: integer }
+            rejected: { type: integer }
+            noShow: { type: integer }
+            onHold: { type: integer }
+            closed: { type: integer }
+            noUpdate: { type: integer }
+        academy: { type: object, properties: { sent: { type: [integer, "null"] }, assessed: { type: [integer, "null"] }, nonAssessed: { type: [integer, "null"] } } }
+        mine: { type: integer }
+        lastActivityAt: { type: [string, "null"], format: date-time }
+        candidates:
+          type: array
+          items:
+            type: object
+            properties:
+              uid: { type: string }
+              name: { type: string }
+              mentor: { type: [object, "null"], properties: { name: { type: string }, email: { type: [string, "null"] } } }
+              mine: { type: boolean }
+              status: { $ref: "#/components/schemas/ShareStatus" }
+              stage: { type: string }
+              kind: { type: string, enum: [shared, applied] }
+              role: { type: string }
+              sharedOn: { type: [string, "null"], format: date }
+              updatedAt: { type: [string, "null"], format: date-time }
+    Requirement:
+      type: object
+      description: "1.12.0. One CRPs master row."
+      properties:
+        key: { type: string, pattern: "^[0-9a-f]{24}$" }
+        role: { type: string }
+        jobId: { type: string }
+        jobType: { type: string }
+        crpMonth: { type: [string, "null"], description: "\"Nov 2026\"" }
+        crpWeek: { type: [integer, "null"] }
+        crpFrom: { type: [string, "null"], format: date }
+        crpTo: { type: [string, "null"], format: date }
+        ctcText: { type: string }
+        ctcMin: { type: [number, "null"] }
+        ctcMax: { type: [number, "null"] }
+        openings: { type: [integer, "null"] }
+        masterState: { type: string, enum: [open, on_hold, closed, unknown] }
+        finalStatus: { type: string }
+        stage: { type: string }
+        idStatus: { type: string }
+        academySent: { type: [integer, "null"], description: "Master: Total academy pool shared (typed)" }
+        assessedSent: { type: [integer, "null"], description: "Master: No. of Assessed academy shared (typed)" }
+        nonAssessedSent: { type: [integer, "null"], description: "Master: No. of Non Assessed Academy Profiles shared (typed)" }
+        verifiedAssessed: { type: [integer, "null"], description: "Academy assessed found in the company sheet; null when the sheet serves several requirements and the tabs don't say which" }
+        check: { type: string, description: "\"\" when the numbers agree; else a short sentence" }
+        jdUrl: { type: [string, "null"], format: uri }
+        jdSource: { type: [string, "null"], enum: [master, hubspot, null] }
+        remarks: { type: [string, "null"], description: "HubSpot Nurturing Team Remarks, only when there is no JD link (at most 2,000 characters)" }
+        hubspotUrl: { type: [string, "null"], format: uri }
+        tentativeStart: { type: [object, "null"], properties: { date: { type: string, format: date }, by: { type: string }, at: { type: string, format: date-time } } }
     PoolResume:
       type: object
       properties:
