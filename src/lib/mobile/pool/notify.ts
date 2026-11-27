@@ -165,6 +165,8 @@ export interface ShareNotice {
   text: string;
   /** The final status changed (sent first). */
   finalChanged: boolean;
+  /** 1.12.0: "applied" when the row is in an applications tab (the candidate applied; we didn't share them). */
+  kind?: "shared" | "applied";
 }
 
 /** Pushes the share events of one sync run to the candidates' mentors. */
@@ -220,8 +222,13 @@ export async function notifyShareEvents(events: ShareNotice[], run: string): Pro
         name,
         company: e.company,
         role: e.role,
-        title: clip(`Shared with ${e.company} · ${name}`, 200),
-        body: clip(`${e.role && e.role !== "—" ? `${e.role}. ` : ""}Follow the rounds in the app.`, 1000),
+        title: clip(e.kind === "applied" ? `Applied to ${e.company} · ${name}` : `Shared with ${e.company} · ${name}`, 200),
+        body: clip(
+          e.kind === "applied"
+            ? "In the company sheet's applications. Not shared by the team yet."
+            : `${e.role && e.role !== "—" ? `${e.role}. ` : ""}Follow the rounds in the app.`,
+          1000,
+        ),
       },
     }));
   }

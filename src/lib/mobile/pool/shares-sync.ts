@@ -12,6 +12,7 @@ import {
   type BuiltSheet,
   diffShares,
   inferCrpYear,
+  isApplicationsTab,
   type MasterParse,
   type MasterRequirement,
   type MasterSheet,
@@ -53,7 +54,9 @@ export const SHARES_EVERY_MS = 60 * 60_000;
 export const SHARES_RETRY_AFTER_FAILURE_MS = 15 * 60_000;
 export const SHARES_MANUAL_MIN_MS = 5 * 60_000;
 const STALE_MS = 24 * 3_600_000;
-const LEASE_MS = 45 * 60_000;
+// A run takes 2–10 minutes (100 sheets at 40 reads a minute, then HubSpot). A run cut off by a restart or a
+// deploy keeps its "running" row; after this long the next run takes over and marks it interrupted.
+const LEASE_MS = 20 * 60_000;
 export const MAX_SHEETS_PER_RUN = 100;
 export const SHEETS_PER_MINUTE = 40;
 const MAX_TABS = 40;
@@ -375,7 +378,8 @@ async function runSync(by: string): Promise<SharesSyncResult> {
       return 0;
     });
     // HubSpot (GET only): the JD link / Nurturing Team Remarks of each requirement's deal. Never fails the run.
-    if (companies) await refreshHubspotDeals(master.requirements.map((r) => r.hubspotDealId ?? "").filter(Boolean));
+    // Newest requirements first (the master grows downwards), so this month's deals are read first.
+    if (companies) await refreshHubspotDeals([...master.requirements].reverse().map((r) => r.hubspotDealId ?? "").filter(Boolean));
     await finish("succeeded");
     if (out.sheetsRead || out.changes || out.errors) {
       console.log(`[shares] ${out.sheetsChecked} sheets checked, ${out.sheetsRead} read, ${out.rowsMatched} Academy rows, ${out.changes} changes, ${out.errors} unreadable, ${out.pushed} pushes`);
@@ -623,6 +627,7 @@ export async function writeSheet(
         hash: e.share.hash,
         text: e.type === "status" ? statusChangeText(e.prev, e.share) : "",
         finalChanged: e.type === "status" && e.prev.finalStatus.toLowerCase() !== e.share.finalStatus.toLowerCase(),
+        kind: isApplicationsTab(e.share.tab) ? "applied" : "shared",
       });
     }
     return { changes: diff.events.length + diff.removed.length, notices };
