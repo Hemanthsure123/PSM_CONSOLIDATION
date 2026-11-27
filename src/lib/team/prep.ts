@@ -92,24 +92,43 @@ export interface CandidateContact {
 }
 
 /** Four lookups at a time, in the order given. */
+/** A guidance or job lookup answers within this, even on a cold start (the rest come back empty). */
+const LOOKUP_BUDGET_MS = 40_000;
+
 async function lookUp(rows: PrepRow[]): Promise<CandidateContact[]> {
-  const out: CandidateContact[] = new Array(rows.length);
+  const base = (p: PrepRow) => ({ prepId: p.key, candidate: p.candidate, company: p.company, round: normRound(p.round) });
+  const out: (CandidateContact | undefined)[] = new Array(rows.length);
   let next = 0;
   const worker = async () => {
     while (next < rows.length) {
       const i = next++;
       const p = rows[i];
-      out[i] = {
-        prepId: p.key,
-        candidate: p.candidate,
-        company: p.company,
-        round: normRound(p.round),
-        contact: await findCandidateEmail(p.jobId, { name: p.candidate, phone: p.phone, resumeUrl: p.resumeUrl }),
-      };
+      const contact = await findCandidateEmail(p.jobId, { name: p.candidate, phone: p.phone, resumeUrl: p.resumeUrl }).catch(() => ({
+        email: null,
+        status: "unreadable" as const,
+        source: null,
+        matchedBy: null,
+      }));
+      out[i] = { ...base(p), contact };
     }
   };
-  await Promise.all(Array.from({ length: Math.min(4, rows.length) }, worker));
-  return out;
+  let timer: NodeJS.Timeout | undefined;
+  const timeUp = new Promise<void>((resolve) => {
+    timer = setTimeout(resolve, LOOKUP_BUDGET_MS);
+  });
+  await Promise.race([Promise.all(Array.from({ length: Math.min(6, rows.length) }, worker)), timeUp]);
+  clearTimeout(timer);
+  next = rows.length; // stop the workers from starting more
+  return rows.map(
+    (p, i) => out[i] ?? { ...base(p), contact: { email: null, status: "unreadable", source: "Still looking: try again in a minute", matchedBy: null } },
+  );
+}
+
+/** Reads the drill-down and the contact sources once after a start, so the first person waits less. */
+export async function warmPrepLookups(): Promise<void> {
+  await readPrepSnapshot().catch(() => undefined);
+  const { warmContacts } = await import("@/lib/team/contacts");
+  await warmContacts().catch(() => undefined);
 }
 
 /** Emails for the candidates picked for a guidance session (any companies), at most 100. */

@@ -16,5 +16,10 @@ export async function register() {
     startKeepAwake();
     const { ensureAdminKeys } = await import("./lib/admin/api-keys");
     void ensureAdminKeys().catch(() => undefined);
+    // The first guidance / Meet lookup after a deploy or restart reads every contact source cold:
+    // read them now, in the background, so the first person waits seconds, not a minute.
+    setTimeout(() => {
+      void import("./lib/team/prep").then((m) => m.warmPrepLookups()).catch(() => undefined);
+    }, 20_000).unref?.();
   }
 }

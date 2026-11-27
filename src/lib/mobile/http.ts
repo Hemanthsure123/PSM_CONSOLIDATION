@@ -23,7 +23,33 @@ type Handler<P> = (req: Request, ctx: MobileRequestContext, params: P) => Promis
  * removed or deactivated since sign-in is refused at once), and turns thrown errors into the
  * contract's error shape without leaking internals.
  */
+/** Requests slower than this are logged (with failures), so slow screens can be traced. */
+const SLOW_MS = 8_000;
+
+/** "[api] POST /api/mobile/v1/preps/contacts 200 9.4s" for failures and slow answers only. */
+function logRequest(req: Request, status: number, startedAt: number): void {
+  const ms = Date.now() - startedAt;
+  if (status < 500 && ms < SLOW_MS) return;
+  let path = "";
+  try {
+    path = new URL(req.url).pathname;
+  } catch {
+    path = "?";
+  }
+  console.warn(`[api] ${req.method} ${path} ${status} ${(ms / 1000).toFixed(1)}s`);
+}
+
 export function withUser<P = Record<string, string>>(handler: Handler<P>, opts: { admin?: boolean } = {}) {
+  const inner = withUserInner(handler, opts);
+  return async (req: Request, route: { params: P | Promise<P> }): Promise<Response> => {
+    const startedAt = Date.now();
+    const res = await inner(req, route);
+    logRequest(req, res.status, startedAt);
+    return res;
+  };
+}
+
+function withUserInner<P = Record<string, string>>(handler: Handler<P>, opts: { admin?: boolean } = {}) {
   return async (req: Request, route: { params: P | Promise<P> }): Promise<Response> => {
     if (!databaseConfigured()) return fail(503, "The server's database isn't configured.", "db_unavailable");
     const header = req.headers.get("authorization") ?? "";

@@ -233,8 +233,14 @@ async function assessmentIndex(): Promise<AssessmentIndex> {
     const rows: { label: string; order: number; phone: string; uid: string; email: string }[] = [];
     const list = await assessmentSheets();
     await Promise.all(
-      list.map(async (s, order) => {
+      list.map(async (configured, order) => {
         try {
+          const tab = await resolveTab(configured.spreadsheetId, configured.tab);
+          if (!tab) {
+            console.warn("[contacts] assessment tab not found:", configured.label);
+            return;
+          }
+          const s = { ...configured, tab };
           const head = await withSheetsRetry(() => sheets.spreadsheets.values.get({ spreadsheetId: s.spreadsheetId, range: `${q(s.tab)}!A1:CZ3` }));
           const values = head.data.values ?? [];
           for (let r = 0; r < values.length; r++) {
@@ -264,7 +270,7 @@ async function assessmentIndex(): Promise<AssessmentIndex> {
             break;
           }
         } catch (err) {
-          console.warn("[contacts] assessment sheet unreadable:", s.label, err instanceof Error ? err.message.slice(0, 120) : err);
+          console.warn("[contacts] assessment sheet unreadable:", configured.label, err instanceof Error ? err.message.slice(0, 120) : err);
         }
       }),
     );
@@ -356,6 +362,46 @@ export async function findCandidateEmail(jobId: string, candidate: { name: strin
     if (fromResume) return { email: fromResume, status: "found", source: "Candidate's resume", matchedBy: "resume" };
   }
   return company;
+}
+
+const gt = globalThis as unknown as { __tabTitles?: Map<string, { at: number; titles: string[] }> };
+
+/** Words of a tab name, for matching a renamed tab ("All Assessment Cleared PII DATA - 2027" → all, assessment, …). */
+export const tabWords = (t: string) => t.toLowerCase().split(/[^a-z0-9]+/).filter((w) => w.length > 1);
+
+/**
+ * The tab to read: [wanted] when the sheet still has it; otherwise the tab sharing most of its
+ * words (at least half, and "pii" must match when wanted has it). Null when none fits. Pure.
+ */
+export function pickTab(titles: string[], wanted: string): string | null {
+  if (titles.includes(wanted)) return wanted;
+  const want = tabWords(wanted);
+  if (!want.length) return null;
+  let best: { title: string; score: number } | null = null;
+  for (const title of titles) {
+    const words = new Set(tabWords(title));
+    if (want.includes("pii") !== words.has("pii")) continue;
+    const score = want.filter((w) => words.has(w)).length / want.length;
+    if (score >= 0.5 && (!best || score > best.score)) best = { title, score };
+  }
+  return best?.title ?? null;
+}
+
+async function resolveTab(spreadsheetId: string, wanted: string): Promise<string | null> {
+  const cache = (gt.__tabTitles ??= new Map());
+  let hit = cache.get(spreadsheetId);
+  if (!hit || Date.now() - hit.at > 6 * 3600_000) {
+    const meta = await withSheetsRetry(() => getSheetsWriter().spreadsheets.get({ spreadsheetId, fields: "sheets(properties(title))" }));
+    hit = { at: Date.now(), titles: (meta.data.sheets ?? []).map((t) => t.properties?.title ?? "").filter(Boolean) };
+    cache.set(spreadsheetId, hit);
+  }
+  return pickTab(hit.titles, wanted);
+}
+
+/** Builds the CRPs index and the assessment index ahead of the first lookup (after a start). */
+export async function warmContacts(): Promise<void> {
+  await crpIndex().catch(() => undefined);
+  await assessmentIndex().catch(() => undefined);
 }
 
 export function forgetContacts(): void {
