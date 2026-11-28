@@ -4,8 +4,10 @@ import { query, transaction } from "@/lib/db/client";
 import { env } from "@/lib/env";
 import { UserError } from "@/lib/mobile/http";
 import { refreshHubspotDeals } from "@/lib/hubspot/deals";
+import { poolLookup } from "@/lib/mobile/pool/applications";
+import { syncApplications } from "@/lib/mobile/pool/applications-sync";
 import { notifyShareEvents, type ShareNotice } from "@/lib/mobile/pool/notify";
-import { academySchemaReady, companiesSchemaReady, hasRunBefore } from "@/lib/mobile/pool/schema";
+import { academySchemaReady, companiesSchemaReady, feedbackSchemaReady, hasRunBefore } from "@/lib/mobile/pool/schema";
 import {
   baselineSharedAt,
   buildShares,
@@ -66,10 +68,13 @@ const LOCK = 74_210_020;
 const MASTER_ID = "1y1FgqMNvSFR8f3HRHlb4RYP1rDIDfRTYN5GwD6IXg7U";
 
 /**
- * The version of the reading rules (round columns, statuses). When it changes, every sheet is read
- * again once, silently: rows that look different only because the rules changed send no pushes.
+ * The version of the reading rules (round columns, statuses, what is stored). When it changes, every
+ * sheet is read again once, silently: rows that look different only because the rules changed send
+ * no pushes. 1.13.0 ("resume"): rows keep their resume link. That version is only used once migration
+ * 023 has added the column, so a deploy before the migration doesn't use up the re-read.
  */
 export const SHARE_RULES_VERSION = "2026-11-27.status";
+export const SHARE_RULES_VERSION_RESUME = "2026-11-28.resume";
 
 /** The master sheet and tab (ACADEMY_CRP_SHEET / ACADEMY_CRP_TAB override them). */
 export function crpMaster(): { spreadsheetId: string; tab: string } {
@@ -295,11 +300,12 @@ async function runSync(by: string): Promise<SharesSyncResult> {
     if (!master.sheets.length) throw new Error("The CRPs tab lists no company sheets; nothing was changed.");
     await saveMaster(master.sheets);
     const companies = await companiesSchemaReady().catch(() => false);
+    const feedback = companies && (await feedbackSchemaReady().catch(() => false));
     if (companies) {
-      await saveRequirements(master.requirements).catch((err) => console.warn("[shares] requirements not saved:", short(err)));
+      await saveRequirements(master.requirements, new Date(), { withInternal: feedback }).catch((err) => console.warn("[shares] requirements not saved:", short(err)));
     }
     // When the reading rules change, every sheet is read again once (silently, see SHARE_RULES_VERSION).
-    const rulesAt = companies ? await rulesChangedAt().catch(() => null) : null;
+    const rulesAt = companies ? await rulesChangedAt(feedback ? SHARE_RULES_VERSION_RESUME : SHARE_RULES_VERSION).catch(() => null) : null;
 
     const people = await query<{ uid: string; phone: string | null; email: string | null }>("select uid, phone, email from app.pool_candidates where removed_at is null");
     if (people.length < 10) throw new Error("The Academy pool has fewer than 10 candidates; the shares were left as they are.");
@@ -361,6 +367,7 @@ async function runSync(by: string): Promise<SharesSyncResult> {
           modifiedAt: meta.ok ? meta.modifiedAt : null,
           createdAt: meta.ok ? meta.createdAt : null,
           withStatus: companies,
+          withResume: feedback,
         });
         out.sheetsRead++;
         out.rowsMatched += built.academyRows;
@@ -377,6 +384,11 @@ async function runSync(by: string): Promise<SharesSyncResult> {
       console.warn("[shares] pushes failed:", short(err));
       return 0;
     });
+    // 1.13.0: the requirements' internal sheets (applications). Never fails the run.
+    if (feedback) {
+      const apps = await syncApplications({ requirements: master.requirements, pool: poolLookup(people), pace, driveCheck: driveMeta, rulesAt });
+      out.errors += apps.errors;
+    }
     // HubSpot (GET only): the JD link / Nurturing Team Remarks of each requirement's deal. Never fails the run.
     // Newest requirements first (the master grows downwards), so this month's deals are read first.
     if (companies) await refreshHubspotDeals([...master.requirements].reverse().map((r) => r.hubspotDealId ?? "").filter(Boolean));
@@ -427,8 +439,8 @@ export async function saveMaster(sheets: MasterSheet[]): Promise<void> {
 }
 
 /** When the current reading rules were first used (recorded on the first run under them). */
-async function rulesChangedAt(): Promise<Date | null> {
-  const name = `shares:rules:${SHARE_RULES_VERSION}`.slice(0, 80);
+async function rulesChangedAt(version: string): Promise<Date | null> {
+  const name = `shares:rules:${version}`.slice(0, 80);
   await query("insert into app.sync_marks (name) values ($1) on conflict (name) do nothing", [name]);
   const [row] = await query<{ at: Date }>("select at from app.sync_marks where name = $1", [name]);
   return row?.at ?? null;
@@ -439,14 +451,15 @@ async function rulesChangedAt(): Promise<Date | null> {
  * seen with that month text (a CRP "Nov" stays Nov 2026 years later). Rows no longer in the master
  * are deleted, unless the read looks broken (fewer than half the rows stored).
  */
-export async function saveRequirements(reqs: MasterRequirement[], now = new Date()): Promise<void> {
+export async function saveRequirements(reqs: MasterRequirement[], now = new Date(), opts: { withInternal?: boolean } = {}): Promise<void> {
   if (!reqs.length) return;
-  const year = (r: MasterRequirement) => {
-    const m = parseCrpMonth(r.crpMonth);
+  const yearOf = (month: string) => {
+    const m = parseCrpMonth(month);
     if (!m) return null;
     const y = m.year ?? inferCrpYear(m.month, now);
     return y >= 2020 && y <= 2100 ? y : null;
   };
+  const year = (r: MasterRequirement) => yearOf(r.crpMonth);
   const rows = reqs.map((r) => ({
     key: r.key,
     row_index: r.row,
@@ -475,23 +488,34 @@ export async function saveRequirements(reqs: MasterRequirement[], now = new Date
     jd_url: r.jdUrl && r.jdUrl.length <= 2000 ? r.jdUrl : null,
     hubspot_url: r.hubspotUrl && r.hubspotUrl.length <= 2000 ? r.hubspotUrl : null,
     hubspot_deal_id: r.hubspotDealId,
+    ...(opts.withInternal ? { internal_sheet_id: r.internalSheetId, id_month: r.idMonth.slice(0, 40), id_year: yearOf(r.idMonth) } : {}),
   }));
   await transaction(async (tx) => {
     const cols = Object.keys(rows[0]);
-    const types: Record<string, string> = { row_index: "integer", crp_year: "integer", crp_week: "integer", openings: "integer", academy_sent: "integer", assessed_sent: "integer", non_assessed_sent: "integer" };
+    const types: Record<string, string> = {
+      row_index: "integer",
+      crp_year: "integer",
+      crp_week: "integer",
+      openings: "integer",
+      academy_sent: "integer",
+      assessed_sent: "integer",
+      non_assessed_sent: "integer",
+      id_year: "integer",
+    };
     await tx.query(
       `insert into app.crp_requirements (${cols.join(", ")})
        select ${cols.join(", ")} from jsonb_to_recordset($1::jsonb) as x(${cols.map((c) => `${c} ${types[c] ?? "text"}`).join(", ")})
        on conflict (key) do update set
          ${cols
-           .filter((c) => c !== "key" && c !== "crp_year")
+           .filter((c) => c !== "key" && c !== "crp_year" && c !== "id_year")
            .map((c) => `${c} = excluded.${c}`)
            .join(", ")},
          crp_year = case when app.crp_requirements.crp_month = excluded.crp_month and app.crp_requirements.crp_year is not null
                          then app.crp_requirements.crp_year else excluded.crp_year end,
+         ${cols.includes("id_year") ? `id_year = case when app.crp_requirements.id_month = excluded.id_month and app.crp_requirements.id_year is not null then app.crp_requirements.id_year else excluded.id_year end,` : ""}
          listed_at = now(),
-         updated_at = case when (${cols.filter((c) => c !== "key" && c !== "crp_year").map((c) => `app.crp_requirements.${c}`).join(", ")})
-                                is distinct from (${cols.filter((c) => c !== "key" && c !== "crp_year").map((c) => `excluded.${c}`).join(", ")})
+         updated_at = case when (${cols.filter((c) => c !== "key" && c !== "crp_year" && c !== "id_year").map((c) => `app.crp_requirements.${c}`).join(", ")})
+                                is distinct from (${cols.filter((c) => c !== "key" && c !== "crp_year" && c !== "id_year").map((c) => `excluded.${c}`).join(", ")})
                            then now() else app.crp_requirements.updated_at end`,
       [JSON.stringify(rows)],
     );
@@ -531,6 +555,8 @@ export async function writeSheet(
     createdAt: Date | null;
     /** Migration 022 is applied: store each row's status. */
     withStatus?: boolean;
+    /** Migration 023 is applied: store each row's resume link. */
+    withResume?: boolean;
   },
 ): Promise<{ changes: number; notices: ShareNotice[] }> {
   return transaction(async (tx) => {
@@ -570,17 +596,19 @@ export async function writeSheet(
     for (let i = 0; i < rows.length; i += 300) {
       const c = rows.slice(i, i + 300);
       const ws = Boolean(opts.withStatus);
+      // The resume link is only stored with the status (migration 023 comes after 022).
+      const wr = ws && Boolean(opts.withResume);
       const res = await tx.query<{ id: string; tab: string; uid: string }>(
-        `insert into app.company_shares (sheet_id, tab, tab_gid, uid, phone, company, role, rounds, final_status, stage, outcome, hash, first_seen_at, changed_at, outcome_at, baseline${ws ? ", status" : ""})
-         select $1, t, gid, u, ph, co, ro, rd::jsonb, fs, st, oc, h, f, ca, oa, b${ws ? ", ss" : ""}
+        `insert into app.company_shares (sheet_id, tab, tab_gid, uid, phone, company, role, rounds, final_status, stage, outcome, hash, first_seen_at, changed_at, outcome_at, baseline${ws ? ", status" : ""}${wr ? ", resume_url" : ""})
+         select $1, t, gid, u, ph, co, ro, rd::jsonb, fs, st, oc, h, f, ca, oa, b${ws ? ", ss" : ""}${wr ? ", ru" : ""}
            from unnest($2::text[], $3::int[], $4::text[], $5::text[], $6::text[], $7::text[], $8::text[], $9::text[], $10::text[], $11::text[], $12::text[],
-                       $13::timestamptz[], $14::timestamptz[], $15::timestamptz[], $16::boolean[]${ws ? ", $17::text[]" : ""})
-             as x(t, gid, u, ph, co, ro, rd, fs, st, oc, h, f, ca, oa, b${ws ? ", ss" : ""})
+                       $13::timestamptz[], $14::timestamptz[], $15::timestamptz[], $16::boolean[]${ws ? ", $17::text[]" : ""}${wr ? ", $18::text[]" : ""})
+             as x(t, gid, u, ph, co, ro, rd, fs, st, oc, h, f, ca, oa, b${ws ? ", ss" : ""}${wr ? ", ru" : ""})
          on conflict (sheet_id, tab, uid) do update set
            tab_gid = excluded.tab_gid, phone = excluded.phone, company = excluded.company, role = excluded.role, rounds = excluded.rounds,
            final_status = excluded.final_status, stage = excluded.stage, outcome = excluded.outcome, hash = excluded.hash,
            first_seen_at = excluded.first_seen_at, changed_at = excluded.changed_at, outcome_at = excluded.outcome_at, baseline = excluded.baseline,
-           ${ws ? "status = excluded.status, " : ""}last_seen_at = now(), removed_at = null
+           ${ws ? "status = excluded.status, " : ""}${wr ? "resume_url = excluded.resume_url, " : ""}last_seen_at = now(), removed_at = null
          returning id::text as id, tab, uid`,
         [
           sheet.sheetId,
@@ -600,6 +628,7 @@ export async function writeSheet(
           c.map((r) => r.outcomeAt),
           c.map((r) => r.baseline),
           ...(ws ? [c.map((r) => r.status)] : []),
+          ...(wr ? [c.map((r) => r.resumeUrl)] : []),
         ],
       );
       for (const r of res.rows) ids.set(`${r.tab}\u0000${r.uid}`, r.id);
@@ -652,7 +681,8 @@ export async function sharesTickIfDue(): Promise<void> {
 
 export interface SharesStatusDto {
   lastRun: { startedAt: string; finishedAt: string | null; status: string; sheetsChecked: number; sheetsRead: number; rowsMatched: number; changes: number; errors: number; error: string | null } | null;
-  unreadable: { company: string; sheetUrl: string; error: string }[];
+  /** Company sheets, then (1.13.0) internal sheets the service account can't read. */
+  unreadable: { company: string; sheetUrl: string; error: string; kind: "company" | "internal" }[];
   running: boolean;
 }
 
@@ -662,11 +692,19 @@ export async function sharesStatus(): Promise<SharesStatusDto> {
     query<{ started_at: Date; finished_at: Date | null; status: string; sheets_checked: number; sheets_read: number; rows_matched: number; changes: number; errors: number; error: string | null }>(
       "select started_at, finished_at, status, sheets_checked, sheets_read, rows_matched, changes, errors, error from app.company_share_syncs order by started_at desc limit 1",
     ),
-    query<{ company: string; sheet_id: string; read_error: string }>(
-      `select company, sheet_id, read_error from app.company_sheets
+    query<{ company: string; sheet_id: string; read_error: string; kind: "company" | "internal" }>(
+      `select company, sheet_id, read_error, 'company' as kind from app.company_sheets
         where read_error is not null and listed_at > now() - interval '3 days' order by lower(company), sheet_id limit 500`,
     ),
   ]);
+  if (await feedbackSchemaReady().catch(() => false)) {
+    unreadable.push(
+      ...(await query<{ company: string; sheet_id: string; read_error: string; kind: "company" | "internal" }>(
+        `select company, sheet_id, read_error, 'internal' as kind from app.internal_sheets
+          where read_error is not null and listed_at > now() - interval '3 days' order by lower(company), sheet_id limit 500`,
+      ).catch(() => [])),
+    );
+  }
   return {
     lastRun: run
       ? {
@@ -681,7 +719,7 @@ export async function sharesStatus(): Promise<SharesStatusDto> {
           error: run.error,
         }
       : null,
-    unreadable: unreadable.map((u) => ({ company: u.company, sheetUrl: sheetUrl(u.sheet_id), error: u.read_error })),
+    unreadable: unreadable.map((u) => ({ company: u.company, sheetUrl: sheetUrl(u.sheet_id), error: u.read_error, kind: u.kind })),
     running: Boolean(g.__sharesRun) || (run?.status === "running" && Date.now() - run.started_at.getTime() < LEASE_MS),
   };
 }

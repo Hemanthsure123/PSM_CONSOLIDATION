@@ -314,6 +314,7 @@ const rec = (uid: string, tabName: string, rounds: Round[], finalStatus = ""): S
   status: shareVerdict(rounds, finalStatus).status,
   hash: shareHash(rounds, finalStatus),
   resumeAt: null,
+  resumeUrl: null,
 });
 const stored = (id: string, r: ShareRecord, removed = false): StoredShare => ({
   id,

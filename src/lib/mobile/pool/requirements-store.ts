@@ -37,6 +37,10 @@ interface ReqRow {
   jd_url: string | null;
   hubspot_url: string | null;
   hubspot_deal_id: string | null;
+  /** Migration 023. */
+  internal_sheet_id?: string | null;
+  id_month?: string;
+  id_year?: number | null;
 }
 
 const toReq = (r: ReqRow): RequirementRecord => ({
@@ -67,6 +71,9 @@ const toReq = (r: ReqRow): RequirementRecord => ({
   jdUrl: r.jd_url,
   hubspotUrl: r.hubspot_url,
   hubspotDealId: r.hubspot_deal_id,
+  internalSheetId: r.internal_sheet_id ?? null,
+  idMonth: r.id_month ?? "",
+  idYear: r.id_year ?? null,
 });
 
 export async function loadRequirements(): Promise<RequirementRecord[]> {

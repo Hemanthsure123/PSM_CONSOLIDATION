@@ -41,6 +41,29 @@ export async function companiesSchemaReady(): Promise<boolean> {
   return ok;
 }
 
+const gf = globalThis as unknown as { __feedbackSchema?: { at: number; ok: boolean } };
+
+/**
+ * Whether migration 023 (internal sheets, applications, company_shares.resume_url, candidate feedback
+ * documents) is applied. Until it is, the applications sync stays off and feedback documents answer
+ * 503 not_ready.
+ */
+export async function feedbackSchemaReady(): Promise<boolean> {
+  const hit = gf.__feedbackSchema;
+  if (hit && (hit.ok || Date.now() - hit.at < RECHECK_MS)) return hit.ok;
+  const rows = await query<{ ok: boolean }>(
+    `select (to_regclass('app.internal_sheets') is not null and to_regclass('app.job_applications') is not null
+             and to_regclass('app.candidate_feedback_docs') is not null and to_regclass('app.candidate_feedback_runs') is not null
+             and exists (select 1 from information_schema.columns where table_schema = 'app' and table_name = 'company_shares' and column_name = 'resume_url')
+             and to_regclass('app.application_reviews') is not null and to_regclass('app.job_comparisons') is not null
+             and exists (select 1 from information_schema.columns where table_schema = 'app' and table_name = 'crp_requirements' and column_name = 'internal_sheet_id')
+             and exists (select 1 from information_schema.columns where table_schema = 'app' and table_name = 'crp_requirements' and column_name = 'id_month')) as ok`,
+  );
+  const ok = Boolean(rows[0]?.ok);
+  gf.__feedbackSchema = { at: Date.now(), ok };
+  return ok;
+}
+
 /** "relation app.company_shares does not exist" and the like: the migration isn't applied (yet). */
 export const isMissingSchema = (err: unknown) => /relation "app\.(company_\w+|sync_marks|pool_interview_marks)" does not exist/.test(err instanceof Error ? err.message : String(err));
 

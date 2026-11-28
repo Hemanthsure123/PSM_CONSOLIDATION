@@ -56,6 +56,11 @@ export interface RequirementRecord {
   jdUrl: string | null;
   hubspotUrl: string | null;
   hubspotDealId: string | null;
+  /** 1.13.0 (migration 023): the requirement's internal sheet; undefined before it. */
+  internalSheetId?: string | null;
+  /** 1.13.0 (migration 023): the month its ID was done, as typed, and that month's year. */
+  idMonth?: string;
+  idYear?: number | null;
 }
 
 export interface DealRecord {

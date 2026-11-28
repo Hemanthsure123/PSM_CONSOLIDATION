@@ -1,9 +1,32 @@
 openapi: 3.1.0
 info:
   title: PSM Shortlisting — mobile API
-  version: 1.12.0
+  version: 1.13.0
   description: |
     The contract between the Android app (private repo `psm-android`) and this server.
+
+    1.13.0 (server side; migration 023, which the server detects: before it, the feedback documents
+    answer 503 not_ready and the rest keeps working):
+    - Applications: the hourly company-sheet run also reads each requirement's internal sheet (CRPs
+      master "Internal sheet Link"): the platform's applicant exports (Job Id, User Id / phone /
+      email, Applied Datetime, Resume Link) and application Google Forms. Only rows matched to the
+      Academy assessed pool (UID, then phone, then email) are stored. Company-sheet rows also keep
+      the resume link that was sent.
+    - Candidate feedback documents ("Resume Rejection Analysis"), for assigned Academy assessed
+      candidates: the server builds a Google Doc for a period (the jobs whose CRP period overlaps
+      it, or whose company ID was done in it — "November CRP + November ID done") from the
+      candidate's applications, the profiles shared, every company result, the drill-down interview
+      dates and a review of each resume used (core skills shown in projects, links, project
+      points), every point checked against the resume text. Where the November Academy review
+      already read an application (its checked resume reads, decisions and assignment results,
+      imported into the server), the document uses that review, and how the candidates the company
+      took forward compared (counts per job only). The assigned mentor (and leads / admins)
+      generates it, reviews / edits it in Google Docs, marks it reviewed, then sends it as a PDF on
+      WhatsApp. `GET|POST /pool/{uid}/feedback-documents`,
+      `GET /pool/feedback-runs/{runId}`, `GET /pool/feedback-documents/{documentId}`,
+      `POST /pool/feedback-documents/{documentId}/edit-access|review|shared`,
+      `GET /pool/feedback-documents/{documentId}/pdf`. PoolDetail `feedbackDocuments`. Push
+      `feedback_doc_ready`.
 
     1.12.0 (server side; migration 022, which the server detects: before it, /pool/companies*
     answers 503 not_ready and the rest keeps working):
@@ -1615,7 +1638,8 @@ paths:
                       error: { type: [string, "null"] }
                   unreadable:
                     type: array
-                    items: { type: object, properties: { company: { type: string }, sheetUrl: { type: string, format: uri }, error: { type: string } } }
+                    description: "1.13.0: internal sheets (applications) are listed too, after the company sheets, with kind internal"
+                    items: { type: object, properties: { company: { type: string }, sheetUrl: { type: string, format: uri }, error: { type: string }, kind: { type: string, enum: [company, internal], description: "1.13.0" } } }
                   running: { type: boolean }
         "403": { description: "admin_only" }
 
@@ -1702,6 +1726,141 @@ paths:
         "400": { description: "invalid_file: not an .xlsx, or no Tentative start date / Ref columns" }
         "413": { description: too_large }
         "503": { description: not_ready }
+
+  /pool/{uid}/feedback-documents:
+    get:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.13.0. The candidate's feedback documents (newest period first), what may be done, the period presets and the latest run (CandidateFeedbackOverview). Anyone signed in may read it."
+      parameters:
+        - { name: uid, in: path, required: true, schema: { type: string } }
+      responses:
+        "200": { description: "CandidateFeedbackOverview", content: { application/json: { schema: { $ref: "#/components/schemas/CandidateFeedbackOverview" } } } }
+        "404": { description: "not_found (not in the pool)" }
+        "503": { description: not_ready }
+    post:
+      tags: [pool]
+      x-phase: P7
+      summary: >
+        1.13.0. Build the feedback document for a period, or rebuild it in place (the same Google Doc and link for the same period;
+        changes made by hand are replaced and it goes back to draft). The period selects the jobs whose CRP period overlaps
+        [from, to] or whose company ID was done in a month of it ("ID Done" in the CRPs master with that ID Month); a job
+        without either: its application (or share) date. Runs in the background (about a minute; resumes are read and
+        reviewed); poll GET /pool/feedback-runs/{runId}. One build per candidate at a time: a build of the same period already
+        in progress is returned as is (202); a build of another period answers 409 run_in_progress.
+      parameters:
+        - { name: uid, in: path, required: true, schema: { type: string } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [from, to]
+              properties:
+                from: { type: string, format: date }
+                to: { type: string, format: date, description: "from ≤ to, at most 366 days, not more than 31 days ahead of today" }
+      responses:
+        "202": { description: "CandidateFeedbackRun", content: { application/json: { schema: { $ref: "#/components/schemas/CandidateFeedbackRun" } } } }
+        "403": { description: "not_your_candidate: only the assigned mentor, leads and admins" }
+        "409": { description: "not_assigned (the candidate has no mentor) / run_in_progress (a build of another period is in progress)" }
+        "422": { description: "invalid_period / no_jobs (no applications or shared profiles in the period)" }
+        "503": { description: "not_ready / team_not_connected" }
+
+  /pool/feedback-runs/{runId}:
+    get:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.13.0. CandidateFeedbackRun: progress (step), done with the document, or failed with a reason. A run the server lost (restart) reads failed. Anyone signed in may read it (the overview shows the latest run too). Unknown or malformed id: 404 not_found."
+      parameters:
+        - { name: runId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "CandidateFeedbackRun", content: { application/json: { schema: { $ref: "#/components/schemas/CandidateFeedbackRun" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /pool/feedback-documents/{documentId}:
+    get:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.13.0. One feedback document (CandidateFeedbackDoc)."
+      parameters:
+        - { name: documentId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: "CandidateFeedbackDoc", content: { application/json: { schema: { $ref: "#/components/schemas/CandidateFeedbackDoc" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /pool/feedback-documents/{documentId}/edit-access:
+    post:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.13.0. Gives the signed-in person (roster email and linked Google accounts) edit access to the Google Doc so it can be reviewed and corrected by hand; { url, title, emails }. Assigned mentor, leads and admins. No request body."
+      parameters:
+        - { name: documentId, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: OK }
+        "403": { description: not_your_candidate }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "502": { description: "share_failed (Google refused every address)" }
+
+  /pool/feedback-documents/{documentId}/review:
+    post:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.13.0. The person read (and corrected) the document: status draft → reviewed (shared stays shared). Returns CandidateFeedbackDoc. Sharing needs this."
+      parameters:
+        - { name: documentId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: false
+        description: "Optional (an empty body is fine). version: the version the person read; when the document was rebuilt since, 409 version_changed and nothing changes."
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                version: { type: integer, minimum: 1 }
+      responses:
+        "200": { description: "CandidateFeedbackDoc" }
+        "403": { description: not_your_candidate }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "version_changed: rebuilt after the person opened it; show the new version" }
+
+  /pool/feedback-documents/{documentId}/pdf:
+    get:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.13.0. The document as it is now in Google Docs (with the reviewer's edits), as a PDF attachment, for sending to the candidate. Only once reviewed."
+      parameters:
+        - { name: documentId, in: path, required: true, schema: { type: string, format: uuid } }
+        - { name: version, in: query, required: false, schema: { type: integer, minimum: 1 }, description: "The version the person reviewed: 409 version_changed when it was rebuilt since" }
+      responses:
+        "200": { description: "application/pdf. Content-Disposition: attachment; filename=\"Resume-Rejection-Analysis-<First>-<Nov-2026>.pdf\" (ASCII); filename*=UTF-8''<Resume Rejection Analysis – <Name> – <Nov 2026>.pdf> (RFC 5987)" }
+        "403": { description: not_your_candidate }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "not_reviewed: mark it reviewed first / version_changed: rebuilt since that version" }
+        "502": { description: "export_failed (Google Docs didn't export it; try again)" }
+
+  /pool/feedback-documents/{documentId}/shared:
+    post:
+      tags: [pool]
+      x-phase: P7
+      summary: "1.13.0. The app opened WhatsApp (or another app's share sheet) with the PDF: { channel: whatsapp|other, version? }. Sent when the share opens (Android gives no reliable 'sent' or 'cancelled'): status → shared, shareCount + 1; a WhatsApp send is also the candidate's last contact. A repeat from the same person within 2 minutes (a retried request) isn't counted again. Returns CandidateFeedbackDoc. (No delivery receipt exists.)"
+      parameters:
+        - { name: documentId, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channel]
+              properties:
+                channel: { type: string, enum: [whatsapp, other] }
+                version: { type: integer, minimum: 1, description: "The version sent: 409 version_changed when it was rebuilt since" }
+      responses:
+        "200": { description: "CandidateFeedbackDoc" }
+        "403": { description: not_your_candidate }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: "not_reviewed / version_changed" }
 
   /me/notifications:
     get:
@@ -2408,6 +2567,100 @@ components:
         remarks: { type: [string, "null"], description: "HubSpot Nurturing Team Remarks, only when there is no JD link (at most 2,000 characters)" }
         hubspotUrl: { type: [string, "null"], format: uri }
         tentativeStart: { type: [object, "null"], properties: { date: { type: string, format: date }, by: { type: string }, at: { type: string, format: date-time } } }
+    CandidateFeedbackStatus:
+      type: string
+      description: "draft: built, not reviewed yet; reviewed: someone marked it reviewed (it can be sent); shared: sent at least once. A rebuild sets draft again."
+      enum: [draft, reviewed, shared]
+    CandidateFeedbackDoc:
+      type: object
+      description: "1.13.0. One candidate's feedback document (\"Resume Rejection Analysis\") for one period. One per candidate and period: a rebuild rewrites the same Google Doc (same link) and adds 1 to version."
+      required: [id, uid, candidate, periodFrom, periodTo, periodLabel, url, title, version, status, createdAt, createdBy, updatedAt, updatedBy, shareCount, counts, notes, whatsappText, canEdit]
+      properties:
+        id: { type: string, format: uuid }
+        uid: { type: string }
+        candidate: { type: string, description: "The candidate's name" }
+        periodFrom: { type: string, format: date }
+        periodTo: { type: string, format: date }
+        periodLabel: { type: string, description: "\"November 2026\", \"Oct–Nov 2026\", \"3 Nov – 20 Nov 2026\"" }
+        url: { type: string, format: uri, description: "The Google Doc (team Drive). Call edit-access before opening it." }
+        title: { type: string }
+        version: { type: integer, minimum: 1 }
+        status: { $ref: "#/components/schemas/CandidateFeedbackStatus" }
+        createdAt: { type: string, format: date-time }
+        createdBy: { type: string, description: "Name" }
+        updatedAt: { type: string, format: date-time, description: "Last built" }
+        updatedBy: { type: string, description: "Name of who built the current version" }
+        reviewedAt: { type: [string, "null"], format: date-time }
+        reviewedBy: { type: [string, "null"], description: "Name" }
+        sharedAt: { type: [string, "null"], format: date-time, description: "Last sent" }
+        sharedBy: { type: [string, "null"], description: "Name" }
+        shareCount: { type: integer, minimum: 0 }
+        counts:
+          type: object
+          description: "What the document says: jobs = selected + awaited + notMovedForward + notKnown"
+          required: [jobs, selected, awaited, notMovedForward, notKnown]
+          properties:
+            jobs: { type: integer }
+            selected: { type: integer, description: "A company took the resume forward (an interview, test or later round)" }
+            awaited: { type: integer }
+            notMovedForward: { type: integer }
+            notKnown: { type: integer, description: "No readable company sheet and the requirement isn't open: check before sending" }
+        notes:
+          type: array
+          description: "For the reviewer, never in the document: results that couldn't be read, resumes that couldn't be opened, jobs without a CRP month … Check them before sending."
+          items: { type: string }
+        whatsappText: { type: string, description: "The suggested message to send with the PDF (the candidate's first name, the period, the sender's name)" }
+        canEdit: { type: boolean, description: "The signed-in person may rebuild, review, open for editing and send it (assigned mentor, lead, admin)" }
+    CandidateFeedbackRun:
+      type: object
+      description: "1.13.0. A build of a feedback document."
+      required: [id, status, step, mode, periodFrom, periodTo, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        status: { type: string, enum: [queued, running, done, failed] }
+        step: { type: string, description: "\"Collecting applications\", \"Reading resumes (3 of 9)\", \"Reviewing resumes\", \"Writing the document\", \"Saving to Google Docs\", \"Done\"" }
+        error: { type: [string, "null"], description: "failed: what went wrong and what to do" }
+        mode: { type: string, enum: [create, update] }
+        periodFrom: { type: string, format: date }
+        periodTo: { type: string, format: date }
+        result:
+          type: [object, "null"]
+          properties:
+            documentId: { type: string, format: uuid }
+            url: { type: string, format: uri }
+            version: { type: integer }
+            warnings: { type: array, items: { type: string } }
+        createdAt: { type: string, format: date-time }
+    CandidateFeedbackPreset:
+      type: object
+      required: [key, label, from, to]
+      properties:
+        key: { type: string, enum: [this_month, last_month, last_2_months, last_3_months] }
+        label: { type: string, description: "\"November 2026\", \"October 2026\", \"Oct–Nov 2026\"" }
+        from: { type: string, format: date }
+        to: { type: string, format: date }
+    CandidateFeedbackOverview:
+      type: object
+      required: [uid, candidate, assigned, canGenerate, google, presets, documents]
+      properties:
+        uid: { type: string }
+        candidate: { type: string }
+        phone: { type: [string, "null"], description: "The candidate's 10-digit mobile number (for the WhatsApp chat), null when the pool has none" }
+        mentor: { type: [string, "null"], description: "The assigned mentor's name (null: unassigned)" }
+        assigned: { type: boolean, description: "The candidate has a mentor (feedback documents are for assigned candidates)" }
+        canGenerate: { type: boolean }
+        blockedReason: { type: [string, "null"], description: "Why canGenerate is false, as a sentence to show" }
+        google:
+          type: object
+          required: [connected]
+          properties:
+            connected: { type: boolean }
+            account: { type: string }
+            status: { type: string, enum: [not_configured, not_connected, connected, broken], description: "Unknown values: treat as not connected" }
+        applicationsSyncedAt: { type: [string, "null"], format: date-time, description: "When the internal sheets were last read (null: not yet)" }
+        presets: { type: array, items: { $ref: "#/components/schemas/CandidateFeedbackPreset" } }
+        documents: { type: array, items: { $ref: "#/components/schemas/CandidateFeedbackDoc" } }
+        run: { oneOf: [{ $ref: "#/components/schemas/CandidateFeedbackRun" }, { type: "null" }], description: "The latest run of the last day (in progress, done or failed), else null" }
     PoolResume:
       type: object
       properties:
@@ -2423,7 +2676,7 @@ components:
         createdAt: { type: string, format: date-time }
     PoolDetail:
       type: object
-      description: "PoolItem's profile fields plus course, specialization, assessments (every attempt), latestAssessments, interviews (null = drill-down unavailable), resumes, meetings [{ id, kind, title, startsAt, endsAt, status, meetUrl, createdByName }], history [{ at, action, value, by, byName }], updatedBy, updatedAt. 1.10.0: mine, canEdit, and shares: Share[] (every company, newest activity first; [] when never shared or never synced)."
+      description: "PoolItem's profile fields plus course, specialization, assessments (every attempt), latestAssessments, interviews (null = drill-down unavailable), resumes, meetings [{ id, kind, title, startsAt, endsAt, status, meetUrl, createdByName }], history [{ at, action, value, by, byName }] (1.13.0 adds action feedback_doc: a feedback document was built, reviewed or sent, value \"Built · Nov 2026\" / \"Built · Nov 2026 (v2)\" / \"Reviewed · Nov 2026 (v2)\" / \"Feedback document sent · Nov 2026 (v2)\", plain text to show as it is; a WhatsApp send is recorded as action whatsapp with the same value), updatedBy, updatedAt. 1.10.0: mine, canEdit, and shares: Share[] (every company, newest activity first; [] when never shared or never synced). 1.13.0: feedbackDocuments: CandidateFeedbackDoc[] (newest period first, at most 5; [] when none or before migration 023)."
     ApiKeyProvider:
       type: object
       required: [id, label]
@@ -2506,6 +2759,13 @@ components:
         FCM **data** message (not a notification message), so the app always builds the notification
         itself: sticky assignment with countdown, re-post on swipe. High priority for assignment,
         reminder and overdue; normal for job updates.
+
+        1.13.0:
+        - `feedback_doc_ready` → the person who asked for a feedback document, when it is built (or
+          rebuilt). Channel "Academy candidates"; tapping opens the candidate's feedback documents.
+          Data: uid, name (the candidate), documentId, url, title ("Feedback document ready" /
+          "Feedback document updated"), body ("<name> · November 2026 · review it before sending").
+          Also in the inbox.
 
         1.11.0 (tasks). Every push also lands in the inbox. Done tasks (POST /tasks/{taskId}/done)
         and delivered ones (shortlist_ready) get no reminder, overdue, escalation or nudge push.
@@ -2596,12 +2856,13 @@ components:
       properties:
         type:
           type: string
-          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest, prep_doc_ready, recording_ready, rsa_ready, meeting_reminder, team_account, admin_notice, app_update, task_unassigned, feedback, pool_assigned, pool_shared, pool_status, pool_interview, pool_meeting, academy_digest, task_done, task_digest]
+          enum: [assignment, reminder, overdue, escalation, job_update, test, prep_assigned, prep_reminder, prep_overdue, prep_escalation, prep_unassigned, interview_checkin, prep_digest, prep_doc_ready, recording_ready, rsa_ready, meeting_reminder, team_account, admin_notice, app_update, task_unassigned, feedback, pool_assigned, pool_shared, pool_status, pool_interview, pool_meeting, academy_digest, task_done, task_digest, feedback_doc_ready]
         taskId: { type: string, description: "Task pushes (incl. task_unassigned)" }
         prepId: { type: string, description: "Prep pushes (prep_*, interview_checkin) prep_doc_ready, recording_ready (the call was added to the sheet), meeting_reminder (when the meeting is a prep's), pool_interview" }
         meetingId: { type: string, description: "meeting_reminder, recording_ready (Meet), pool_meeting" }
         meetUrl: { type: string, format: uri, description: "meeting_reminder: the Join action" }
-        url: { type: string, format: uri, description: "prep_doc_ready, rsa_ready: the document" }
+        url: { type: string, format: uri, description: "prep_doc_ready, rsa_ready, feedback_doc_ready: the document" }
+        documentId: { type: string, format: uuid, description: "1.13.0 feedback_doc_ready: the CandidateFeedbackDoc" }
         candidate: { type: string }
         round: { type: string }
         uid: { type: string, description: "1.10.0 pool_* pushes: the Academy pool candidate (opens GET /pool/{uid})" }

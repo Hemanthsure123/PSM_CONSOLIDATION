@@ -74,6 +74,40 @@ function kindOf(line: string): Kind {
 /** Projects / experience — a labelled "Skills:" line there describes the work, so it stays. */
 const WORK_SECTION = /^(?:.*projects?.*|.*experience.*|internships?.*|employment.*|work history|career history|open[ -]?source.*|contributions|hackathons?)$/;
 
+export interface WorkText {
+  /** Only the projects / experience / internships / open-source sections. */
+  text: string;
+  /** Such sections were found by their headings and the layout can be trusted. */
+  trusted: boolean;
+}
+
+/**
+ * The resume's projects and work only (projects, experience, internships, employment, open source,
+ * hackathons) — what "used in a project" can be checked against. Certifications, education,
+ * achievements and the Skills list are left out. Untrusted (empty text) when no such heading is found
+ * or side-by-side columns interleave the headings.
+ */
+export function workText(resume: string): WorkText {
+  const lines = (resume ?? "").split(/\r?\n/);
+  const kinds = lines.map(kindOf);
+  const headingIdx = kinds.map((k, i) => (k ? i : -1)).filter((i) => i >= 0);
+  const sideBySide = headingIdx.some((i, k) => k > 0 && i === headingIdx[k - 1] + 1 && kinds[i] !== kinds[headingIdx[k - 1]]);
+  const out: string[] = [];
+  let inWork = false;
+  let found = false;
+  lines.forEach((line, i) => {
+    const kind = inWork && kinds[i] === "Summary" ? null : kinds[i];
+    if (kind) {
+      inWork = kind === "keep" && WORK_SECTION.test(headingKey(line));
+      if (inWork) found = true;
+      return;
+    }
+    if (inWork) out.push(line);
+  });
+  if (!found || sideBySide) return { text: "", trusted: false };
+  return { text: out.join("\n"), trusted: true };
+}
+
 export function evidenceText(resume: string): EvidenceText {
   const lines = (resume ?? "").split(/\r?\n/);
   const kinds = lines.map(kindOf);

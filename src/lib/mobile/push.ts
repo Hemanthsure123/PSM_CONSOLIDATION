@@ -40,7 +40,8 @@ export type PushKind =
   | "pool_meeting"
   | "academy_digest"
   | "task_done"
-  | "task_digest";
+  | "task_digest"
+  | "feedback_doc_ready";
 
 const g = globalThis as unknown as { __fcmAuth?: JWT };
 
@@ -119,6 +120,7 @@ export function inboxText(kind: PushKind, d: Record<string, string>): { title: s
     academy_digest: ["Academy candidates", ""],
     task_done: [`${d.by || "A mentor"} finished ${company}'s shortlisting`, "Marked done in the app."],
     task_digest: ["Your tasks", ""],
+    feedback_doc_ready: [`Feedback document ready · ${d.name || "your candidate"}`, "Review it before sending."],
   };
   const [title, body] = t[kind] ?? ["Notification", ""];
   return { title: clip(title, 200), body: clip(body, 1000) };

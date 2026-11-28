@@ -89,6 +89,7 @@ export type MasterField =
   | "passOut"
   | "interviewProcess"
   | "idStatus"
+  | "idMonth"
   | "academySent"
   | "assessedSent"
   | "nonAssessedSent"
@@ -96,6 +97,7 @@ export type MasterField =
   | "crm"
   | "finalStatus"
   | "stage"
+  | "internal"
   | "link";
 
 const MASTER_HEADERS: Record<MasterField, string[]> = {
@@ -114,6 +116,7 @@ const MASTER_HEADERS: Record<MasterField, string[]> = {
   passOut: ["pass out year", "passout year"],
   interviewProcess: ["interview process"],
   idStatus: ["company id status"],
+  idMonth: ["id month"],
   academySent: ["total academy pool shared"],
   assessedSent: ["no of assessed academy shared"],
   nonAssessedSent: ["no of non assessed academy profiles shared", "no of non assessed academy shared"],
@@ -121,6 +124,7 @@ const MASTER_HEADERS: Record<MasterField, string[]> = {
   crm: ["crm"],
   finalStatus: ["final status"],
   stage: ["current stage of interview", "current stage"],
+  internal: ["internal sheet link", "internal sheet", "internal link"],
   link: ["company sheet link", "company sheet"],
 };
 
@@ -158,6 +162,10 @@ export interface MasterRequirement {
   jdUrl: string | null;
   hubspotUrl: string | null;
   hubspotDealId: string | null;
+  /** 1.13.0: the requirement's internal sheet (applicants exported from the platform, application forms). */
+  internalSheetId: string | null;
+  /** 1.13.0: the month its ID was done ("ID Month", as typed; "" when blank). */
+  idMonth: string;
 }
 
 export interface MasterSheet {
@@ -216,7 +224,7 @@ export function hubspotDealIdOf(link: string): string | null {
   return m ? m[1] : null;
 }
 
-const keyText = (s: string) =>
+export const keyText = (s: string) =>
   s
     .normalize("NFKC")
     .toLowerCase()
@@ -298,6 +306,8 @@ export function parseCrpsMaster(rows: unknown[][], jdLinks: (string | null)[] = 
         jdUrl: linkOf(at(r, "jd", 2000)) ?? linkOf(jdLinks[i]),
         hubspotUrl,
         hubspotDealId: hubspotUrl ? hubspotDealIdOf(hubspotUrl) : null,
+        internalSheetId: col.internal === undefined ? null : sheetIdOf(String(r[col.internal] ?? "")),
+        idMonth: at(r, "idMonth", 40),
       };
       const probe = requirementKey(base, 0);
       const dup = dups.get(probe) ?? 0;
@@ -486,12 +496,12 @@ export function pickTabs(tabs: TabInfo[]): TabInfo[] {
   return tabs.filter((t) => !t.hidden && !/^\s*read\s*-?\s*me\b/i.test(t.title) && !/\breadme\b/i.test(t.title));
 }
 
-const PHONE_HEAD = /\b(mobile|phone|contact)\b/;
-const NOT_PHONE_HEAD = /\b(parent|guardian|father|mother|emergency|spoc|poc|recruiter|company|hr|interviewer|panel)\b/;
-const EMAIL_HEAD = /\b(e ?mail|mail id|mail)\b/;
+export const PHONE_HEAD = /\b(mobile|phone|contact)\b/;
+export const NOT_PHONE_HEAD = /\b(parent|guardian|father|mother|emergency|spoc|poc|recruiter|company|hr|interviewer|panel)\b/;
+export const EMAIL_HEAD = /\b(e ?mail|mail id|mail)\b/;
 const NAME_HEAD = /^(full name|name|candidate name|student name|candidate|name of the candidate|candidate full name)$/;
-const RESUME_HEAD = /\b(resume|cv)\b/;
-const NOT_RESUME_HEAD = /shortlist|select|screen|round|status|score|feedback|remark|review/;
+export const RESUME_HEAD = /\b(resume|cv)\b/;
+export const NOT_RESUME_HEAD = /shortlist|select|screen|round|status|score|feedback|remark|review/;
 const FINAL_HEADS = [/^final status$/, /^final result$/, /^final decision$/, /^final outcome$/, /^overall status$/, /^status$/];
 const ROUND_HEAD =
   /\bround|\btr ?\d|\btr\b|\bhr\b|\bmr\b|\bgd\b|\br\d\b|assessment|assignment|\btest\b|interview|screening|shortlist|\bcall\b|coding|aptitude|technical|managerial|culture|offline drive|\bdrive\b|case study|\btask\b|evaluation|discussion|presentation/;
@@ -593,6 +603,15 @@ export interface TabRow {
   finalStatus: string;
   /** When the resume was uploaded (the 13-digit ms stamp in form-upload links), if the link has one. */
   resumeAt: number | null;
+  /** 1.13.0: the resume link in the row (the resume the company got), when the cell is a link. */
+  resumeUrl: string | null;
+}
+
+/** A resume cell's link: the cell when it is one http(s) link of at most 1,000 characters, else null. */
+export function resumeLinkOf(raw: unknown): string | null {
+  const link = linkOf(String(raw ?? "").trim());
+  // Measured after URL normalisation (it can re-encode and grow): the column holds 1,000 characters.
+  return link && link.length <= 1000 ? link : null;
 }
 
 const RESUME_STAMP = /(?<!\d)(1[5-9]\d{11})(?!\d)/;
@@ -631,6 +650,7 @@ export function readTabRows(rows: unknown[][], cols: TabColumns, now = Date.now(
       rounds,
       finalStatus: cols.finalStatus === null ? "" : cellText(r[cols.finalStatus]),
       resumeAt: cols.resume === null ? null : resumeStamp(String(r[cols.resume] ?? ""), now),
+      resumeUrl: cols.resume === null ? null : resumeLinkOf(r[cols.resume]),
     });
   }
   return out;
@@ -723,7 +743,7 @@ const normValue = (raw: string) =>
     .trim();
 
 /** A screening-type round ("Resume Shortlisted", "Screening Round"): "Selected" there is never the offer. */
-const SCREENING_ROUND = /resume|shortlist|screening|application|profile/i;
+export const SCREENING_ROUND = /resume|shortlist|screening|application|profile/i;
 
 /**
  * One cell → a signal, or null when it says nothing about the process (a name, a date, a score).
@@ -760,7 +780,7 @@ export function outcomeOfValue(raw: string, kind: "final" | "round" = "final", l
  * The rounds in the order they happen: resume shortlisting / screening first (some sheets put
  * "Resume Shortlisted" after Final Status), then sheet order.
  */
-function logical<T extends { name: string }>(rounds: T[]): T[] {
+export function logical<T extends { name: string }>(rounds: T[]): T[] {
   return rounds
     .map((r, i) => ({ r, k: SCREENING_ROUND.test(r.name) ? -1 : i }))
     .sort((a, b) => a.k - b.k)
@@ -907,6 +927,8 @@ export interface ShareRecord {
   status: ShareStatus;
   hash: string;
   resumeAt: number | null;
+  /** 1.13.0: the resume link in the row (null when the cell isn't a link). */
+  resumeUrl: string | null;
 }
 
 export interface SheetTab {
@@ -969,6 +991,7 @@ export function buildShares(sheet: Pick<MasterSheet, "company" | "roles">, tabs:
         status: verdict.status,
         hash: shareHash(row.rounds, row.finalStatus),
         resumeAt: row.resumeAt,
+        resumeUrl: row.resumeUrl,
       });
     }
     shares.push(...byUid.values());

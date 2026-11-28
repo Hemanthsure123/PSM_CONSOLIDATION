@@ -182,6 +182,35 @@ export async function shareWith(fileId: string, emails: string[]): Promise<void>
   });
 }
 
+/**
+ * Gives named people edit access (no email notification). Returns the addresses Google accepted (an
+ * address that isn't a Google account is refused; the others still get access).
+ */
+export async function shareEditWith(fileId: string, emails: string[]): Promise<{ granted: string[]; lastError: string }> {
+  const granted: string[] = [];
+  let lastError = "";
+  await withTeam(async (auth) => {
+    const d = drive(auth);
+    for (const email of [...new Set(emails.map((e) => e.trim().toLowerCase()).filter(Boolean))]) {
+      await d.permissions
+        .create({ fileId, sendNotificationEmail: false, requestBody: { type: "user", role: "writer", emailAddress: email }, supportsAllDrives: true })
+        .then(() => granted.push(email))
+        .catch((err) => {
+          lastError = err instanceof Error ? err.message.slice(0, 160) : String(err);
+        });
+    }
+  });
+  return { granted, lastError };
+}
+
+/** A Google Doc as it is now, exported as a PDF. */
+export async function exportPdf(fileId: string): Promise<Buffer> {
+  return withTeam(async (auth) => {
+    const res = await drive(auth).files.export({ fileId, mimeType: "application/pdf" }, { responseType: "arraybuffer", timeout: 60_000 });
+    return Buffer.from(res.data as ArrayBuffer);
+  });
+}
+
 /** Downloads a file the team account owns (a recording to transcribe again after a failure). */
 export async function downloadFile(fileId: string): Promise<{ bytes: Buffer; mime: string; name: string }> {
   return withTeam(async (auth) => {

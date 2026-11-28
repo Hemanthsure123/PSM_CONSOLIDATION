@@ -21,6 +21,7 @@ import { lastPoolSync } from "@/lib/mobile/pool/sync";
 import { assessmentInfo, type AssessmentScore } from "@/lib/pool/scores/catalogue";
 import { scoresFor } from "@/lib/pool/scores/queries";
 import { rsaDocumentsForPhone } from "@/lib/rsa/list";
+import { feedbackDocsForDetail } from "@/lib/feedback-docs/docs";
 
 /**
  * Academy priority pool — what the app reads and what mentors change.
@@ -143,6 +144,37 @@ export async function assertPoolView(user: RosterUser, uid: string): Promise<{ n
 export async function assertPoolEdit(user: RosterUser, uid: string): Promise<{ name: string }> {
   const r = await editableCandidate(user, uid);
   return { name: r.name };
+}
+
+export interface PoolCandidateAccess {
+  uid: string;
+  name: string;
+  phone: string | null;
+  email: string | null;
+  /** The MENTOR cell as typed ("" = unassigned). */
+  mentorName: string;
+  /** The mentor matched to the roster (null: unassigned, or a name the roster doesn't know). */
+  mentor: RosterUser | null;
+  assigned: boolean;
+  canEdit: boolean;
+  /** Why [canEdit] is false, as the 403 says it. */
+  notYours: string | null;
+}
+
+/** One candidate (404 when not in the pool) with what [user] may do (1.13.0 feedback documents). */
+export async function poolCandidateAccess(user: RosterUser, uid: string, roster?: RosterUser[]): Promise<PoolCandidateAccess> {
+  const r = await visibleCandidate(user, uid, roster);
+  return {
+    uid: r.uid,
+    name: r.name,
+    phone: r.phone,
+    email: r.email,
+    mentorName: r.mentor_name.trim(),
+    mentor: r.mentor,
+    assigned: Boolean(r.mentor_name.trim()),
+    canEdit: r.canEdit,
+    notYours: r.canEdit ? null : notYours(r).message,
+  };
 }
 
 // ── Interviews (EDGE drill-down, by phone) ──────────────────────────────────
@@ -501,7 +533,7 @@ export async function poolDetail(user: RosterUser, uid: string) {
   const roster = await listRoster();
   const r = await visibleCandidate(user, uid, roster);
   const candidateId = Number(r.candidate_id);
-  const [scores, interviews, resumes, events, meetings, rsaDocuments, shares] = await Promise.all([
+  const [scores, interviews, resumes, events, meetings, rsaDocuments, shares, feedbackDocuments] = await Promise.all([
     candidateId > 0 ? scoresFor([candidateId]) : Promise.resolve({} as Record<number, AssessmentScore[]>),
     interviewsByPhone([r.phone ?? ""]),
     query<ResumeRow>(
@@ -518,6 +550,7 @@ export async function poolDetail(user: RosterUser, uid: string) {
     ),
     rsaDocumentsForPhone(r.phone ?? "").catch(() => []),
     sharesByUid([uid]),
+    feedbackDocsForDetail(user, uid, r.canEdit && Boolean(r.mentor_name.trim()), roster).catch(() => []),
   ]);
   const all = (candidateId > 0 ? scores[candidateId] ?? [] : []).map(scoreDto);
   const latest = latestPerAssessment(candidateId > 0 ? scores[candidateId] ?? [] : []);
@@ -551,6 +584,8 @@ export async function poolDetail(user: RosterUser, uid: string) {
     rsaDocuments,
     /** Every company sheet the candidate is in, newest activity first (empty when never shared or never synced). */
     shares: (shares?.get(uid) ?? []).map((x) => x.dto),
+    /** 1.13.0: the candidate's feedback documents, newest period first (at most 5). */
+    feedbackDocuments,
     resumes: resumes.map((x) => resumeDto(x, roster)),
     meetings: meetings.map((m) => ({
       id: m.id,
